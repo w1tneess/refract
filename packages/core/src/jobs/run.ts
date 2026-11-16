@@ -155,7 +155,8 @@ function guarded<T>(work: (ctx: RunContext) => Promise<T>, g: Guard, deps: RunDe
 }
 
 /** Move one job through Queued → Probing → Running → Verifying → Saved (or Rejected/Failed/Canceled). */
-export async function runJob(job: Job, input: Uint8Array, deps: RunDeps): Promise<Job> {
+/** `read` is only called after the size checks pass, so an oversized file is never loaded into memory. */
+export async function runJob(job: Job, read: () => Promise<Uint8Array>, deps: RunDeps): Promise<Job> {
   const { clock, engine, signal } = deps;
   const set = (s: JobState) => {
     if (!canMove(job.state, s)) throw new Error(`Illegal job transition ${job.state} → ${s}`);
@@ -177,6 +178,9 @@ export async function runJob(job: Job, input: Uint8Array, deps: RunDeps): Promis
 
     // Probe: everything here is cheap and runs before any engine work.
     set('Probing');
+    const limits = limitsFor(deps.op, deps.platform);
+    checkLimits(limits, { bytes: job.inputSize });
+    const input = job.inputSize === 0 ? new Uint8Array() : await untilCanceled(read(), signal);
     if (input.length === 0) {
       throw new RefractError('Corrupt', 'the file is empty (0 bytes)', 'Pick the original file again.');
     }
@@ -185,9 +189,6 @@ export async function runJob(job: Job, input: Uint8Array, deps: RunDeps): Promis
       throw new RefractError('Unsupported', "Refract doesn't recognise this file type", 'Phase 1 converts HEIC photos only.');
     }
     job.notice = extensionMismatch(job.inputName, format) ?? undefined;
-    const limits = limitsFor(deps.op, deps.platform);
-    checkLimits(limits, { bytes: input.length });
-
     const route = planRoute(engine.edges, format, deps.target, [engine.kind]);
     const probe = PROBE[format];
     if (!route || !probe) {

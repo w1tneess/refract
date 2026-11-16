@@ -54,7 +54,7 @@ describe('state machine', () => {
 describe('runJob', () => {
   it('goes Queued → Probing → Running → Verifying → Saved and records engine, version and options', async () => {
     const s = setup([edge(ok())]);
-    const j = await runJob(s.job(), heic, s.deps);
+    const j = await runJob(s.job(), async () => heic, s.deps);
     expect(s.states).toEqual(['Probing', 'Running', 'Verifying', 'Saved']);
     expect(j.outputName).toBe('IMG (converted).jpg');
     expect(j.record).toEqual([{ engine: 'wasm', engineVersion: 'test@1', options: { quality: 90 } }]);
@@ -63,9 +63,9 @@ describe('runJob', () => {
 
   it('expects rotated dimensions for a rotated HEIC', async () => {
     const s = setup([edge(ok(300, 400))]);
-    expect((await runJob(s.job(), rotated, s.deps)).state).toBe('Saved');
+    expect((await runJob(s.job(), async () => rotated, s.deps)).state).toBe('Saved');
     const s2 = setup([edge(ok(400, 300))]); // forgot to rotate
-    const j = await runJob(s2.job(), rotated, s2.deps);
+    const j = await runJob(s2.job(), async () => rotated, s2.deps);
     expect(j.state).toBe('Failed');
     expect(j.error?.why).toMatch(/400×300, expected 300×400/);
   });
@@ -73,7 +73,7 @@ describe('runJob', () => {
   it('cancel while running ends Canceled, not Failed, and aborts the engine', async () => {
     let engineAborted = false;
     const s = setup([edge((_i, _o, ctx) => new Promise(() => ctx.signal.addEventListener('abort', () => (engineAborted = true))))]);
-    const p = runJob(s.job(), heic, s.deps);
+    const p = runJob(s.job(), async () => heic, s.deps);
     await flush();
     expect(s.states.at(-1)).toBe('Running');
     s.cancel();
@@ -87,7 +87,7 @@ describe('runJob', () => {
     const s = setup([edge(ok())]);
     const hold = await s.deps.acquire();
     const hold2 = await s.deps.acquire();
-    const p = runJob(s.job(), heic, s.deps);
+    const p = runJob(s.job(), async () => heic, s.deps);
     await flush();
     s.cancel();
     expect((await p).state).toBe('Canceled');
@@ -97,23 +97,31 @@ describe('runJob', () => {
 
   it('empty file → Rejected Corrupt; unknown bytes → Rejected Unsupported', async () => {
     const s = setup([edge(ok())]);
-    const a = await runJob(s.job(), new Uint8Array(), s.deps);
+    const a = await runJob(s.job(), async () => new Uint8Array(), s.deps);
     expect([a.state, a.error?.code]).toEqual(['Rejected', 'Corrupt']);
-    const b = await runJob(s.job(), new Uint8Array(64), s.deps);
+    const b = await runJob(s.job(), async () => new Uint8Array(64), s.deps);
     expect([b.state, b.error?.code]).toEqual(['Rejected', 'Unsupported']);
+  });
+
+  it('over maxMB → Rejected TooLarge without ever reading the file', async () => {
+    const s = setup([edge(ok())]);
+    let read = false;
+    const big = { ...s.job(), inputSize: 500 * 1024 * 1024 };
+    const j = await runJob(big, async () => { read = true; return heic; }, s.deps);
+    expect([j.state, j.error?.code, read]).toEqual(['Rejected', 'TooLarge', false]);
   });
 
   it('over the memory budget → Rejected TooLarge before the engine runs', async () => {
     let ran = false;
     const s = setup([edge(async () => { ran = true; return fakeJpeg(1, 1); }, { memFactor: 10_000 })]);
-    const j = await runJob(s.job(), heic, s.deps);
+    const j = await runJob(s.job(), async () => heic, s.deps);
     expect([j.state, j.error?.code, ran]).toEqual(['Rejected', 'TooLarge', false]);
     expect(j.error?.why).toMatch(/MB of memory/);
   });
 
   it('engine error → Failed with a typed error and the raw text in details', async () => {
     const s = setup([edge(async () => { throw new Error('libheif: bad stream'); })]);
-    const j = await runJob(s.job(), heic, s.deps);
+    const j = await runJob(s.job(), async () => heic, s.deps);
     expect([j.state, j.error?.code]).toEqual(['Failed', 'Internal']);
     expect(j.error?.details).toMatch(/bad stream/);
   });
@@ -136,7 +144,7 @@ describe('runJob', () => {
     const hop1 = edge(async () => { throw new RefractError('Corrupt', "couldn't decode HEIC", 'Try again.'); }, { to: png, lossy: false });
     const hop2 = edge(ok(), { from: png });
     const s = setup([hop1, hop2]);
-    const j = await runJob(s.job(), heic, s.deps);
+    const j = await runJob(s.job(), async () => heic, s.deps);
     expect(j.state).toBe('Failed');
     expect(j.error?.why).toBe("couldn't decode HEIC");
     expect(j.steps.map((x) => [x.id, x.dependsOn, x.status, x.error?.code])).toEqual([
@@ -147,7 +155,7 @@ describe('runJob', () => {
 
   it('a hung engine times out on heartbeat silence → Failed Timeout', async () => {
     const s = setup([edge(() => new Promise(() => {}))]);
-    const p = runJob(s.job(), heic, s.deps);
+    const p = runJob(s.job(), async () => heic, s.deps);
     await flush();
     await s.advance(12_000);
     const j = await p;
@@ -158,7 +166,7 @@ describe('runJob', () => {
   it('the clock stops while the tab is hidden, so a throttled job is not killed', async () => {
     let finish!: (b: Uint8Array) => void;
     const s = setup([edge((_i, _o, ctx: RunContext) => { ctx.heartbeat(); return new Promise((r) => (finish = r)); })]);
-    const p = runJob(s.job(), heic, s.deps);
+    const p = runJob(s.job(), async () => heic, s.deps);
     await flush();
     s.setPaused(true);
     await s.advance(120_000);
