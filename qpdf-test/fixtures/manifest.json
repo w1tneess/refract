@@ -1,0 +1,53 @@
+{
+  "pages": 3,
+  "cases": [
+    {
+      "name": "aes256",
+      "file": "aes256.pdf",
+      "password": "user-pw-123",
+      "expect": "unlocked"
+    },
+    {
+      "name": "aes128",
+      "file": "aes128.pdf",
+      "password": "user-pw-123",
+      "expect": "unlocked"
+    },
+    {
+      "name": "rc4-128",
+      "file": "rc4-128.pdf",
+      "password": "user-pw-123",
+      "expect": "unlocked"
+    },
+    {
+      "name": "owner-only (opens without password)",
+      "file": "owner-only.pdf",
+      "password": "",
+      "expect": "unlocked"
+    },
+    {
+      "name": "owner password instead of user",
+      "file": "aes256.pdf",
+      "password": "owner-pw-456",
+      "expect": "unlocked"
+    },
+    {
+      "name": "wrong password",
+      "file": "aes256.pdf",
+      "password": "nope",
+      "expect": "wrong-password"
+    },
+    {
+      "name": "no password given",
+      "file": "aes256.pdf",
+      "password": "",
+      "expect": "wrong-password"
+    },
+    {
+      "name": "not encrypted",
+      "file": "plain.pdf",
+      "password": "",
+      "expect": "unlocked"
+    }
+  ]
+}

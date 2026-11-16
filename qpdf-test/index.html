@@ -1,0 +1,54 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>qpdf-wasm unlock test</title>
+<style>
+  body { font: 14px system-ui, sans-serif; margin: 24px; background: #fff; color: #111; }
+  table { border-collapse: collapse; } td, th { border: 1px solid #ccc; padding: 4px 8px; text-align: left; }
+  .pass { color: #0a7d32; font-weight: 600; } .fail { color: #b3261e; font-weight: 600; }
+  pre { font-size: 12px; white-space: pre-wrap; max-width: 900px; }
+</style>
+<h1>qpdf-wasm unlock test</h1>
+<p id="status">Running…</p>
+<table id="t"><tr><th>Case</th><th>Expected</th><th>Exit code</th><th>Output</th><th>Load / run ms</th><th>Result</th></tr></table>
+<pre id="log"></pre>
+<script>
+const worker = new Worker('worker.js');
+let seq = 0;
+const run = (bytes, password) => new Promise((resolve) => {
+  const id = ++seq;
+  const onMsg = ({ data }) => { if (data.id === id) { worker.removeEventListener('message', onMsg); resolve(data); } };
+  worker.addEventListener('message', onMsg);
+  worker.postMessage({ id, bytes, password });
+});
+
+(async () => {
+  const { cases } = await (await fetch('fixtures/manifest.json')).json();
+  const results = [];
+  for (const c of cases) {
+    const bytes = await (await fetch('fixtures/' + c.file)).arrayBuffer();
+    const r = await run(bytes, c.password);
+    // qpdf exit codes: 0 ok, 3 ok with warnings, 2 error (wrong password among them).
+    const unlocked = !r.crash && (r.code === 0 || r.code === 3) && r.out && r.out.byteLength > 0;
+    const wrongPw = !r.crash && r.code === 2 && /invalid password/i.test(r.decryptLog.join('\n'));
+    const got = unlocked ? 'unlocked' : wrongPw ? 'wrong-password' : 'error';
+    const pass = got === c.expect;
+    let saved = '';
+    if (unlocked) {
+      const name = c.name.replace(/[^a-z0-9]+/gi, '_') + '.pdf';
+      await fetch('/save/' + name, { method: 'POST', body: r.out });
+      saved = name;
+    }
+    results.push({ ...c, got, pass, code: r.code, saved, loadMs: r.loadMs, runMs: r.runMs,
+                   log: (r.crash || [...(r.showLog || []), ...(r.decryptLog || [])].join('\n')) });
+    const tr = document.getElementById('t').insertRow();
+    [c.name, c.expect, String(r.code ?? 'crash'), saved || got, `${r.loadMs} / ${r.runMs}`]
+      .forEach((v) => (tr.insertCell().textContent = v));
+    const cell = tr.insertCell(); cell.textContent = pass ? 'PASS' : 'FAIL'; cell.className = pass ? 'pass' : 'fail';
+    document.getElementById('log').textContent += `--- ${c.name}\n${results.at(-1).log}\n`;
+  }
+  await fetch('/save/results.json', { method: 'POST', body: JSON.stringify({ ua: navigator.userAgent, results }, null, 2) });
+  const passed = results.filter((x) => x.pass).length;
+  document.getElementById('status').textContent = `${passed}/${results.length} passed`;
+  window.__done = { passed, total: results.length };
+})();
+</script>

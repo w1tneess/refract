@@ -1,0 +1,109 @@
+{
+  "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Claude/5.11492.2 Chrome/156.0.8078.75 Safari/537.36 MSIX MSStore",
+  "results": [
+    {
+      "name": "aes256",
+      "file": "aes256.pdf",
+      "password": "user-pw-123",
+      "expect": "unlocked",
+      "got": "unlocked",
+      "pass": true,
+      "code": 0,
+      "saved": "aes256.pdf",
+      "loadMs": 14,
+      "runMs": 68,
+      "log": "R = 6\nP = 0\nUser password = user-pw-123\nSupplied password is user password\nextract for accessibility: not allowed\nextract for any purpose: not allowed\nprint low resolution: not allowed\nprint high resolution: not allowed\nmodify document assembly: not allowed\nmodify forms: not allowed\nmodify annotations: not allowed\nmodify other: not allowed\nmodify anything: not allowed\nstream encryption method: AESv3\nstring encryption method: AESv3\nfile encryption method: AESv3"
+    },
+    {
+      "name": "aes128",
+      "file": "aes128.pdf",
+      "password": "user-pw-123",
+      "expect": "unlocked",
+      "got": "unlocked",
+      "pass": true,
+      "code": 0,
+      "saved": "aes128.pdf",
+      "loadMs": 7,
+      "runMs": 5,
+      "log": "R = 4\nP = 0\nUser password = user-pw-123\nSupplied password is user password\nextract for accessibility: not allowed\nextract for any purpose: not allowed\nprint low resolution: not allowed\nprint high resolution: not allowed\nmodify document assembly: not allowed\nmodify forms: not allowed\nmodify annotations: not allowed\nmodify other: not allowed\nmodify anything: not allowed\nstream encryption method: AESv2\nstring encryption method: AESv2\nfile encryption method: AESv2"
+    },
+    {
+      "name": "rc4-128",
+      "file": "rc4-128.pdf",
+      "password": "user-pw-123",
+      "expect": "unlocked",
+      "got": "unlocked",
+      "pass": true,
+      "code": 0,
+      "saved": "rc4_128.pdf",
+      "loadMs": 9,
+      "runMs": 6,
+      "log": "R = 3\nP = 0\nUser password = user-pw-123\nSupplied password is user password\nextract for accessibility: not allowed\nextract for any purpose: not allowed\nprint low resolution: not allowed\nprint high resolution: not allowed\nmodify document assembly: not allowed\nmodify forms: not allowed\nmodify annotations: not allowed\nmodify other: not allowed\nmodify anything: not allowed"
+    },
+    {
+      "name": "owner-only (opens without password)",
+      "file": "owner-only.pdf",
+      "password": "",
+      "expect": "unlocked",
+      "got": "unlocked",
+      "pass": true,
+      "code": 0,
+      "saved": "owner_only_opens_without_password_.pdf",
+      "loadMs": 7,
+      "runMs": 39,
+      "log": "R = 6\nP = 0\nUser password = \nSupplied password is user password\nextract for accessibility: not allowed\nextract for any purpose: not allowed\nprint low resolution: not allowed\nprint high resolution: not allowed\nmodify document assembly: not allowed\nmodify forms: not allowed\nmodify annotations: not allowed\nmodify other: not allowed\nmodify anything: not allowed\nstream encryption method: AESv3\nstring encryption method: AESv3\nfile encryption method: AESv3"
+    },
+    {
+      "name": "owner password instead of user",
+      "file": "aes256.pdf",
+      "password": "owner-pw-456",
+      "expect": "unlocked",
+      "got": "unlocked",
+      "pass": true,
+      "code": 0,
+      "saved": "owner_password_instead_of_user.pdf",
+      "loadMs": 8,
+      "runMs": 50,
+      "log": "R = 6\nP = 0\nUser password = \nSupplied password is owner password\nextract for accessibility: not allowed\nextract for any purpose: not allowed\nprint low resolution: not allowed\nprint high resolution: not allowed\nmodify document assembly: not allowed\nmodify forms: not allowed\nmodify annotations: not allowed\nmodify other: not allowed\nmodify anything: not allowed\nstream encryption method: AESv3\nstring encryption method: AESv3\nfile encryption method: AESv3"
+    },
+    {
+      "name": "wrong password",
+      "file": "aes256.pdf",
+      "password": "nope",
+      "expect": "wrong-password",
+      "got": "wrong-password",
+      "pass": true,
+      "code": 2,
+      "saved": "",
+      "loadMs": 7,
+      "runMs": 17,
+      "log": "this.program: /in.pdf: invalid password\nthis.program: /in.pdf: invalid password"
+    },
+    {
+      "name": "no password given",
+      "file": "aes256.pdf",
+      "password": "",
+      "expect": "wrong-password",
+      "got": "wrong-password",
+      "pass": true,
+      "code": 2,
+      "saved": "",
+      "loadMs": 6,
+      "runMs": 15,
+      "log": "this.program: /in.pdf: invalid password\nthis.program: /in.pdf: invalid password"
+    },
+    {
+      "name": "not encrypted",
+      "file": "plain.pdf",
+      "password": "",
+      "expect": "unlocked",
+      "got": "unlocked",
+      "pass": true,
+      "code": 0,
+      "saved": "not_encrypted.pdf",
+      "loadMs": 7,
+      "runMs": 2,
+      "log": "File is not encrypted"
+    }
+  ]
+}
