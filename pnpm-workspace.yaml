@@ -1,0 +1,6 @@
+packages:
+  - packages/*
+  - apps/*
+# Two-week rule for the whole dependency tree (minutes).
+minimumReleaseAge: 20160
+savePrefix: ''
