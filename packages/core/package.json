@@ -5,5 +5,5 @@
   "license": "GPL-3.0-or-later",
   "type": "module",
   "exports": "./src/index.ts",
-  "scripts": { "typecheck": "tsc -p .", "test": "vitest run" }
+  "scripts": { "typecheck": "tsc -p . && tsc -p tsconfig.test.json", "test": "vitest run" }
 }

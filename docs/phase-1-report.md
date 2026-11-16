@@ -45,7 +45,7 @@ All direct dependencies are pinned exactly and at least two weeks old; `minimumR
 
 | Layer | Count | Result (local, Nov 16) |
 | --- | --- | --- |
-| Unit (Vitest, `core`) | 36 | 36 passed |
+| Unit (Vitest, `core`) | 36 | 36 passed; test files also type-checked (strict) |
 | E2E (Playwright, Chromium 1254 + Firefox 157) | 9 specs × 2 browsers + timings | 18 passed, 2 skipped (iPhone fixture missing) |
 | CI (`.github/workflows/ci.yml`) | typecheck, unit, e2e on every push | **Written but never run**: nothing has been pushed |
 
