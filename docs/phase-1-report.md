@@ -82,6 +82,11 @@ Options UI and remembered options, "Reset to defaults", Retry, ZIP / "Save all a
 
 ## Deviations from the brief to confirm
 
+I made these choices without asking. Please confirm or overrule them:
+
+- **Orientation for HEIC comes from `irot`/`imir`, not EXIF.** The brief says "apply EXIF orientation, then strip it" and lists "EXIF rotation" in Probe. In HEIF the container's `irot`/`imir` boxes are the source of truth and libheif applies them; applying the EXIF tag as well would rotate iPhone photos twice. EXIF orientation still matters for JPEG inputs (phase 3).
+- **Heartbeat silence window is 10 s + 1 s per megapixel, not a flat 10 s.** The mozjpeg encode is one synchronous call, so the worker can't send a heartbeat every second during it.
+- **The job timeout scales with megapixels** (30 s + 3 s/MP), not with file size. Pixel count predicts the work; HEIC file size doesn't.
 - `Edge.run(input, opts, ctx)` takes a context `{signal, heartbeat, report}` instead of a bare `signal`, so the watchdog can hear from the engine.
 - `memFactor` for images multiplies decoded RGBA (w × h × 4), not file size, as the brief's step 4 suggests.
 - `core` gets time from an injected clock rather than timer globals, so it stays free of DOM and Node APIs and its tests are deterministic.
