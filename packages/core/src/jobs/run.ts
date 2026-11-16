@@ -212,7 +212,7 @@ export async function runJob(job: Job, read: () => Promise<Uint8Array>, deps: Ru
     const mp = (width * height) / 1e6;
     const runGuard: Guard = {
       timeoutMs: 30_000 + 3_000 * mp,
-      silenceMs: 10_000 + 500 * mp, // a big synchronous WASM decode can't post heartbeats
+      silenceMs: 10_000 + 1_000 * mp, // a big synchronous WASM decode/encode can't post heartbeats (24 MP encode: ~3 s here, far more on phones)
       timeoutWhy: `it took longer than ${Math.round((30_000 + 3_000 * mp) / 1000)} seconds`,
     };
     const tRun = clock.now();
