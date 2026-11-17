@@ -10,8 +10,16 @@ const EXTENSIONS: Record<Format, string[]> = {
 
 const LABEL: Record<Format, string> = { heic: 'HEIC', jpeg: 'JPEG' };
 
+declare const TextDecoder: {
+  new (label?: string, options?: { fatal?: boolean; ignoreBOM?: boolean }): {
+    decode(input?: Uint8Array | ArrayBufferView | ArrayBuffer, options?: { stream?: boolean }): string;
+  };
+};
+
+const asciiDecoder = new TextDecoder();
+
 export function ascii(b: Uint8Array, start: number, end: number): string {
-  return String.fromCharCode(...b.subarray(start, end));
+  return asciiDecoder.decode(b.subarray(start, end));
 }
 
 /** Identify a file by its first bytes. The extension is never consulted. */
