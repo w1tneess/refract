@@ -3,7 +3,7 @@
 An open-source, local-first file converter: a web app (WASM) and a pure native Rust desktop app (Slint UI).
 Files are converted entirely on your own machine. No uploads, no accounts, no ads, no telemetry.
 
-**Status**: Phase 3 (Web v1) complete. See [docs/phase-3-report.md](docs/phase-3-report.md).
+**Status**: Phase 3 (Web v1) & Phase 4 (Desktop v1) complete. See [docs/phase-3-report.md](docs/phase-3-report.md) & [docs/phase-4-report.md](docs/phase-4-report.md).
 
 **Licence**: GPL-3.0-or-later (see [LICENSE](LICENSE)).
 
@@ -53,6 +53,7 @@ Refract Web v1 runs 12 dedicated file conversion and transformation tools across
 ### Prerequisites
 - Node.js ≥ 20
 - pnpm ≥ 9
+- Rust ≥ 1.80 (for native desktop app)
 
 ### Development & Testing
 
@@ -74,4 +75,11 @@ pnpm --filter @refract/web build
 
 # Run Playwright E2E tests (Chromium & Firefox)
 pnpm --filter @refract/web e2e
+
+# Run Rust desktop tests & checks
+pnpm desktop:check
+pnpm desktop:test
+
+# Start the desktop app in dev mode
+pnpm desktop:dev
 ```

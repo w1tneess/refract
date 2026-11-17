@@ -167,16 +167,34 @@ pub fn reorder_pdf(bytes: &[u8], order_str: &str) -> Result<Vec<u8>, RefractErro
         return compress_pdf(bytes);
     }
 
-    // Extract pages in new order into a fresh document
-    let mut new_doc = Document::with_version(doc.version.as_str());
-    let mut new_pages = Vec::new();
+    let pages_ref = doc
+        .catalog()
+        .map_err(|e| RefractError::with_details(ErrorCode::DamagedFile, "Missing PDF catalog", e.to_string()))?
+        .get(b"Pages")
+        .map_err(|e| RefractError::with_details(ErrorCode::DamagedFile, "Missing PDF Pages reference", e.to_string()))?
+        .as_reference()
+        .map_err(|e| RefractError::with_details(ErrorCode::DamagedFile, "Invalid PDF Pages reference", e.to_string()))?;
+
+    let new_kids: Vec<lopdf::Object> = order
+        .iter()
+        .map(|&p| lopdf::Object::Reference(pages[&p]))
+        .collect();
 
     for &page_num in &order {
-        if let Some(&page_id) = pages.get(&page_num) {
-            let new_id = new_doc.add_object(doc.get_object(page_id).unwrap().clone());
-            new_pages.push(new_id);
+        let page_id = pages[&page_num];
+        if let Ok(page_dict) = doc.get_object_mut(page_id).and_then(|o| o.as_dict_mut()) {
+            page_dict.set("Parent", lopdf::Object::Reference(pages_ref));
         }
     }
+
+    let pages_dict = doc
+        .get_object_mut(pages_ref)
+        .map_err(|e| RefractError::with_details(ErrorCode::DamagedFile, "Failed to get Pages object", e.to_string()))?
+        .as_dict_mut()
+        .map_err(|e| RefractError::with_details(ErrorCode::DamagedFile, "Pages object is not a dictionary", e.to_string()))?;
+
+    pages_dict.set("Kids", lopdf::Object::Array(new_kids));
+    pages_dict.set("Count", lopdf::Object::Integer(total_pages as i64));
 
     let mut out = Vec::new();
     doc.save_to(&mut out).map_err(|e| {
@@ -184,6 +202,65 @@ pub fn reorder_pdf(bytes: &[u8], order_str: &str) -> Result<Vec<u8>, RefractErro
     })?;
 
     Ok(out)
+}
+
+/// Split a PDF document into multiple PDFs by page ranges.
+/// e.g. "1-2, 3" creates two PDFs: one with pages 1-2, one with page 3.
+pub fn split_pdf(bytes: &[u8], ranges_spec: &str) -> Result<Vec<(String, Vec<u8>)>, RefractError> {
+    let doc = Document::load_mem(bytes).map_err(|e| {
+        RefractError::with_details(ErrorCode::DamagedFile, "Failed to load PDF for splitting", e.to_string())
+    })?;
+
+    let pages = doc.get_pages();
+    let total_pages = pages.len() as u32;
+    let groups = parse_ranges(ranges_spec, total_pages)?;
+    let mut outputs = Vec::new();
+
+    for group in groups {
+        let mut group_doc = doc.clone();
+        let pages_ref = group_doc
+            .catalog()
+            .map_err(|e| RefractError::with_details(ErrorCode::DamagedFile, "Missing PDF catalog", e.to_string()))?
+            .get(b"Pages")
+            .map_err(|e| RefractError::with_details(ErrorCode::DamagedFile, "Missing PDF Pages reference", e.to_string()))?
+            .as_reference()
+            .map_err(|e| RefractError::with_details(ErrorCode::DamagedFile, "Invalid PDF Pages reference", e.to_string()))?;
+
+        let group_kids: Vec<lopdf::Object> = group
+            .iter()
+            .map(|&p| lopdf::Object::Reference(pages[&p]))
+            .collect();
+
+        for &page_num in &group {
+            let page_id = pages[&page_num];
+            if let Ok(page_dict) = group_doc.get_object_mut(page_id).and_then(|o| o.as_dict_mut()) {
+                page_dict.set("Parent", lopdf::Object::Reference(pages_ref));
+            }
+        }
+
+        let pages_dict = group_doc
+            .get_object_mut(pages_ref)
+            .map_err(|e| RefractError::with_details(ErrorCode::DamagedFile, "Failed to get Pages object", e.to_string()))?
+            .as_dict_mut()
+            .map_err(|e| RefractError::with_details(ErrorCode::DamagedFile, "Pages object is not a dictionary", e.to_string()))?;
+
+        pages_dict.set("Kids", lopdf::Object::Array(group_kids));
+        pages_dict.set("Count", lopdf::Object::Integer(group.len() as i64));
+
+        let mut out = Vec::new();
+        group_doc.save_to(&mut out).map_err(|e| {
+            RefractError::with_details(ErrorCode::EngineFailed, "Failed to save split PDF", e.to_string())
+        })?;
+
+        let label = if group.len() == 1 {
+            format!("p{}", group[0])
+        } else {
+            format!("p{}-{}", group[0], group.last().unwrap())
+        };
+        outputs.push((label, out));
+    }
+
+    Ok(outputs)
 }
 
 /// Merge multiple PDF documents into one in the provided order.

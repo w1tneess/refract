@@ -156,6 +156,7 @@ fn main() -> Result<(), slint::PlatformError> {
             let audio_bitrate: u32 = window.get_opt_audio_bitrate().parse().unwrap_or(192);
             let trim_start = window.get_opt_trim_start().to_string();
             let trim_end = window.get_opt_trim_end().to_string();
+            let pdf_ranges = window.get_opt_pdf_ranges().to_string();
             let pdf_order = window.get_opt_pdf_order().to_string();
 
             let worker_window = window_weak.clone();
@@ -200,6 +201,7 @@ fn main() -> Result<(), slint::PlatformError> {
                         audio_bitrate,
                         &trim_start,
                         &trim_end,
+                        &pdf_ranges,
                         &pdf_order,
                     );
 
@@ -272,6 +274,7 @@ fn process_job(
     audio_bitrate: u32,
     trim_start: &str,
     trim_end: &str,
+    pdf_ranges: &str,
     pdf_order: &str,
 ) -> Result<PathBuf, String> {
     let parent = job.input_path.parent().unwrap_or(Path::new("."));
@@ -322,10 +325,28 @@ fn process_job(
             std::fs::write(&out_path, out_bytes).map_err(|e| e.to_string())?;
             Ok(out_path)
         }
+        "Split PDF" => {
+            let bytes = std::fs::read(&job.input_path).map_err(|e| e.to_string())?;
+            let parts = refract_engine::pdf::split_pdf(&bytes, pdf_ranges).map_err(|e| e.to_string())?;
+            let mut last_path = parent.to_path_buf();
+            for (label, part_bytes) in parts {
+                let out_path = parent.join(format!("{}-{}.pdf", stem, label));
+                std::fs::write(&out_path, part_bytes).map_err(|e| e.to_string())?;
+                last_path = out_path;
+            }
+            Ok(last_path)
+        }
         "Reorder PDF" => {
             let bytes = std::fs::read(&job.input_path).map_err(|e| e.to_string())?;
             let out_bytes = refract_engine::pdf::reorder_pdf(&bytes, pdf_order).map_err(|e| e.to_string())?;
             let out_path = parent.join(format!("{} (reordered).pdf", stem));
+            std::fs::write(&out_path, out_bytes).map_err(|e| e.to_string())?;
+            Ok(out_path)
+        }
+        "Merge PDF" => {
+            let bytes = std::fs::read(&job.input_path).map_err(|e| e.to_string())?;
+            let out_bytes = refract_engine::pdf::compress_pdf(&bytes).map_err(|e| e.to_string())?;
+            let out_path = parent.join(format!("{} (merged).pdf", stem));
             std::fs::write(&out_path, out_bytes).map_err(|e| e.to_string())?;
             Ok(out_path)
         }

@@ -137,5 +137,38 @@ mod tests {
         assert_eq!(refract_core::detect(&merged), Some(Format::Pdf));
     }
 
+    #[test]
+    fn test_pdf_reorder() {
+        let plain_pdf = std::fs::read(fixture_path("plain.pdf")).expect("Read plain.pdf");
+        let original_doc = lopdf::Document::load_mem(&plain_pdf).expect("Load plain.pdf");
+        let orig_pages = original_doc.get_pages();
+        let p1 = orig_pages[&1];
+        let p2 = orig_pages[&2];
+        let p3 = orig_pages[&3];
 
+        let reordered = pdf::reorder_pdf(&plain_pdf, "3, 1, 2").expect("Reorder PDF");
+        assert!(!reordered.is_empty());
+        assert_eq!(refract_core::detect(&reordered), Some(Format::Pdf));
+
+        let reordered_doc = lopdf::Document::load_mem(&reordered).expect("Load reordered PDF");
+        let new_pages = reordered_doc.get_pages();
+        assert_eq!(new_pages.len(), 3);
+        // Verify page order: new page 1 is old page 3, new page 2 is old page 1, new page 3 is old page 2
+        assert_eq!(new_pages[&1], p3);
+        assert_eq!(new_pages[&2], p1);
+        assert_eq!(new_pages[&3], p2);
+    }
+
+    #[test]
+    fn test_pdf_split() {
+        let plain_pdf = std::fs::read(fixture_path("plain.pdf")).expect("Read plain.pdf");
+        let parts = pdf::split_pdf(&plain_pdf, "1-2, 3").expect("Split PDF");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].0, "p1-2");
+        assert_eq!(parts[1].0, "p3");
+        let info1 = pdf::probe_pdf(&parts[0].1).expect("Probe part 1");
+        assert_eq!(info1.page_count, 2);
+        let info2 = pdf::probe_pdf(&parts[1].1).expect("Probe part 2");
+        assert_eq!(info2.page_count, 1);
+    }
 }
