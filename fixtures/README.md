@@ -22,6 +22,10 @@ Tests check type, dimensions and size range, never exact bytes.
 | `5pages.pdf` | 5-page PDF for split/reorder | Saved |
 | `locked.pdf` | AES-256 encrypted PDF (user password: `user-pw-123`) | NeedsPassword → Unlocked |
 | `owner-only.pdf` | Encrypted PDF with empty user password | Opens without prompt |
+| `sound.wav` | 3 s sine wave WAV | Saved |
+| `sound.mp3` | 3 s sine wave MP3 | Saved |
+| `sound.m4a` | 3 s sine wave M4A | Saved |
+| `sound.ogg` | 3 s sine wave OGG | Saved |
 | `iphone.heic` | **Missing: add a real iPhone photo** | Saved, size from `iphone.json` |
 
 Regenerate the synthetic files with `uv run --with pillow-heif==1.8.1 python fixtures/make_fixtures.py`.

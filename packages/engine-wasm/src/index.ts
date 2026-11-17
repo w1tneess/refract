@@ -1,7 +1,7 @@
 import { RefractError, formatsOfKind, type Edge, type Engine, type Format, type Item, type RunContext } from '@refract/core';
 import type { WorkerRequest, WorkerResponse } from './protocol.ts';
 
-export const ENGINE_VERSION = 'libheif-js@1.23.5+@jsquash/jpeg@1.6.0+@jsquash/png@3.1.1+@jsquash/webp@1.5.0+@jsquash/resize@2.1.1+pdf-lib@1.17.1+pdfjs-dist@6.5.438+@neslinesli93/qpdf-wasm@0.3.0';
+export const ENGINE_VERSION = 'libheif-js@1.23.5+@jsquash/jpeg@1.6.0+@jsquash/png@3.1.1+@jsquash/webp@1.5.0+@jsquash/resize@2.1.1+pdf-lib@1.17.1+pdfjs-dist@6.5.438+@neslinesli93/qpdf-wasm@0.3.0+@ffmpeg/ffmpeg@0.12.15+@ffmpeg/core@0.12.10';
 
 type Done = Extract<WorkerResponse, { type: 'done' }>;
 
@@ -53,6 +53,16 @@ function edges(): Edge[] {
         from, to, engine: 'wasm', engineVersion: ENGINE_VERSION, options: [],
         lossy: to !== 'png', memFactor: 3, // RGBA in the decoder heap + JS copy + encoder heap copy
         run: (items, opts, ctx) => run('image.convert', items, { ...opts, to }, ctx),
+      });
+    }
+  }
+  for (const from of formatsOfKind('audio')) {
+    for (const to of formatsOfKind('audio')) {
+      if (from === to) continue;
+      out.push({
+        from, to, engine: 'wasm', engineVersion: ENGINE_VERSION, options: [],
+        lossy: to !== 'wav', memFactor: 4,
+        run: (items, opts, ctx) => run('audio.convert', items, { ...opts, to }, ctx),
       });
     }
   }

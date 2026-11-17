@@ -68,6 +68,11 @@ export async function expectPdf(bytes: Uint8Array, pages?: number) {
   }
 }
 
+export function expectAudio(bytes: Uint8Array, format: Format) {
+  expect(detect(bytes)).toBe(format);
+  expect(bytes.length).toBeGreaterThan(100);
+}
+
 /** Decode an image in the page and read the colour at (x, y). */
 export async function pixel(page: Page, bytes: Uint8Array, x: number, y: number, mime?: string) {
   const detected = detect(bytes);
