@@ -1,0 +1,103 @@
+import { Button, VerticalBox, HorizontalBox, ScrollView } from "std-widgets.slint";
+
+export component MainWindow inherits Window {
+    title: "Refract";
+    preferred-width: 720px;
+    preferred-height: 560px;
+    background: #18181b;
+
+    callback pick_files();
+    callback clear_jobs();
+
+    in-out property <string> active_tool: "Convert image";
+    in-out property <int> job_count: 0;
+
+    VerticalBox {
+        padding: 24px;
+        spacing: 16px;
+
+        // Header
+        HorizontalBox {
+            Text {
+                text: "Refract";
+                font-size: 24px;
+                font-weight: 700;
+                color: #fafafa;
+            }
+            Text {
+                text: "Native File Converter";
+                font-size: 14px;
+                color: #a1a1aa;
+                vertical-alignment: center;
+            }
+        }
+
+        // Dropzone area
+        Rectangle {
+            height: 140px;
+            border-radius: 8px;
+            border-width: 2px;
+            border-color: #3f3f46;
+            background: #27272a;
+
+            VerticalBox {
+                alignment: center;
+                spacing: 8px;
+
+                Text {
+                    text: "Drop files here or click to select";
+                    font-size: 16px;
+                    font-weight: 600;
+                    color: #fafafa;
+                    horizontal-alignment: center;
+                }
+                Text {
+                    text: "Files are processed locally using native high-speed engines";
+                    font-size: 13px;
+                    color: #a1a1aa;
+                    horizontal-alignment: center;
+                }
+                HorizontalBox {
+                    alignment: center;
+                    Button {
+                        text: "Choose Files";
+                        clicked => { root.pick_files(); }
+                    }
+                }
+            }
+        }
+
+        // Job queue status
+        HorizontalBox {
+            Text {
+                text: "Queue: " + root.job_count + " files";
+                font-size: 14px;
+                color: #d4d4d8;
+                vertical-alignment: center;
+            }
+            Button {
+                text: "Clear All";
+                enabled: root.job_count > 0;
+                clicked => { root.clear_jobs(); }
+            }
+        }
+
+        // Queue area
+        Rectangle {
+            border-radius: 8px;
+            background: #27272a;
+            border-width: 1px;
+            border-color: #3f3f46;
+
+            VerticalBox {
+                alignment: center;
+                if root.job_count == 0: Text {
+                    text: "No files in queue. Drop files above to begin.";
+                    font-size: 14px;
+                    color: #71717a;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+    }
+}

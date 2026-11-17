@@ -97,16 +97,17 @@ The browser can handle images, audio, short video and most PDF jobs. Office docu
 | Background tabs | The OS may pause the worker if the tab is hidden ([freetoolonline](https://freetoolonline.com/guides/en/ffmpeg-online-conversion-stalled-three-fixes.html)) |
 | Office → PDF | LibreOffice in WASM is \~150 MB and unstable in 2026; not realistic in the browser ([DEV](https://dev.to/digitalofen/i-tried-running-file-conversion-fully-in-the-browser-wasm-libreoffice-ffmpeg-57mh)) |
 
-**Desktop framework: Tauri 2 over Electron**
+**Desktop framework: Pure Native Rust + Slint over Tauri / Electron**
 
-|  | Tauri 2 | Electron |
-| --- | --- | --- |
-| Minimal installer | \~2.5–3 MB | \~85 MB |
-| Idle memory | \~30–50 MB | \~200–300 MB |
-| Backend | Rust | Node.js |
-| Webview | OS webview (WebView2 on Windows) | Bundled Chromium |
+|  | Pure Native Rust (Slint) | Tauri 2 | Electron |
+| --- | --- | --- | --- |
+| Minimal installer | ~10–15 MB (standalone single binary) | ~2.5–3 MB + WebView2 | ~85 MB |
+| Idle memory | ~15–30 MB | ~30–50 MB | ~200–300 MB |
+| Backend | Pure Rust (`crates/refract-core`) | Rust | Node.js |
+| Webview / Runtime | None (GPU accelerated FemtoVG/Skia) | OS webview (WebView2) | Bundled Chromium |
+| Cold startup | < 20 ms | ~150–300 ms | ~800–1500 ms |
 
-Figures: [tech-insider](https://tech-insider.org/tauri-vs-electron-2026/), [Moklabs](https://moklabs-research.pages.dev/reports/technology/2026-03-20-tauri-vs-electron-desktop-framework-decision). Tauri wins on size, which matters because the app will also bundle FFmpeg. The cost is a small Rust backend to write and maintain.
+Pure native Rust with Slint UI eliminates all webview dependencies (no Edge WebView2 installation requirement on Windows, no WebKitGTK on Linux), guarantees consistent cross-platform rendering, enables true zero-overhead file streaming and multithreading, and uses the shared native pipeline in `crates/refract-core`.
 
 ## Project scope
 
@@ -136,19 +137,22 @@ v1 is a few common jobs done very well on both web and desktop, not 200 formats.
 
 ## Architecture and stack
 
-One UI and one job format, with two engines behind it: WebAssembly in the browser, native tools on desktop. The UI never knows which engine ran.
+Two presentation tiers sharing one unified job design and safety model:
+- **Web App**: React 19 + TypeScript on Vite, backed by `@refract/engine-wasm` in Web Workers.
+- **Desktop App**: Pure Native Rust using **Slint GUI**, backed by `crates/refract-core` and native tool sidecars / C libraries.
 
-1. **UI** (shared): Vite + TypeScript + React or Svelte. Drag-and-drop, queue, settings.
-2. **Job layer** (shared): one interface, e.g. `convert({input, from, to, options}) → output`. Picks an engine.
-3. **Web engine**: runs in Web Workers so the page never freezes.
-   - Images: WASM codecs (e.g. jSquash) + a HEIC decoder
-   - PDF: pdf-lib (edit/merge) + pdf.js (render to images)
-   - Audio/short video: ffmpeg.wasm, lazy-loaded
-4. **Desktop engine**: Tauri 2 (Rust) calling bundled tools as sidecars.
-   - FFmpeg (media), libvips or ImageMagick (images), Ghostscript (PDF compress)
+1. **Web UI**: Vite + TypeScript + React 19. Drag-and-drop, queue, settings.
+2. **Web engine**: runs in Web Workers via `@refract/engine-wasm`.
+   - Images: WASM codecs (`@jsquash/*`) + `libheif-js`
+   - PDF: `pdf-lib` + `pdfjs-dist` + QPDF WASM
+   - Audio: `@ffmpeg/ffmpeg` WASM, lazy-loaded
+3. **Desktop app & engine (Pure Rust)**:
+   - Slint UI: Declarative, hardware-accelerated (FemtoVG/Skia), native file drag-and-drop, zero webview dependencies.
+   - `crates/refract-core`: Native Rust crate matching `@refract/core` logic (magic bytes detection, header probing, tool limits, job state machine).
+   - Native engines: Native FFmpeg (media), Ghostscript / QPDF (PDF), libvips / native image codecs.
    - LibreOffice: detect an existing install instead of bundling it (it is several hundred MB)
-5. **Hosting**: static site on Cloudflare Pages, e.g. a subdomain of advaitachandra.in. Needs COOP/COEP headers for multithreaded ffmpeg.wasm.
-6. **Releases**: GitHub Actions builds Windows/macOS/Linux installers; GitHub Releases for downloads.
+4. **Hosting**: static site on Cloudflare Pages (with COOP/COEP headers).
+5. **Releases**: GitHub Actions builds Windows/macOS/Linux standalone installers; GitHub Releases for downloads.
 
 **Licence check before coding:** FFmpeg and Ghostscript licences decide what your own licence can be. Ghostscript is AGPL; GPL FFmpeg builds need a GPL app. Simplest is to licence the project GPL-3.0.
 
@@ -311,7 +315,7 @@ Nothing starts until Pre-Boards end on 2 December. Everything before boards is c
 | 1. Spike | 3 Dec – mid-Jan | Check for existing cross-platform open-source converters; pick the licence; build one web job (HEIC → JPG) in a Web Worker | One job works in the browser and the decision to continue is made |
 | 2. Pause | Mid-Jan – end of boards | Nothing | Boards over |
 | 3. Web v1 | \~4 weeks after boards | Images + PDF + audio jobs, queue, UI; deploy to Cloudflare Pages | Live URL; every v1 job tested on Chrome, Firefox and a phone |
-| 4. Desktop v1 | \~4 weeks | Tauri wrapper, native engine, installers via GitHub Actions | Installers for Windows/macOS/Linux on GitHub Releases |
+| 4. Desktop v1 | \~4 weeks | Pure Native Rust app with Slint UI, `crates/refract-core`, native engine/sidecars, installers via GitHub Actions | Standalone installers for Windows/macOS/Linux on GitHub Releases |
 | 5. v1.5 | After that | Office → PDF, video, folder batch, right-click menu | Each feature shipped on its own |
 
 **Rule:** a phase starts only when the previous one's "done when" is true. If phase 1 finds the gap already filled, stop there.
