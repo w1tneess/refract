@@ -26,7 +26,7 @@ function PasswordForm({ job, onAnswer }: { job: JobView; onAnswer: (pw: string |
       <label htmlFor={`${id}-pw`}>
         {job.password!.file} is password-protected{job.password!.wrong ? '. That password is wrong; try again' : ''}.
       </label>
-      <input id={`${id}-pw`} type="password" autoComplete="off" value={pw} onChange={(e) => setPw(e.target.value)}
+      <input id={`${id}-pw`} type="password" autoComplete="current-password" value={pw} onChange={(e) => setPw(e.target.value)}
         aria-invalid={job.password!.wrong || undefined} />
       <label className="check"><input type="checkbox" checked={all} onChange={(e) => setAll(e.target.checked)} /> Use for all locked files</label>
       <div className="job-actions">
