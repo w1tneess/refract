@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState } from 'react';
-import { createJob, createLimiter, FORMATS, limitsFor, runJob, TOOLS, type Clock, type Job, type Options, type ToolId } from '@refract/core';
+import { createJob, createLimiter, FORMATS, isTerminal, limitsFor, runJob, TOOLS, type Clock, type Job, type Options, type ToolId } from '@refract/core';
 import { ENGINE_VERSION, wasmEngine } from '@refract/engine-wasm';
 import { downloadZip } from 'client-zip';
 
@@ -129,5 +129,14 @@ export function useJobs() {
     return URL.createObjectURL(await downloadZip(entries).blob());
   }, []);
 
-  return { jobs, toast, addFiles, cancel, retry, answerPassword, saveAllUrl };
+  const clearJobs = useCallback(() => {
+    setJobs((all) => all.filter((j) => !isTerminal(j.state)));
+  }, []);
+
+  const removeJob = useCallback((id: string) => {
+    controllers.current.get(id)?.abort();
+    setJobs((all) => all.filter((j) => j.id !== id));
+  }, []);
+
+  return { jobs, toast, addFiles, cancel, retry, answerPassword, saveAllUrl, clearJobs, removeJob };
 }
