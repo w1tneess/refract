@@ -18,6 +18,10 @@ Tests check type, dimensions and size range, never exact bytes.
 | `rotated.jpg` | JPEG 400×300 with EXIF orientation 6 | Saved, upright 300×400, no EXIF |
 | `really-png.jpg` | A PNG with a `.jpg` name | Saved, with "really a PNG" notice |
 | `truncated.jpg` | Cut halfway through scan | Failed (Corrupt) |
+| `plain.pdf` | 3-page PDF | Saved |
+| `5pages.pdf` | 5-page PDF for split/reorder | Saved |
+| `locked.pdf` | AES-256 encrypted PDF (user password: `user-pw-123`) | NeedsPassword → Unlocked |
+| `owner-only.pdf` | Encrypted PDF with empty user password | Opens without prompt |
 | `iphone.heic` | **Missing: add a real iPhone photo** | Saved, size from `iphone.json` |
 
 Regenerate the synthetic files with `uv run --with pillow-heif==1.8.1 python fixtures/make_fixtures.py`.

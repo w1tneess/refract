@@ -59,6 +59,15 @@ export function expectImage(bytes: Uint8Array, format: Format, width: number, he
   }
 }
 
+export async function expectPdf(bytes: Uint8Array, pages?: number) {
+  expect(detect(bytes)).toBe('pdf');
+  const { PDFDocument } = await import('pdf-lib');
+  const doc = await PDFDocument.load(bytes, { ignoreEncryption: true });
+  if (pages !== undefined) {
+    expect(doc.getPageCount()).toBe(pages);
+  }
+}
+
 /** Decode an image in the page and read the colour at (x, y). */
 export async function pixel(page: Page, bytes: Uint8Array, x: number, y: number, mime?: string) {
   const detected = detect(bytes);

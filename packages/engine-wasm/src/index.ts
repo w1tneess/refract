@@ -1,7 +1,7 @@
 import { RefractError, formatsOfKind, type Edge, type Engine, type Format, type Item, type RunContext } from '@refract/core';
 import type { WorkerRequest, WorkerResponse } from './protocol.ts';
 
-export const ENGINE_VERSION = 'libheif-js@1.23.5+@jsquash/jpeg@1.6.0+@jsquash/png@3.1.1+@jsquash/webp@1.5.0+@jsquash/resize@2.1.1';
+export const ENGINE_VERSION = 'libheif-js@1.23.5+@jsquash/jpeg@1.6.0+@jsquash/png@3.1.1+@jsquash/webp@1.5.0+@jsquash/resize@2.1.1+pdf-lib@1.17.1+pdfjs-dist@6.5.438+@neslinesli93/qpdf-wasm@0.3.0';
 
 type Done = Extract<WorkerResponse, { type: 'done' }>;
 
