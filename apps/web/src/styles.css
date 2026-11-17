@@ -14,7 +14,7 @@
   --border-hairline: light-dark(rgba(23, 23, 23, 0.08), rgba(237, 237, 237, 0.08));
   --border-hairline-hover: light-dark(rgba(23, 23, 23, 0.16), rgba(237, 237, 237, 0.16));
 
-  /* Primary action: dark text on off-white (dark theme) / white text on dark (light theme) */
+  /* Primary action */
   --btn-primary-bg: light-dark(#171717, #ededed);
   --btn-primary-fg: light-dark(#ffffff, #141415);
   --btn-primary-hover: light-dark(#2b2b2b, #ffffff);
@@ -22,7 +22,7 @@
   /* Focus and accent token */
   --accent: light-dark(#2563eb, #3b82f6);
 
-  /* Semantic status colors (toned down) */
+  /* Semantic status colors */
   --status-ok: light-dark(#16a34a, #4cc38a);
   --status-error: light-dark(#dc2626, #e5484d);
   --status-warn: light-dark(#b45309, #e5a035);
@@ -54,18 +54,18 @@ body {
 }
 
 main {
-  max-width: 40rem;
+  max-width: 44rem;
   margin: 0 auto;
-  padding: 48px 24px 64px;
+  padding: 40px 20px 64px;
 }
 
 /* Header */
 .app-header {
-  margin-bottom: 32px;
+  margin-bottom: 24px;
 }
 
 h1 {
-  margin: 0 0 8px;
+  margin: 0 0 6px;
   font-size: 24px;
   font-weight: 500;
   letter-spacing: -0.01em;
@@ -77,6 +77,102 @@ h1 {
   font-size: 14px;
   line-height: 20px;
   color: var(--text-secondary);
+}
+
+/* Tool Navigation */
+.tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 24px;
+  margin-bottom: 24px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--border-hairline);
+}
+
+.tool-group h2 {
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.tool-group ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.tool-group a {
+  display: inline-block;
+  font-size: 13px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  text-decoration: none;
+  color: var(--text-secondary);
+  border: 1px solid transparent;
+  transition: all 120ms ease;
+}
+
+.tool-group a:hover {
+  color: var(--text-primary);
+  background: var(--bg-raised);
+}
+
+.tool-group a[aria-current='page'] {
+  color: var(--text-primary);
+  background: var(--bg-card);
+  border-color: var(--border-hairline-hover);
+  font-weight: 500;
+}
+
+/* Tool Details & Options */
+#tool-title {
+  margin: 0 0 4px;
+  font-size: 18px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.blurb {
+  margin: 0 0 16px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.options-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+  padding: 12px 14px;
+  border-radius: 8px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-hairline);
+}
+
+.options-form label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.options-form input[type='text'],
+.options-form input[type='number'] {
+  font: inherit;
+  font-size: 13px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--border-hairline-hover);
+  background: var(--bg-raised);
+  color: var(--text-primary);
 }
 
 /* Dropzone */
@@ -150,27 +246,22 @@ h1 {
   color: var(--text-primary);
 }
 
-/* Batch Summary Row */
-.batch-row {
+/* Batch Summary */
+.batch-row,
+.batch {
   display: flex;
   justify-content: space-between;
   align-items: baseline;
-  margin-top: 24px;
+  gap: 12px;
+  margin-top: 20px;
   padding-bottom: 8px;
   border-bottom: 1px solid var(--border-hairline);
+  color: var(--text-muted);
+  font-size: 12px;
 }
 
-.batch {
+.batch p {
   margin: 0;
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--text-muted);
-}
-
-.batch-count {
-  font-size: 12px;
-  color: var(--text-muted);
-  font-variant-numeric: tabular-nums;
 }
 
 /* Job List */
@@ -235,6 +326,12 @@ h1 {
 .job-probing .job-state,
 .job-verifying .job-state {
   color: var(--accent);
+}
+
+.job-tool {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted);
 }
 
 /* Progress bar (Modern Web Guidance compliant) */
@@ -311,15 +408,43 @@ progress.job-progress::-moz-progress-bar {
   color: var(--text-secondary);
 }
 
-.job-savings {
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--status-ok);
-}
-
 .job-out {
   color: var(--text-muted);
   word-break: break-all;
+}
+
+/* Password Form */
+.password {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-hairline);
+}
+
+.password label {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.password input[type='password'] {
+  font: inherit;
+  font-size: 13px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border-hairline-hover);
+  background: var(--bg-card);
+  color: var(--text-primary);
+}
+
+.password .check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
 }
 
 /* Error Details */
@@ -365,12 +490,13 @@ progress.job-progress::-moz-progress-bar {
 .job-actions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   margin-top: 4px;
 }
 
-/* Buttons */
-button, .button {
+/* Buttons and Selects */
+button, .button, select {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -389,23 +515,31 @@ button, .button {
   line-height: 1;
 }
 
-button:hover, .button:hover {
+button:hover, .button:hover, select:hover {
   background: var(--bg-raised);
   border-color: var(--text-secondary);
 }
 
-.button.primary {
+.button.primary,
+button.primary {
   background: var(--btn-primary-bg);
   color: var(--btn-primary-fg);
   border-color: transparent;
 }
 
-.button.primary:hover {
+.button.primary:hover,
+button.primary:hover {
   background: var(--btn-primary-hover);
   border-color: transparent;
 }
 
-button:focus-visible, .button:focus-visible, summary:focus-visible {
+.use-in-tool-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+button:focus-visible, .button:focus-visible, select:focus-visible, summary:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }

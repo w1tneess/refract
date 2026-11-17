@@ -26,6 +26,15 @@ test('iPhone HEIC converts to a JPEG of the same displayed size', async ({ page 
   expectJpeg(out.bytes, width, height, [100_000, 15_000_000]);
 });
 
+test('real-phone grid HEIC converts to a JPEG of the probed size', async ({ page }) => {
+  test.skip(!hasFixture('grid-real.heic'), 'fixtures/grid-real.heic missing');
+  await addFiles(page, ['grid-real.heic']);
+  const c = card(page);
+  await waitForState(c, 'Saved', 60_000);
+  const out = await download(page, c);
+  expectJpeg(out.bytes, 4242, 2828, [100_000, 10_000_000]);
+});
+
 test('rotated HEIC is rotated once (irot), then has no orientation left', async ({ page }) => {
   await addFiles(page, ['rotated.heic']);
   const c = card(page);
@@ -94,3 +103,21 @@ test('cancel mid-job ends Canceled (not Failed) with no download', async ({ page
   await expect(c.getByRole('link', { name: /^Download/ })).toHaveCount(0);
   await expect(page.locator('[data-batch]')).toHaveAttribute('data-batch', 'finished');
 });
+
+test('use in another tool pipes output to the target tool', async ({ page }) => {
+  await addFiles(page, ['plain.heic']);
+  const first = card(page, 0);
+  await waitForState(first, 'Saved');
+
+  await expect(first.getByRole('button', { name: 'Use in another tool' })).toBeVisible();
+  await first.getByRole('combobox', { name: 'Choose another tool' }).selectOption('compress-image');
+
+  await expect(page).toHaveURL(/#compress-image/);
+  await expect(page.locator('#tool-title')).toHaveText('Compress image');
+
+  const second = card(page, 1);
+  await waitForState(second, 'Saved');
+  await expect(second.locator('.job-tool')).toHaveText('Compress image');
+  await expect(second.locator('.job-name')).toHaveText('plain (converted).jpg');
+});
+

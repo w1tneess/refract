@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { expect, type Locator, type Page } from '@playwright/test';
-import { readJpegInfo, detect } from '@refract/core';
+import { readJpegInfo, detect, probeImage, type Format } from '@refract/core';
 
 export const fixture = (name: string) => fileURLToPath(new URL(`../../../fixtures/${name}`, import.meta.url));
 export const hasFixture = (name: string) => existsSync(fixture(name));
@@ -46,16 +46,45 @@ export function expectJpeg(bytes: Uint8Array, width: number, height: number, siz
   expect(bytes.length).toBeLessThanOrEqual(sizeRange[1]);
 }
 
-/** Decode a JPEG in the page and read the colour at (x, y). */
-export async function pixel(page: Page, bytes: Uint8Array, x: number, y: number) {
-  return page.evaluate(async ({ bytes, x, y }) => {
-    const bmp = await createImageBitmap(new Blob([new Uint8Array(bytes)], { type: 'image/jpeg' }));
+export function expectImage(bytes: Uint8Array, format: Format, width: number, height: number, sizeRange?: [number, number]) {
+  expect(detect(bytes)).toBe(format);
+  const info = probeImage(format, bytes);
+  expect([info.width, info.height]).toEqual([width, height]);
+  if (format === 'jpeg') {
+    expect(readJpegInfo(bytes).hasExif).toBe(false);
+  }
+  if (sizeRange) {
+    expect(bytes.length).toBeGreaterThanOrEqual(sizeRange[0]);
+    expect(bytes.length).toBeLessThanOrEqual(sizeRange[1]);
+  }
+}
+
+export async function expectPdf(bytes: Uint8Array, pages?: number) {
+  expect(detect(bytes)).toBe('pdf');
+  const { PDFDocument } = await import('pdf-lib');
+  const doc = await PDFDocument.load(bytes, { ignoreEncryption: true });
+  if (pages !== undefined) {
+    expect(doc.getPageCount()).toBe(pages);
+  }
+}
+
+export function expectAudio(bytes: Uint8Array, format: Format) {
+  expect(detect(bytes)).toBe(format);
+  expect(bytes.length).toBeGreaterThan(100);
+}
+
+/** Decode an image in the page and read the colour at (x, y). */
+export async function pixel(page: Page, bytes: Uint8Array, x: number, y: number, mime?: string) {
+  const detected = detect(bytes);
+  const m = mime ?? (detected ? `image/${detected}` : 'image/jpeg');
+  return page.evaluate(async ({ bytes, x, y, m }) => {
+    const bmp = await createImageBitmap(new Blob([new Uint8Array(bytes)], { type: m }));
     const c = new OffscreenCanvas(bmp.width, bmp.height);
     const ctx = c.getContext('2d')!;
     ctx.drawImage(bmp, 0, 0);
     const [r, g, b] = ctx.getImageData(x, y, 1, 1).data;
     return { r: r!, g: g!, b: b! };
-  }, { bytes: [...bytes], x, y });
+  }, { bytes: [...bytes], x, y, m });
 }
 
 export const isRed = (p: { r: number; g: number; b: number }) => p.r > 180 && p.b < 80;
