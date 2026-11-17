@@ -20,8 +20,16 @@ export const formatsOfKind = (k: Kind) => (Object.keys(FORMATS) as Format[]).fil
 const HEIC_BRANDS = new Set(['heic', 'heix', 'heim', 'heis', 'mif1', 'msf1']);
 const M4A_BRANDS = new Set(['M4A ', 'M4B ', 'mp42', 'isom', 'iso2', 'dash']);
 
+declare const TextDecoder: {
+  new (label?: string, options?: { fatal?: boolean; ignoreBOM?: boolean }): {
+    decode(input?: Uint8Array | ArrayBufferView | ArrayBuffer, options?: { stream?: boolean }): string;
+  };
+};
+
+const asciiDecoder = new TextDecoder();
+
 export function ascii(b: Uint8Array, start: number, end: number): string {
-  return String.fromCharCode(...b.subarray(start, end));
+  return asciiDecoder.decode(b.subarray(start, end));
 }
 
 /** Identify a file by its first bytes. The extension is never consulted. */

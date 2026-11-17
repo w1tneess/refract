@@ -26,7 +26,7 @@ function PasswordForm({ job, onAnswer }: { job: JobView; onAnswer: (pw: string |
       <label htmlFor={`${id}-pw`}>
         {job.password!.file} is password-protected{job.password!.wrong ? '. That password is wrong; try again' : ''}.
       </label>
-      <input id={`${id}-pw`} type="password" autoComplete="off" value={pw} onChange={(e) => setPw(e.target.value)}
+      <input id={`${id}-pw`} type="password" autoComplete="current-password" value={pw} onChange={(e) => setPw(e.target.value)}
         aria-invalid={job.password!.wrong || undefined} />
       <label className="check"><input type="checkbox" checked={all} onChange={(e) => setAll(e.target.checked)} /> Use for all locked files</label>
       <div className="job-actions">
@@ -44,19 +44,27 @@ export function JobCard({ job, onCancel, onRetry, onPassword, onUseInTool }: {
   onPassword: (pw: string | null, forAll: boolean) => void;
   onUseInTool?: (targetTool: ToolId, job: JobView) => void;
 }) {
+  const isBusy = !isTerminal(job.state);
   const title = job.inputNames.length > 1 ? `${job.inputName} + ${job.inputNames.length - 1} more` : job.inputName;
   const outKind = job.outputs?.[0] ? FORMATS[job.outputs[0]!.format].kind : null;
   const compatibleTools = outKind ? (Object.keys(TOOLS) as ToolId[]).filter((id) => TOOLS[id].accepts === outKind && id !== job.tool) : [];
+
   return (
     <li className={`job job-${job.state.toLowerCase()}`} data-state={job.state} data-timings={JSON.stringify(job.timings)}>
       <div className="job-head">
         <span className="job-name" title={job.inputNames.join('\n')}>{title}</span>
         <span className="job-state" role="status">{STATE_LABEL[job.state]}</span>
       </div>
+      {isBusy && (
+        <progress
+          className="job-progress"
+          aria-label={`Working on ${title}`}
+        />
+      )}
       <p className="job-tool">{TOOLS[job.tool].label}</p>
       {job.notice && <p className="job-notice">{job.notice}</p>}
       <p className="job-sizes">
-        {size(job.inputSize)} → {size(job.outputSize)}
+        <span className="job-size-numbers">{size(job.inputSize)} → {size(job.outputSize)}</span>
         {job.state === 'Saved' && <span className="job-out"> · {job.outputName}{job.multi ? ` (${job.outputs?.length} files)` : ''}</span>}
       </p>
       {job.state === 'NeedsPassword' && job.password && <PasswordForm job={job} onAnswer={onPassword} />}
@@ -70,7 +78,7 @@ export function JobCard({ job, onCancel, onRetry, onPassword, onUseInTool }: {
         </div>
       )}
       <div className="job-actions">
-        {!isTerminal(job.state) && (
+        {isBusy && (
           <button type="button" onClick={onCancel} aria-label={`Cancel ${job.inputName}`}>Cancel</button>
         )}
         {job.state === 'Failed' && <button type="button" onClick={onRetry}>Retry</button>}

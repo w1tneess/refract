@@ -10,7 +10,13 @@ const GROUPS: { label: string; tools: ToolId[] }[] = [
   { label: 'Audio', tools: ['convert-audio', 'trim-audio'] },
 ];
 const ACCEPT: Record<Kind, string> = Object.fromEntries(
-  (['image', 'pdf', 'audio'] as Kind[]).map((k) => [k, Object.values(FORMATS).filter((f) => f.kind === k).flatMap((f) => [...f.ext.map((e) => `.${e}`), f.mime]).join(',')]),
+  (['image', 'pdf', 'audio'] as Kind[]).map((k) => [
+    k,
+    Object.values(FORMATS)
+      .filter((f) => f.kind === k)
+      .flatMap((f) => [...f.ext.map((e) => `.${e}`), f.mime])
+      .join(','),
+  ]),
 ) as Record<Kind, string>;
 
 const toolFromHash = (): ToolId => {
@@ -27,7 +33,11 @@ const loadOptions = (tool: ToolId): Options => {
   }
 };
 const saveOptions = (tool: ToolId, o: Options) => {
-  try { localStorage.setItem(`refract.options.${tool}`, JSON.stringify(o)); } catch { /* private mode */ }
+  try {
+    localStorage.setItem(`refract.options.${tool}`, JSON.stringify(o));
+  } catch {
+    /* private mode */
+  }
 };
 
 export function App() {
@@ -40,12 +50,19 @@ export function App() {
   const t = TOOLS[tool];
 
   useEffect(() => {
-    const onHash = () => { const next = toolFromHash(); setTool(next); setOptions(loadOptions(next)); };
+    const onHash = () => {
+      const next = toolFromHash();
+      setTool(next);
+      setOptions(loadOptions(next));
+    };
     addEventListener('hashchange', onHash);
     return () => removeEventListener('hashchange', onHash);
   }, []);
 
-  const changeOptions = (o: Options) => { setOptions(o); saveOptions(tool, resolveOptions(t.options, o)); };
+  const changeOptions = (o: Options) => {
+    setOptions(o);
+    saveOptions(tool, resolveOptions(t.options, o));
+  };
   const add = (files: File[]) => addFiles(tool, resolveOptions(t.options, options), files);
   const onDrop = (e: DragEvent) => {
     e.preventDefault();
@@ -66,7 +83,7 @@ export function App() {
 
   return (
     <main>
-      <header>
+      <header className="app-header">
         <h1>Refract</h1>
         <p>Convert images, PDFs and audio. Files never leave your device.</p>
       </header>
@@ -76,7 +93,11 @@ export function App() {
             <h2>{g.label}</h2>
             <ul>
               {g.tools.map((id) => (
-                <li key={id}><a href={`#${id}`} aria-current={id === tool ? 'page' : undefined}>{TOOLS[id].label}</a></li>
+                <li key={id}>
+                  <a href={`#${id}`} aria-current={id === tool ? 'page' : undefined}>
+                    {TOOLS[id].label}
+                  </a>
+                </li>
               ))}
             </ul>
           </div>
@@ -85,43 +106,77 @@ export function App() {
       <section aria-labelledby="tool-title">
         <h2 id="tool-title">{t.label}</h2>
         <p className="blurb">{t.blurb}</p>
-        <OptionsForm specs={t.options} values={options} onChange={changeOptions}
-          onReset={() => changeOptions(resolveOptions(t.options))} />
+        <OptionsForm
+          specs={t.options}
+          values={options}
+          onChange={changeOptions}
+          onReset={() => changeOptions(resolveOptions(t.options))}
+        />
         <label
           htmlFor={inputId}
           className={`dropzone${over ? ' over' : ''}`}
           data-testid="dropzone"
-          onDragOver={(e) => { e.preventDefault(); setOver(true); }}
+          onDragOver={(e) => {
+            e.preventDefault();
+            setOver(true);
+          }}
           onDragLeave={() => setOver(false)}
           onDrop={onDrop}
         >
-          <strong>Drop {t.accepts === 'image' ? 'images' : t.accepts === 'pdf' ? 'PDFs' : 'audio files'} here</strong>
-          <span>or click to choose{t.inputs === 'many' ? ' (files are combined in the order chosen)' : ''}</span>
+          <strong className="dropzone-title">
+            Drop {t.accepts === 'image' ? 'images' : t.accepts === 'pdf' ? 'PDFs' : 'audio files'} here
+          </strong>
+          <span className="dropzone-subtitle">
+            or click to choose{t.inputs === 'many' ? ' (files are combined in the order chosen)' : ''}
+          </span>
           <input
             id={inputId}
             className="visually-hidden"
             type="file"
             multiple
             accept={ACCEPT[t.accepts]}
-            onChange={(e) => { add([...(e.target.files ?? [])]); e.target.value = ''; }}
+            onChange={(e) => {
+              add([...(e.target.files ?? [])]);
+              e.target.value = '';
+            }}
           />
         </label>
       </section>
-      <div role="status" aria-live="polite" className="toast">{toast}</div>
+      <div role="status" aria-live="polite" className="toast">
+        {toast}
+      </div>
       {status && (
-        <div className="batch">
-          <p data-batch={status}>Batch: {status}</p>
-          {saved > 1 && (
-            allUrl
-              ? <a className="button" href={allUrl} download="refract.zip" onClick={() => setTimeout(() => setAllUrl(undefined), 0)}>Download refract.zip</a>
-              : <button type="button" onClick={() => void saveAllUrl(jobs).then(setAllUrl)}>Save all as ZIP</button>
-          )}
+        <div className="batch-row">
+          <p className="batch" data-batch={status}>
+            Batch: {status}
+          </p>
+          {saved > 1 &&
+            (allUrl ? (
+              <a
+                className="button"
+                href={allUrl}
+                download="refract.zip"
+                onClick={() => setTimeout(() => setAllUrl(undefined), 0)}
+              >
+                Download refract.zip
+              </a>
+            ) : (
+              <button type="button" onClick={() => void saveAllUrl(jobs).then(setAllUrl)}>
+                Save all as ZIP
+              </button>
+            ))}
         </div>
       )}
       <ul className="jobs" aria-label="Jobs">
         {jobs.map((j) => (
-          <JobCard key={j.id} job={j} onCancel={() => cancel(j.id)} onRetry={() => retry(j.id)}
-            onPassword={(pw, all) => answerPassword(j.id, pw, all)} onUseInTool={useInTool} />
+          <JobCard
+            key={j.id}
+            job={j}
+            onCancel={() => cancel(j.id)}
+            onRetry={() => retry(j.id)}
+            onPassword={(pw, all) => answerPassword(j.id, pw, all)}
+            onUseInTool={useInTool}
+          />
         ))}
       </ul>
     </main>
