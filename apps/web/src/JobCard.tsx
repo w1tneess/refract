@@ -1,5 +1,5 @@
 import { useId, useState } from 'react';
-import { describeError, isTerminal, TOOLS } from '@refract/core';
+import { describeError, FORMATS, isTerminal, TOOLS, type ToolId } from '@refract/core';
 import type { JobView } from './useJobs.ts';
 
 export const size = (n?: number) =>
@@ -37,13 +37,16 @@ function PasswordForm({ job, onAnswer }: { job: JobView; onAnswer: (pw: string |
   );
 }
 
-export function JobCard({ job, onCancel, onRetry, onPassword }: {
+export function JobCard({ job, onCancel, onRetry, onPassword, onUseInTool }: {
   job: JobView;
   onCancel: () => void;
   onRetry: () => void;
   onPassword: (pw: string | null, forAll: boolean) => void;
+  onUseInTool?: (targetTool: ToolId, job: JobView) => void;
 }) {
   const title = job.inputNames.length > 1 ? `${job.inputName} + ${job.inputNames.length - 1} more` : job.inputName;
+  const outKind = job.outputs?.[0] ? FORMATS[job.outputs[0]!.format].kind : null;
+  const compatibleTools = outKind ? (Object.keys(TOOLS) as ToolId[]).filter((id) => TOOLS[id].accepts === outKind && id !== job.tool) : [];
   return (
     <li className={`job job-${job.state.toLowerCase()}`} data-state={job.state} data-timings={JSON.stringify(job.timings)}>
       <div className="job-head">
@@ -71,6 +74,24 @@ export function JobCard({ job, onCancel, onRetry, onPassword }: {
           <button type="button" onClick={onCancel} aria-label={`Cancel ${job.inputName}`}>Cancel</button>
         )}
         {job.state === 'Failed' && <button type="button" onClick={onRetry}>Retry</button>}
+        {job.state === 'Saved' && job.outputs && compatibleTools.length > 0 && onUseInTool && (
+          <div className="use-in-tool-group">
+            <button type="button" onClick={() => onUseInTool(compatibleTools[0]!, job)}>Use in another tool</button>
+            <select
+              aria-label="Choose another tool"
+              defaultValue=""
+              onChange={(e) => {
+                if (e.target.value) onUseInTool(e.target.value as ToolId, job);
+                e.target.value = '';
+              }}
+            >
+              <option value="" disabled>Choose tool…</option>
+              {compatibleTools.map((t) => (
+                <option key={t} value={t}>{TOOLS[t].label}</option>
+              ))}
+            </select>
+          </div>
+        )}
         {job.url && <a className="button primary" href={job.url} download={job.outputName}>Download {job.outputName}</a>}
       </div>
     </li>

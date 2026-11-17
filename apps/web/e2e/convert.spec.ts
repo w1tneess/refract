@@ -103,3 +103,21 @@ test('cancel mid-job ends Canceled (not Failed) with no download', async ({ page
   await expect(c.getByRole('link', { name: /^Download/ })).toHaveCount(0);
   await expect(page.locator('[data-batch]')).toHaveAttribute('data-batch', 'finished');
 });
+
+test('use in another tool pipes output to the target tool', async ({ page }) => {
+  await addFiles(page, ['plain.heic']);
+  const first = card(page, 0);
+  await waitForState(first, 'Saved');
+
+  await expect(first.getByRole('button', { name: 'Use in another tool' })).toBeVisible();
+  await first.getByRole('combobox', { name: 'Choose another tool' }).selectOption('compress-image');
+
+  await expect(page).toHaveURL(/#compress-image/);
+  await expect(page.locator('#tool-title')).toHaveText('Compress image');
+
+  const second = card(page, 1);
+  await waitForState(second, 'Saved');
+  await expect(second.locator('.job-tool')).toHaveText('Compress image');
+  await expect(second.locator('.job-name')).toHaveText('plain (converted).jpg');
+});
+

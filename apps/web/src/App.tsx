@@ -2,7 +2,7 @@ import { useEffect, useId, useState, type DragEvent } from 'react';
 import { batchStatus, FORMATS, resolveOptions, TOOLS, type Kind, type Options, type ToolId } from '@refract/core';
 import { JobCard } from './JobCard.tsx';
 import { OptionsForm } from './OptionsForm.tsx';
-import { useJobs } from './useJobs.ts';
+import { useJobs, type JobView } from './useJobs.ts';
 
 const GROUPS: { label: string; tools: ToolId[] }[] = [
   { label: 'Images', tools: ['convert-image', 'compress-image', 'resize-image'] },
@@ -51,6 +51,15 @@ export function App() {
     e.preventDefault();
     setOver(false);
     add([...e.dataTransfer.files]);
+  };
+  const useInTool = (targetTool: ToolId, job: JobView) => {
+    if (!job.outputs?.length) return;
+    const newFiles = job.outputs.map((o) => new File([o.bytes as BlobPart], o.name, { type: FORMATS[o.format].mime }));
+    location.hash = `#${targetTool}`;
+    setTool(targetTool);
+    const targetOptions = loadOptions(targetTool);
+    setOptions(targetOptions);
+    addFiles(targetTool, resolveOptions(TOOLS[targetTool].options, targetOptions), newFiles);
   };
   const status = jobs.length ? batchStatus(jobs.map((j) => j.state)) : null;
   const saved = jobs.filter((j) => j.state === 'Saved').length;
@@ -112,7 +121,7 @@ export function App() {
       <ul className="jobs" aria-label="Jobs">
         {jobs.map((j) => (
           <JobCard key={j.id} job={j} onCancel={() => cancel(j.id)} onRetry={() => retry(j.id)}
-            onPassword={(pw, all) => answerPassword(j.id, pw, all)} />
+            onPassword={(pw, all) => answerPassword(j.id, pw, all)} onUseInTool={useInTool} />
         ))}
       </ul>
     </main>
