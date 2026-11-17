@@ -11,6 +11,7 @@ refract-core = { path = "../../crates/refract-core" }
 refract-engine = { path = "../../crates/refract-engine" }
 slint = "1.9"
 rfd = "0.15"
+open = "5.3"
 
 [build-dependencies]
 slint-build = "1.9"
