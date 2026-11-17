@@ -6,3 +6,7 @@ playwright-report/
 *.tsbuildinfo
 .agents/
 skills-lock.json
+
+# Rust
+/target/
+**/*.rs.bk
