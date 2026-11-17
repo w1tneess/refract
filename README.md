@@ -1,6 +1,6 @@
 # Refract
 
-An open-source, local-first file converter: a web app and (later) a Tauri 2 desktop app on one shared TypeScript engine.
+An open-source, local-first file converter: a web app (WASM) and a pure native Rust desktop app (Slint UI).
 Files are converted entirely on your own machine. No uploads, no accounts, no ads, no telemetry.
 
 **Status**: Phase 3 (Web v1) complete. See [docs/phase-3-report.md](docs/phase-3-report.md).
