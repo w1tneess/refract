@@ -1,8 +1,7 @@
-import { RefractError, type Edge, type Engine, type Format, type RunContext } from '@refract/core';
+import { RefractError, formatsOfKind, type Edge, type Engine, type Format, type Item, type RunContext } from '@refract/core';
 import type { WorkerRequest, WorkerResponse } from './protocol.ts';
 
-export const ENGINE_VERSION = 'libheif-js@1.23.5+@jsquash/jpeg@1.6.0';
-const MIME: Record<Format, string> = { heic: 'image/heic', jpeg: 'image/jpeg' };
+export const ENGINE_VERSION = 'libheif-js@1.23.5+@jsquash/jpeg@1.6.0+@jsquash/png@3.1.1+@jsquash/webp@1.5.0+@jsquash/resize@2.1.1';
 
 type Done = Extract<WorkerResponse, { type: 'done' }>;
 
@@ -20,7 +19,7 @@ function inWorker(req: WorkerRequest, ctx: RunContext, transfer: Transferable[] 
     worker.onmessage = (e: MessageEvent<WorkerResponse>) => {
       const m = e.data;
       ctx.heartbeat();
-      if (first && req.type === 'convert') ctx.report('workerStartMs', performance.now() - tSpawn);
+      if (first && req.type === 'run') ctx.report('workerStartMs', performance.now() - tSpawn);
       first = false;
       if (m.type === 'timing') ctx.report(m.key, m.ms);
       else if (m.type === 'done') { stop(); resolve(m); }
@@ -34,27 +33,39 @@ function inWorker(req: WorkerRequest, ctx: RunContext, transfer: Transferable[] 
   });
 }
 
-const heicToJpeg: Edge = {
-  from: 'heic',
-  to: 'jpeg',
-  engine: 'wasm',
-  engineVersion: ENGINE_VERSION,
-  options: [{ key: 'quality', label: 'Quality', type: 'number', min: 10, max: 100, default: 90 }],
-  lossy: true,
-  memFactor: 3, // RGBA in the libheif heap + JS copy + mozjpeg heap copy
-  run: async (input, opts, ctx) => {
-    // Transfer the input so the page doesn't hold a second copy while the worker decodes.
-    const done = await inWorker({ type: 'convert', bytes: input, quality: opts.quality ?? 90 }, ctx, [input.buffer]);
-    if (!done.bytes) throw new RefractError('Internal', 'the converter returned nothing', 'Try again.');
-    return done.bytes;
-  },
-};
+// Copies, not transfers: the job keeps its inputs for Retry and for verifying against them.
+const copy = (items: Item[]) => items.map((i) => ({ bytes: i.bytes.slice(), format: i.format }));
+
+async function run(op: string, items: Item[], opts: Record<string, number | string>, ctx: RunContext): Promise<Item[]> {
+  const input = copy(items);
+  const done = await inWorker({ type: 'run', op, items: input, opts }, ctx, input.map((i) => i.bytes.buffer));
+  if (!done.items?.length) throw new RefractError('Internal', 'the converter returned nothing', 'Try again.');
+  return done.items;
+}
+
+function edges(): Edge[] {
+  const out: Edge[] = [];
+  const imageOut: Format[] = ['jpeg', 'png', 'webp'];
+  for (const from of formatsOfKind('image')) {
+    for (const to of imageOut) {
+      if (from === to) continue;
+      out.push({
+        from, to, engine: 'wasm', engineVersion: ENGINE_VERSION, options: [],
+        lossy: to !== 'png', memFactor: 3, // RGBA in the decoder heap + JS copy + encoder heap copy
+        run: (items, opts, ctx) => run('image.convert', items, { ...opts, to }, ctx),
+      });
+    }
+  }
+  return out;
+}
 
 export const wasmEngine: Engine = {
   kind: 'wasm',
-  edges: [heicToJpeg],
-  decode: async (bytes, format, ctx) => {
-    const done = await inWorker({ type: 'inspect', bytes, mime: MIME[format] }, ctx);
-    return { width: done.width ?? 0, height: done.height ?? 0 };
+  edges: edges(),
+  run,
+  inspect: async (items, ctx) => (await inWorker({ type: 'inspect', items: copy(items) }, ctx)).info ?? [],
+  unlock: async (item, password, ctx) => {
+    const done = await inWorker({ type: 'unlock', item: copy([item])[0]!, password }, ctx);
+    return done.wrongPassword ? 'wrong-password' : done.items![0]!;
   },
 };

@@ -26,6 +26,15 @@ test('iPhone HEIC converts to a JPEG of the same displayed size', async ({ page 
   expectJpeg(out.bytes, width, height, [100_000, 15_000_000]);
 });
 
+test('real-phone grid HEIC converts to a JPEG of the probed size', async ({ page }) => {
+  test.skip(!hasFixture('grid-real.heic'), 'fixtures/grid-real.heic missing');
+  await addFiles(page, ['grid-real.heic']);
+  const c = card(page);
+  await waitForState(c, 'Saved', 60_000);
+  const out = await download(page, c);
+  expectJpeg(out.bytes, 4242, 2828, [100_000, 10_000_000]);
+});
+
 test('rotated HEIC is rotated once (irot), then has no orientation left', async ({ page }) => {
   await addFiles(page, ['rotated.heic']);
   const c = card(page);
