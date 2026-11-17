@@ -1,6 +1,7 @@
 import { useId, useState } from 'react';
 import { describeError, FORMATS, isTerminal, TOOLS, type ToolId } from '@refract/core';
 import type { JobView } from './useJobs.ts';
+import { OpticalLoupeModal } from './OpticalLoupeModal.tsx';
 
 export const size = (n?: number) =>
   n === undefined ? '—' : n < 1024 * 1024 ? `${Math.max(1, Math.round(n / 1024))} KB` : `${(n / 1024 / 1024).toFixed(1)} MB`;
@@ -111,6 +112,8 @@ export function JobCard({
   onUseInTool?: (targetTool: ToolId, job: JobView) => void;
   onRemove?: () => void;
 }) {
+  const [lightboxOpen, setLightboxOpen] = useState(false);
+  const [loupeOpen, setLoupeOpen] = useState(false);
   const isBusy = !isTerminal(job.state);
   const title = job.inputNames.length > 1 ? `${job.inputName} + ${job.inputNames.length - 1} more` : job.inputName;
   const outKind = job.outputs?.[0] ? FORMATS[job.outputs[0]!.format].kind : null;
@@ -126,6 +129,9 @@ export function JobCard({
       sizeDeltaBadge = <span className="job-delta job-delta-increased">+{pct}%</span>;
     }
   }
+
+  const isImageOut = job.state === 'Saved' && outKind === 'image' && !job.multi && job.url;
+  const isAudioOut = job.state === 'Saved' && outKind === 'audio' && !job.multi && job.url;
 
   return (
     <li className={`job job-${job.state.toLowerCase()}`} data-state={job.state} data-timings={JSON.stringify(job.timings)}>
@@ -176,6 +182,70 @@ export function JobCard({
           )}
         </p>
       </div>
+
+      {/* Interactive Media Previews for Finished Outputs */}
+      {isImageOut && (
+        <div className="job-preview-row">
+          <button
+            type="button"
+            className="job-thumb-btn"
+            onClick={() => setLightboxOpen(true)}
+            title="Click to preview full-size image"
+          >
+            <img src={job.url} alt={`Output thumbnail for ${job.outputName}`} className="job-thumb-img" />
+            <span className="job-thumb-overlay">Preview</span>
+          </button>
+
+          <button
+            type="button"
+            className="job-loupe-btn"
+            onClick={() => setLoupeOpen(true)}
+            title="Compare Before vs After with Optical Loupe"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="3" />
+              <path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7z" />
+            </svg>
+            <span>Optical loupe</span>
+          </button>
+        </div>
+      )}
+
+      {/* Optical Loupe Split Comparison */}
+      {loupeOpen && (
+        <OpticalLoupeModal
+          job={job}
+          onClose={() => setLoupeOpen(false)}
+        />
+      )}
+
+      {isAudioOut && (
+        <div className="job-audio-player-wrap">
+          <audio controls src={job.url} className="job-audio-player" preload="metadata">
+            Your browser does not support audio playback.
+          </audio>
+        </div>
+      )}
+
+      {/* Lightbox for Image Preview */}
+      {lightboxOpen && job.url && (
+        <div className="lightbox-backdrop" onClick={() => setLightboxOpen(false)}>
+          <div className="lightbox-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="lightbox-header">
+              <span className="lightbox-title">{job.outputName}</span>
+              <button
+                type="button"
+                className="job-dismiss-btn"
+                onClick={() => setLightboxOpen(false)}
+                aria-label="Close image preview"
+              >
+                ×
+              </button>
+            </div>
+            <img src={job.url} alt={job.outputName} className="lightbox-img" />
+          </div>
+        </div>
+      )}
 
       {job.notice && <p className="job-notice">{job.notice}</p>}
 

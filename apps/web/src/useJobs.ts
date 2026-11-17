@@ -3,7 +3,7 @@ import { createJob, createLimiter, FORMATS, isTerminal, limitsFor, runJob, TOOLS
 import { ENGINE_VERSION, wasmEngine } from '@refract/engine-wasm';
 import { downloadZip } from 'client-zip';
 
-export type JobView = Job & { url?: string };
+export type JobView = Job & { url?: string; originalUrl?: string };
 
 const clock: Clock = {
   now: () => performance.now(),
@@ -39,7 +39,7 @@ export function useJobs() {
 
   const update = useCallback((job: Job) => {
     const snapshot = { ...job, steps: [...job.steps] };
-    setJobs((all) => all.map((j) => (j.id === job.id ? { ...snapshot, url: j.url } : j)));
+    setJobs((all) => all.map((j) => (j.id === job.id ? { ...snapshot, url: j.url, originalUrl: j.originalUrl } : j)));
     if (job.state === 'Saved') {
       void urlFor(job).then((url) => setJobs((all) => all.map((j) => (j.id === job.id ? { ...j, url } : j))));
     }
@@ -84,11 +84,20 @@ export function useJobs() {
       );
       // Tools that combine files (merge, images to PDF) make one job per drop; others one job per file.
       const groups = TOOLS[tool].inputs === 'many' ? [chosen] : chosen.map((f) => [f]);
-      const created = groups.map((g) => ({
-        job: createJob(String(nextId.current++), tool, options, g.map((f) => ({ name: f.name, size: f.size })), taken.current),
-        g,
-      }));
-      setJobs((all) => [...all, ...created.map(({ job }) => ({ ...job }))]);
+      const created = groups.map((g) => {
+        let origUrl: string | undefined;
+        if (g.length === 1 && (g[0]!.type.startsWith('image/') || /\.(png|jpe?g|webp|heic|avif|gif)$/i.test(g[0]!.name))) {
+          try {
+            origUrl = URL.createObjectURL(g[0]!);
+          } catch {}
+        }
+        return {
+          job: createJob(String(nextId.current++), tool, options, g.map((f) => ({ name: f.name, size: f.size })), taken.current),
+          origUrl,
+          g,
+        };
+      });
+      setJobs((all) => [...all, ...created.map(({ job, origUrl }) => ({ ...job, originalUrl: origUrl }))]);
       for (const { job, g } of created) start(job, g);
     },
     [start],
@@ -104,8 +113,29 @@ export function useJobs() {
         const old = all.find((j) => j.id === id);
         if (!old || !picked) return all;
         const job = createJob(String(nextId.current++), old.tool, old.options, picked.map((f) => ({ name: f.name, size: f.size })), taken.current);
+        const origUrl = old.originalUrl;
         queueMicrotask(() => start(job, picked));
-        return all.map((j) => (j.id === id ? { ...job } : j));
+        return all.map((j) => (j.id === id ? { ...job, originalUrl: origUrl } : j));
+      });
+    },
+    [start],
+  );
+
+  /** Re-run all existing jobs in the queue with new options or target tool */
+  const reRunAll = useCallback(
+    (targetTool?: ToolId, newOptions?: Options) => {
+      setJobs((all) => {
+        return all.map((old) => {
+          const picked = files.current.get(old.id);
+          if (!picked) return old;
+          controllers.current.get(old.id)?.abort();
+          const t = targetTool ?? old.tool;
+          const o = newOptions ?? old.options;
+          const job = createJob(String(nextId.current++), t, o, picked.map((f) => ({ name: f.name, size: f.size })), taken.current);
+          const origUrl = old.originalUrl;
+          queueMicrotask(() => start(job, picked));
+          return { ...job, originalUrl: origUrl };
+        });
       });
     },
     [start],
@@ -138,5 +168,5 @@ export function useJobs() {
     setJobs((all) => all.filter((j) => j.id !== id));
   }, []);
 
-  return { jobs, toast, addFiles, cancel, retry, answerPassword, saveAllUrl, clearJobs, removeJob };
+  return { jobs, toast, addFiles, cancel, retry, reRunAll, answerPassword, saveAllUrl, clearJobs, removeJob };
 }
