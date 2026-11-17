@@ -57,5 +57,36 @@ assert mdat > 0
 big = Image.effect_mandelbrot((6000, 4000), (-2.0, -1.5, 1.0, 1.5), 100).convert("RGB")
 (OUT / "large.heic").write_bytes(heic_bytes(big))
 
+# Plain landscape PNG with alpha, 400x300: blue with opaque top-left red block
+png_img = Image.new("RGBA", (400, 300), (0, 0, 255, 255))
+png_img.paste((255, 0, 0, 255), (0, 0, 100, 75))
+buf_png = io.BytesIO()
+png_img.save(buf_png, format="PNG")
+(OUT / "plain.png").write_bytes(buf_png.getvalue())
+
+# Plain WebP, 400x300
+buf_webp = io.BytesIO()
+png_img.save(buf_webp, format="WEBP", quality=80)
+(OUT / "plain.webp").write_bytes(buf_webp.getvalue())
+
+# Plain JPEG, 400x300
+buf_jpg = io.BytesIO()
+marker_image(400, 300).save(buf_jpg, format="JPEG", quality=80)
+plain_jpg = buf_jpg.getvalue()
+(OUT / "plain.jpg").write_bytes(plain_jpg)
+
+# Rotated JPEG with EXIF 6: stored 400x300, displays 300x400
+exif_jpg = Image.Exif()
+exif_jpg[0x0112] = 6
+buf_rot_jpg = io.BytesIO()
+marker_image(400, 300).save(buf_rot_jpg, format="JPEG", quality=80, exif=exif_jpg)
+(OUT / "rotated.jpg").write_bytes(buf_rot_jpg.getvalue())
+
+# A PNG saved with .jpg extension
+(OUT / "really-png.jpg").write_bytes(buf_png.getvalue())
+
+# Truncated JPEG
+(OUT / "truncated.jpg").write_bytes(plain_jpg[:len(plain_jpg) // 2])
+
 for p in sorted(OUT.iterdir()):
     print(f"{p.name}: {p.stat().st_size} bytes")

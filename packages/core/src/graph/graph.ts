@@ -6,8 +6,15 @@ export interface CancelSignal {
   addEventListener(type: 'abort', listener: () => void): void;
 }
 
-export type OptionSpec = { key: string; label: string; type: 'number'; min: number; max: number; default: number };
-export type Options = Record<string, number>;
+type Base = { key: string; label: string; help?: string; /** Show only when another option has this value. */ showIf?: { key: string; is: (string | number)[] } };
+export type OptionSpec =
+  | (Base & { type: 'number'; min: number; max: number; step?: number; unit?: string; default: number })
+  | (Base & { type: 'select'; choices: { value: string; label: string }[]; default: string })
+  | (Base & { type: 'text'; placeholder?: string; default: string });
+export type Options = Record<string, number | string>;
+
+/** A file moving through a job: its bytes and its (detected) format. */
+export type Item = { bytes: Uint8Array; format: Format };
 
 export type RunContext = {
   signal: CancelSignal;
@@ -24,9 +31,9 @@ export type Edge = {
   engineVersion: string; // pinned, stored in the job record
   options: OptionSpec[]; // drives the options UI
   lossy: boolean; // quality cost
-  memFactor: number; // images: est. RAM = w × h × 4 × memFactor
+  memFactor: number; // images: est. RAM = w × h × 4 × memFactor; others: input bytes × memFactor
   experimental?: boolean;
-  run: (input: Uint8Array, opts: Options, ctx: RunContext) => Promise<Uint8Array>;
+  run: (inputs: Item[], opts: Options, ctx: RunContext) => Promise<Item[]>;
 };
 
 const MAX_HOPS = 2;
@@ -48,4 +55,21 @@ export function planRoute(edges: Edge[], from: Format, to: Format, engines: Edge
   return routes.sort((a, b) => cost(a) - cost(b))[0] ?? null;
 }
 
-export const defaultOptions = (e: Edge): Options => Object.fromEntries(e.options.map((o) => [o.key, o.default]));
+export const defaultOptions = (specs: OptionSpec[]): Options => Object.fromEntries(specs.map((o) => [o.key, o.default]));
+
+/** Fill missing values with defaults and clamp numbers into range; unknown keys are dropped. */
+export function resolveOptions(specs: OptionSpec[], given: Options = {}): Options {
+  const out: Options = {};
+  for (const s of specs) {
+    const v = given[s.key];
+    if (s.type === 'number') {
+      const n = typeof v === 'number' && Number.isFinite(v) ? v : Number(v);
+      out[s.key] = Number.isFinite(n) && v !== '' && v !== undefined ? Math.min(s.max, Math.max(s.min, n)) : s.default;
+    } else if (s.type === 'select') {
+      out[s.key] = s.choices.some((c) => c.value === v) ? (v as string) : s.default;
+    } else {
+      out[s.key] = typeof v === 'string' ? v : s.default;
+    }
+  }
+  return out;
+}
