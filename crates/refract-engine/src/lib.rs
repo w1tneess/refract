@@ -1,10 +1,12 @@
 pub mod audio;
 pub mod image;
 pub mod native;
+pub mod pdf;
 
 pub use audio::*;
 pub use image::*;
 pub use native::*;
+pub use pdf::*;
 
 #[cfg(test)]
 mod tests {
@@ -92,5 +94,48 @@ mod tests {
         assert!(!trimmed_bytes.is_empty());
         assert_eq!(refract_core::detect(&trimmed_bytes), Some(Format::Wav));
     }
+
+    #[test]
+    fn test_pdf_probe_info() {
+        let plain_pdf = std::fs::read(fixture_path("plain.pdf")).expect("Read plain.pdf");
+        let info = pdf::probe_pdf(&plain_pdf).expect("Probe PDF");
+        assert_eq!(info.page_count, 3);
+        assert!(!info.is_encrypted);
+
+        let locked_pdf = std::fs::read(fixture_path("locked.pdf")).expect("Read locked.pdf");
+        let locked_info = pdf::probe_pdf(&locked_pdf).expect("Probe locked PDF");
+        assert!(locked_info.is_encrypted);
+    }
+
+    #[test]
+    fn test_pdf_parse_ranges_and_order() {
+        let ranges = pdf::parse_ranges("1-2, 3", 3).expect("Parse ranges");
+        assert_eq!(ranges, vec![vec![1, 2], vec![3]]);
+
+        let order = pdf::parse_order("3, 1, 2", 3).expect("Parse order");
+        assert_eq!(order, vec![3, 1, 2]);
+
+        // Duplicate page should fail
+        assert!(pdf::parse_order("3, 3, 1", 3).is_err());
+        // Wrong count should fail
+        assert!(pdf::parse_order("1, 2", 3).is_err());
+    }
+
+    #[test]
+    fn test_pdf_compress() {
+        let plain_pdf = std::fs::read(fixture_path("plain.pdf")).expect("Read plain.pdf");
+        let compressed = pdf::compress_pdf(&plain_pdf).expect("Compress PDF");
+        assert!(!compressed.is_empty());
+        assert_eq!(refract_core::detect(&compressed), Some(Format::Pdf));
+    }
+
+    #[test]
+    fn test_pdf_merge() {
+        let plain_pdf = std::fs::read(fixture_path("plain.pdf")).expect("Read plain.pdf");
+        let merged = pdf::merge_pdfs(&[&plain_pdf, &plain_pdf]).expect("Merge PDFs");
+        assert!(!merged.is_empty());
+        assert_eq!(refract_core::detect(&merged), Some(Format::Pdf));
+    }
+
 
 }
