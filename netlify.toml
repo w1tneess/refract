@@ -1,0 +1,31 @@
+[build]
+  base = "apps/web"
+  command = "pnpm build"
+  publish = "dist"
+  functions = ""
+
+[build.environment]
+  VITE_BASE = "/"
+
+[[headers]]
+  for = "/assets/*.wasm"
+  [headers.values]
+    Content-Type = "application/wasm"
+    Cache-Control = "public, max-age=31536000, immutable"
+
+[[headers]]
+  for = "/assets/*.{js,mjs,css}"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    Cross-Origin-Embedder-Policy = "require-corp"
+    Cross-Origin-Opener-Policy = "same-origin"
+
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
+  conditions = {Path = ["!assets/*"]}

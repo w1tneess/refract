@@ -1,63 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { TOOLS, type Options, type ToolId } from '@refract/core';
-
-export type Preset = {
-  id: string;
-  title: string;
-  description: string;
-  tool: ToolId;
-  options?: Options;
-  icon: 'image' | 'pdf' | 'audio';
-};
-
-export const POPULAR_PRESETS: Preset[] = [
-  {
-    id: 'heic-to-jpg',
-    title: 'iPhone HEIC to JPEG',
-    description: 'Convert Apple Live Photos and camera HEIC files to standard JPEG',
-    tool: 'convert-image',
-    options: { to: 'jpeg', quality: 90 },
-    icon: 'image',
-  },
-  {
-    id: 'next-gen-webp',
-    title: 'WebP optimization',
-    description: 'Convert photos to WebP format for smaller file sizes',
-    tool: 'convert-image',
-    options: { to: 'webp', quality: 85 },
-    icon: 'image',
-  },
-  {
-    id: 'compress-discord',
-    title: 'Compress under 25 MB',
-    description: 'Binary quality search to compress photos for chat or email attachments',
-    tool: 'compress-image',
-    options: { targetKB: 24000 },
-    icon: 'image',
-  },
-  {
-    id: 'merge-docs',
-    title: 'Merge PDFs',
-    description: 'Combine multiple PDF scans and documents into one file',
-    tool: 'merge-pdf',
-    icon: 'pdf',
-  },
-  {
-    id: 'shrink-pdf',
-    title: 'Compress PDF',
-    description: 'Stream recompression and object linearization powered by QPDF',
-    tool: 'compress-pdf',
-    icon: 'pdf',
-  },
-  {
-    id: 'trim-audio-ringtone',
-    title: 'Trim audio',
-    description: 'Cut audio track with millisecond boundaries for clips and ringtones',
-    tool: 'trim-audio',
-    options: { start: '00:00', end: '00:30' },
-    icon: 'audio',
-  },
-];
+import { TOOLS, type ToolId } from '@refract/core';
+import { POPULAR_PRESETS, type Preset } from './config/presets.ts';
 
 type Item =
   | { type: 'tool'; id: ToolId; label: string; blurb: string; accepts: string }
@@ -111,7 +54,8 @@ export function CommandPalette({
     return (
       item.preset.title.toLowerCase().includes(q) ||
       item.preset.description.toLowerCase().includes(q) ||
-      item.preset.tool.toLowerCase().includes(q)
+      item.preset.tool.toLowerCase().includes(q) ||
+      item.preset.domain.toLowerCase().includes(q)
     );
   });
 
@@ -186,7 +130,7 @@ export function CommandPalette({
             ref={inputRef}
             type="text"
             className="palette-input"
-            placeholder="Search tools, formats, or presets..."
+            placeholder="Search tools"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
@@ -209,7 +153,7 @@ export function CommandPalette({
                     onClick={() => selectItem(item)}
                     onMouseEnter={() => setActiveIndex(idx)}
                   >
-                    <span className="palette-badge preset-badge">Preset</span>
+                    <span className={`palette-badge kind-${item.preset.domain}`}>{kindLabel[item.preset.domain] ?? 'Preset'}</span>
                     <div className="palette-info">
                       <strong className="palette-title">{item.preset.title}</strong>
                       <span className="palette-desc">{item.preset.description}</span>

@@ -219,7 +219,7 @@ export function OpticalLoupeModal({ job, onClose }: OpticalLoupeModalProps) {
         {/* Footer Info */}
         <div className="loupe-footer">
           <span className="loupe-hint">
-            Drag divider horizontally to inspect compression artifacts and high-frequency edge detail.
+            Drag divider horizontally to inspect compression artifacts and high-frequency edge detail
           </span>
           <span ref={posTextRef} className="loupe-pos-indicator">
             {sliderPos}% split

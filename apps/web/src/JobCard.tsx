@@ -3,8 +3,11 @@ import { describeError, FORMATS, isTerminal, TOOLS, type ToolId } from '@refract
 import type { JobView } from './useJobs.ts';
 import { OpticalLoupeModal } from './OpticalLoupeModal.tsx';
 
-export const size = (n?: number) =>
-  n === undefined ? '—' : n < 1024 * 1024 ? `${Math.max(1, Math.round(n / 1024))} KB` : `${(n / 1024 / 1024).toFixed(1)} MB`;
+export const size = (n?: number) => {
+  if (n === undefined) return '—';
+  if (n === 0) return '0 KB';
+  return n < 1024 * 1024 ? `${Math.max(1, Math.round(n / 1024))} KB` : `${(n / 1024 / 1024).toFixed(1)} MB`;
+};
 
 const STATE_LABEL: Record<JobView['state'], string> = {
   Queued: 'Waiting',
@@ -22,7 +25,7 @@ function KindIcon({ tool }: { tool: ToolId }) {
   const accepts = TOOLS[tool]?.accepts ?? 'image';
   if (accepts === 'pdf') {
     return (
-      <svg className="job-kind-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
         <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
         <polyline points="14 2 14 8 20 8" />
         <line x1="16" y1="13" x2="8" y2="13" />
@@ -32,7 +35,7 @@ function KindIcon({ tool }: { tool: ToolId }) {
   }
   if (accepts === 'audio') {
     return (
-      <svg className="job-kind-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
         <path d="M9 18V5l12-2v13" />
         <circle cx="6" cy="18" r="3" />
         <circle cx="18" cy="16" r="3" />
@@ -40,7 +43,7 @@ function KindIcon({ tool }: { tool: ToolId }) {
     );
   }
   return (
-    <svg className="job-kind-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
       <circle cx="8.5" cy="8.5" r="1.5" />
       <polyline points="21 15 16 10 5 21" />
@@ -55,15 +58,21 @@ function PasswordForm({ job, onAnswer }: { job: JobView; onAnswer: (pw: string |
   const [show, setShow] = useState(false);
 
   return (
-    <form className="password" onSubmit={(e) => { e.preventDefault(); onAnswer(pw, all); }}>
+    <form
+      className="password"
+      onSubmit={(e) => {
+        e.preventDefault();
+        onAnswer(pw, all);
+      }}
+    >
       <label htmlFor={`${id}-pw`} className="password-label">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
           <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
           <path d="M7 11V7a5 5 0 0 1 10 0v4" />
         </svg>
         <span>
           <strong>{job.password!.file}</strong> is password-protected
-          {job.password!.wrong ? '. That password is wrong; try again' : ''}.
+          {job.password!.wrong ? ' · that password is wrong; try again' : ''}
         </span>
       </label>
       <div className="password-input-row">
@@ -76,12 +85,7 @@ function PasswordForm({ job, onAnswer }: { job: JobView; onAnswer: (pw: string |
           onChange={(e) => setPw(e.target.value)}
           aria-invalid={job.password!.wrong || undefined}
         />
-        <button
-          type="button"
-          className="button subtle-btn"
-          onClick={() => setShow(!show)}
-          aria-label={show ? 'Hide password' : 'Show password'}
-        >
+        <button type="button" className="button subtle-btn" onClick={() => setShow(!show)} aria-label={show ? 'Hide password' : 'Show password'}>
           {show ? 'Hide' : 'Show'}
         </button>
       </div>
@@ -90,8 +94,12 @@ function PasswordForm({ job, onAnswer }: { job: JobView; onAnswer: (pw: string |
         <span>Use for all locked files</span>
       </label>
       <div className="job-actions">
-        <button type="submit" className="primary">Unlock</button>
-        <button type="button" onClick={() => onAnswer(null, all)}>Skip this file</button>
+        <button type="submit" className="button primary">
+          Unlock
+        </button>
+        <button type="button" className="button" onClick={() => onAnswer(null, all)}>
+          Skip this file
+        </button>
       </div>
     </form>
   );
@@ -117,17 +125,15 @@ export function JobCard({
   const isBusy = !isTerminal(job.state);
   const title = job.inputNames.length > 1 ? `${job.inputName} + ${job.inputNames.length - 1} more` : job.inputName;
   const outKind = job.outputs?.[0] ? FORMATS[job.outputs[0]!.format].kind : null;
-  const compatibleTools = outKind ? (Object.keys(TOOLS) as ToolId[]).filter((id) => TOOLS[id].accepts === outKind && id !== job.tool) : [];
+  const compatibleTools = outKind
+    ? (Object.keys(TOOLS) as ToolId[]).filter((id) => TOOLS[id].accepts === outKind && id !== job.tool)
+    : [];
 
-  // Calculate size change percentage
   let sizeDeltaBadge = null;
   if (job.inputSize && job.outputSize && job.inputSize > 0) {
     const pct = Math.round(((job.outputSize - job.inputSize) / job.inputSize) * 100);
-    if (pct < 0) {
-      sizeDeltaBadge = <span className="job-delta job-delta-saved">{pct}%</span>;
-    } else if (pct > 0) {
-      sizeDeltaBadge = <span className="job-delta job-delta-increased">+{pct}%</span>;
-    }
+    if (pct < 0) sizeDeltaBadge = <span className="job-delta job-delta-saved">{pct}%</span>;
+    else if (pct > 0) sizeDeltaBadge = <span className="job-delta job-delta-increased">+{pct}%</span>;
   }
 
   const isImageOut = job.state === 'Saved' && outKind === 'image' && !job.multi && job.url;
@@ -137,9 +143,14 @@ export function JobCard({
     <li className={`job job-${job.state.toLowerCase()}`} data-state={job.state} data-timings={JSON.stringify(job.timings)}>
       <div className="job-head">
         <div className="job-title-group">
-          <KindIcon tool={job.tool} />
-          <span className="job-name" title={job.inputNames.join('\n')}>
-            {title}
+          <span className="job-kind" aria-hidden="true">
+            <KindIcon tool={job.tool} />
+          </span>
+          <span className="job-title-copy">
+            <span className="job-name" title={job.inputNames.join('\n')}>
+              {title}
+            </span>
+            <span className="job-tool">{TOOLS[job.tool].label}</span>
           </span>
         </div>
         <div className="job-head-meta">
@@ -161,63 +172,41 @@ export function JobCard({
         </div>
       </div>
 
-      {isBusy && (
-        <progress
-          className="job-progress"
-          aria-label={`Working on ${title}`}
-        />
-      )}
+      {isBusy && <progress className="job-progress" aria-label={`Working on ${title}`} />}
 
       <div className="job-meta-row">
-        <p className="job-tool">{TOOLS[job.tool].label}</p>
-        <p className="job-sizes">
+        <span className="job-sizes">
           <span className="job-size-numbers">
             {size(job.inputSize)} → {size(job.outputSize)}
           </span>
           {sizeDeltaBadge}
-          {job.state === 'Saved' && (
-            <span className="job-out">
-              {' · '}{job.outputName}{job.multi ? ` (${job.outputs?.length} files)` : ''}
-            </span>
-          )}
-        </p>
+        </span>
+        {job.state === 'Saved' && (
+          <span className="job-out">
+            {job.outputName}
+            {job.multi ? ` · ${job.outputs?.length} files` : ''}
+          </span>
+        )}
       </div>
 
-      {/* Interactive Media Previews for Finished Outputs */}
       {isImageOut && (
         <div className="job-preview-row">
-          <button
-            type="button"
-            className="job-thumb-btn"
-            onClick={() => setLightboxOpen(true)}
-            title="Click to preview full-size image"
-          >
+          <button type="button" className="job-thumb-btn" onClick={() => setLightboxOpen(true)} title="Click to preview full-size image">
             <img src={job.url} alt={`Output thumbnail for ${job.outputName}`} className="job-thumb-img" />
             <span className="job-thumb-overlay">Preview</span>
           </button>
 
-          <button
-            type="button"
-            className="job-loupe-btn"
-            onClick={() => setLoupeOpen(true)}
-            title="Compare Before vs After with Optical Loupe"
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <button type="button" className="job-loupe-btn" onClick={() => setLoupeOpen(true)} title="Compare before and after">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
               <circle cx="12" cy="12" r="3" />
               <path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7z" />
             </svg>
-            <span>Optical loupe</span>
+            Compare
           </button>
         </div>
       )}
 
-      {/* Optical Loupe Split Comparison */}
-      {loupeOpen && (
-        <OpticalLoupeModal
-          job={job}
-          onClose={() => setLoupeOpen(false)}
-        />
-      )}
+      {loupeOpen && <OpticalLoupeModal job={job} onClose={() => setLoupeOpen(false)} />}
 
       {isAudioOut && (
         <div className="job-audio-player-wrap">
@@ -227,18 +216,12 @@ export function JobCard({
         </div>
       )}
 
-      {/* Lightbox for Image Preview */}
       {lightboxOpen && job.url && (
         <div className="lightbox-backdrop" onClick={() => setLightboxOpen(false)}>
           <div className="lightbox-modal" onClick={(e) => e.stopPropagation()}>
             <div className="lightbox-header">
               <span className="lightbox-title">{job.outputName}</span>
-              <button
-                type="button"
-                className="job-dismiss-btn"
-                onClick={() => setLightboxOpen(false)}
-                aria-label="Close image preview"
-              >
+              <button type="button" className="job-dismiss-btn" onClick={() => setLightboxOpen(false)} aria-label="Close image preview">
                 ×
               </button>
             </div>
@@ -249,9 +232,7 @@ export function JobCard({
 
       {job.notice && <p className="job-notice">{job.notice}</p>}
 
-      {job.state === 'NeedsPassword' && job.password && (
-        <PasswordForm job={job} onAnswer={onPassword} />
-      )}
+      {job.state === 'NeedsPassword' && job.password && <PasswordForm job={job} onAnswer={onPassword} />}
 
       {job.error && (
         <div className="job-error">
@@ -265,13 +246,13 @@ export function JobCard({
 
       <div className="job-actions">
         {isBusy && (
-          <button type="button" onClick={onCancel} aria-label={`Cancel ${job.inputName}`}>
+          <button type="button" className="button" onClick={onCancel} aria-label={`Cancel ${job.inputName}`}>
             Cancel
           </button>
         )}
         {job.state === 'Failed' && (
-          <button type="button" className="retry-btn" onClick={onRetry}>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <button type="button" className="button retry-btn" onClick={onRetry}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
               <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
               <path d="M3 3v5h5" />
             </svg>
@@ -280,7 +261,7 @@ export function JobCard({
         )}
         {job.state === 'Saved' && job.outputs && compatibleTools.length > 0 && onUseInTool && (
           <div className="use-in-tool-group">
-            <button type="button" onClick={() => onUseInTool(compatibleTools[0]!, job)}>
+            <button type="button" className="button" onClick={() => onUseInTool(compatibleTools[0]!, job)}>
               Use in another tool
             </button>
             <select
@@ -294,9 +275,9 @@ export function JobCard({
               <option value="" disabled>
                 Choose tool…
               </option>
-              {compatibleTools.map((t) => (
-                <option key={t} value={t}>
-                  {TOOLS[t].label}
+              {compatibleTools.map((id) => (
+                <option key={id} value={id}>
+                  {TOOLS[id].label}
                 </option>
               ))}
             </select>
@@ -304,7 +285,7 @@ export function JobCard({
         )}
         {job.url && (
           <a className="button primary download-btn" href={job.url} download={job.outputName}>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
               <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
               <polyline points="7 10 12 15 17 10" />
               <line x1="12" y1="15" x2="12" y2="3" />

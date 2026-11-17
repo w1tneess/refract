@@ -8,8 +8,11 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview --port 4173 --strictPort",
+    "start": "vite preview --port 4173 --strictPort",
     "typecheck": "tsc -p .",
-    "e2e": "playwright test"
+    "e2e": "playwright test",
+    "deploy:vercel": "vercel --prod",
+    "deploy:netlify": "netlify deploy --prod --dir=dist"
   },
   "dependencies": {
     "@refract/core": "workspace:*",

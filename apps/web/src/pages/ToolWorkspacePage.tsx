@@ -3,8 +3,11 @@ import { batchStatus, FORMATS, resolveOptions, TOOLS, type Kind, type Options, t
 import { JobCard, size } from '../JobCard.tsx';
 import { OptionsForm } from '../OptionsForm.tsx';
 import type { JobView } from '../useJobs.ts';
-import { RECIPES_BY_DOMAIN, type DomainId, type Recipe } from '../config/recipes.ts';
+import type { Preset } from '../config/presets.ts';
+import { presetsForTool } from '../config/presets.ts';
+import { domainOfTool } from '../config/domains.ts';
 import { TOOLS_METADATA } from '../config/toolPresentation.ts';
+import { DomainIcon } from '../components/layout/DomainIcon.tsx';
 import { createSampleAudio, createSampleImage, createSamplePdf } from '../sampleFiles.ts';
 
 const ACCEPT: Record<Kind, string> = Object.fromEntries(
@@ -17,10 +20,23 @@ const ACCEPT: Record<Kind, string> = Object.fromEntries(
   ]),
 ) as Record<Kind, string>;
 
-const FORMAT_HINTS: Record<Kind, string[]> = {
+const KIND_HINTS: Record<Kind, string[]> = {
   image: ['HEIC', 'JPEG', 'PNG', 'WebP'],
   pdf: ['PDF', 'Password unlock', 'Multi-page'],
   audio: ['MP3', 'WAV', 'M4A', 'OGG'],
+};
+
+const KIND_PLURAL: Record<Kind, string> = {
+  image: 'images',
+  pdf: 'PDF documents',
+  audio: 'audio files',
+};
+
+const BATCH_LABEL: Record<'processing' | 'waiting' | 'error' | 'finished', string> = {
+  processing: 'Processing',
+  waiting: 'Waiting',
+  error: 'Needs attention',
+  finished: 'Finished',
 };
 
 interface ToolWorkspacePageProps {
@@ -42,7 +58,8 @@ interface ToolWorkspacePageProps {
   onClearZipUrl: () => void;
   activePresetNotice?: string | null;
   onDismissNotice?: () => void;
-  onApplyRecipe: (recipe: Recipe) => void;
+  onApplyPreset: (preset: Preset) => void;
+  onSelectTool: (tool: ToolId) => void;
   onNavigateHome: () => void;
 }
 
@@ -65,7 +82,8 @@ export function ToolWorkspacePage({
   onClearZipUrl,
   activePresetNotice,
   onDismissNotice,
-  onApplyRecipe,
+  onApplyPreset,
+  onSelectTool,
   onNavigateHome,
 }: ToolWorkspacePageProps) {
   const [isDropOver, setIsDropOver] = useState(false);
@@ -74,42 +92,37 @@ export function ToolWorkspacePage({
 
   const t = TOOLS[tool];
   const meta = TOOLS_METADATA[tool];
-  const domainLabel = t.accepts === 'image' ? 'Images' : t.accepts === 'pdf' ? 'PDF' : 'Audio';
-  const domainId = (t.accepts === 'image' ? 'image' : t.accepts === 'pdf' ? 'pdf' : 'audio') as DomainId;
+  const domain = domainOfTool(tool);
 
-  // Filter jobs relevant to current context or all
   const savedJobs = jobs.filter((j) => j.state === 'Saved');
   const savedCount = savedJobs.length;
   const runningCount = jobs.filter((j) => j.state === 'Running' || j.state === 'Probing' || j.state === 'Verifying').length;
-  const waitingCount = jobs.filter((j) => j.state === 'Queued').length;
+  const waitingCount = jobs.filter((j) => j.state === 'Queued' || j.state === 'NeedsPassword').length;
   const failedCount = jobs.filter((j) => j.state === 'Failed' || j.state === 'Rejected').length;
   const batch = jobs.length ? batchStatus(jobs.map((j) => j.state)) : null;
+  const toolJobs = jobs.filter((j) => j.tool === tool);
+  const quickPresets = presetsForTool(tool).filter((preset) => preset.options);
 
   const completedWithSizes = savedJobs.filter((j) => j.inputSize && j.outputSize);
   const totalInputBytes = completedWithSizes.reduce((acc, j) => acc + (j.inputSize || 0), 0);
   const totalOutputBytes = completedWithSizes.reduce((acc, j) => acc + (j.outputSize || 0), 0);
   const savedPercentage = totalInputBytes > 0 ? Math.round(((totalInputBytes - totalOutputBytes) / totalInputBytes) * 100) : 0;
-  const totalSavedBytes = Math.max(0, totalInputBytes - totalOutputBytes);
+  const sizeChange = totalOutputBytes - totalInputBytes;
 
   const handleDrop = (e: DragEvent) => {
     e.preventDefault();
+    e.stopPropagation();
     setIsDropOver(false);
-    if (e.dataTransfer.files?.length) {
-      onAddFiles([...e.dataTransfer.files]);
-    }
+    if (e.dataTransfer.files?.length) onAddFiles([...e.dataTransfer.files]);
   };
 
   const handleLoadSample = async () => {
     try {
       setSampleLoading(true);
       let file: File;
-      if (t.accepts === 'image') {
-        file = await createSampleImage();
-      } else if (t.accepts === 'pdf') {
-        file = await createSamplePdf();
-      } else {
-        file = createSampleAudio();
-      }
+      if (t.accepts === 'image') file = await createSampleImage();
+      else if (t.accepts === 'pdf') file = await createSamplePdf();
+      else file = createSampleAudio();
       onAddFiles([file]);
     } finally {
       setSampleLoading(false);
@@ -117,231 +130,119 @@ export function ToolWorkspacePage({
   };
 
   return (
-    <div className="tool-workspace-page">
-      {/* 1. Breadcrumbs */}
+    <div className="workspace-page">
       <nav aria-label="Breadcrumb" className="workspace-breadcrumb">
-        <ol className="breadcrumb-list">
-          <li className="breadcrumb-item">
-            <a
-              href="#home"
-              onClick={(e) => {
-                e.preventDefault();
-                onNavigateHome();
-              }}
-            >
-              Workspace
-            </a>
-          </li>
-          <li className="breadcrumb-separator" aria-hidden="true">/</li>
-          <li className="breadcrumb-item">
-            <span>{domainLabel}</span>
-          </li>
-          <li className="breadcrumb-separator" aria-hidden="true">/</li>
-          <li className="breadcrumb-item is-active" aria-current="page">
-            <span>{t.label}</span>
-          </li>
-        </ol>
+        <a
+          href="#home"
+          onClick={(e) => {
+            e.preventDefault();
+            onNavigateHome();
+          }}
+        >
+          All tools
+        </a>
+        <span aria-hidden="true">/</span>
+        <button type="button" className="breadcrumb-domain" onClick={() => onSelectTool(domain.tools[0]!)}>
+          {domain.shortLabel}
+        </button>
+        <span aria-hidden="true">/</span>
+        <span aria-current="page">{t.label}</span>
       </nav>
 
-      {/* 2. Tool Heading */}
-      <header className="workspace-tool-header">
-        <div className="tool-title-row">
-          <h1 id="tool-title" className="workspace-tool-title">
+      <header className="workspace-head">
+        <div className="workspace-title-row">
+          <span className="workspace-domain">
+            <DomainIcon domain={domain.id} size={13} />
+            {domain.label}
+          </span>
+          <h1 id="tool-title" className="workspace-title">
             {t.label}
           </h1>
-          <span className="tool-engine-badge">{meta?.engine ?? 'WASM Engine'}</span>
+          {meta?.engine && <span className="workspace-engine">{meta.engine}</span>}
         </div>
-        <p className="workspace-tool-description">
-          {meta?.description || t.blurb}
-        </p>
-        <div className="workspace-tool-meta-bar">
-          <div className="meta-bar-item">
-            <span className="meta-bar-label">Input formats:</span>
-            <span className="meta-bar-value">{meta?.inputFormats.join(', ') ?? t.accepts}</span>
-          </div>
-          <div className="meta-bar-item">
-            <span className="meta-bar-label">Output:</span>
-            <span className="meta-bar-value">{meta?.outputCapability ?? 'Processed file'}</span>
-          </div>
-          <div className="meta-bar-item">
-            <span className="meta-bar-label">Processing:</span>
-            <span className="meta-bar-value">100% On-device WASM</span>
-          </div>
+        <p className="workspace-desc">{meta?.description ?? t.blurb}</p>
+        <div className="workspace-meta">
+          <span className="meta-chip">Accepts {meta?.inputFormats.join(', ') ?? t.accepts}</span>
+          <span className="meta-chip">{t.inputs === 'many' ? 'Files combine into one job' : 'One file per job'}</span>
+          <span className="meta-chip meta-chip-quiet">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+              <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+            </svg>
+            On-device
+          </span>
         </div>
       </header>
 
-      {/* Active Preset Notification Banner */}
       {activePresetNotice && (
-        <div className="preset-notice-bar" role="status">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" className="notice-icon">
+        <div className="notice-bar" role="status">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
             <polyline points="20 6 9 17 4 12" />
           </svg>
           <span>{activePresetNotice}</span>
           {onDismissNotice && (
-            <button
-              type="button"
-              className="notice-dismiss"
-              onClick={onDismissNotice}
-              aria-label="Dismiss notice"
-            >
+            <button type="button" className="notice-dismiss" onClick={onDismissNotice} aria-label="Dismiss notice">
               ×
             </button>
           )}
         </div>
       )}
 
-      {/* 3. File Staging Surface (Hero when empty, Compact when jobs exist) */}
-      {jobs.length === 0 ? (
-        <div className="workspace-empty-layout">
-          {/* 01 / File Staging Dropzone */}
-          <section className="stage-section" aria-labelledby="stage-heading">
-            <div className="section-label-row">
-              <span className="section-step-num">01</span>
-              <span className="section-step-slash">/</span>
-              <h2 id="stage-heading" className="section-step-title">Stage files</h2>
-              <span className="section-target-badge">{t.label}</span>
-            </div>
-
+      <div className="workspace-grid">
+        <div className="workspace-main">
+          <section className={`panel drop-panel${jobs.length ? ' is-compact' : ''}`} aria-labelledby="drop-heading">
             <label
               htmlFor={inputId}
-              className={`dropzone utility-stage-dropzone${isDropOver ? ' over' : ''}`}
+              className={`dropzone workspace-dropzone${isDropOver ? ' over' : ''}`}
               data-testid="dropzone"
               onDragOver={(e) => {
                 e.preventDefault();
+                e.stopPropagation();
                 setIsDropOver(true);
               }}
               onDragLeave={() => setIsDropOver(false)}
               onDrop={handleDrop}
             >
-              <span className="crosshair ch-tl">+</span>
-              <span className="crosshair ch-tr">+</span>
-              <span className="crosshair ch-bl">+</span>
-              <span className="crosshair ch-br">+</span>
-
-              <div className="stage-drop-body">
-                <div className="stage-drop-icon" aria-hidden="true">
-                  <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+              <span className="dropzone-inner">
+                <span className="dropzone-icon" aria-hidden="true">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
                     <polyline points="17 8 12 3 7 8" />
                     <line x1="12" y1="3" x2="12" y2="15" />
                   </svg>
-                </div>
-
-                <strong className="stage-drop-title">
-                  Drop {t.accepts === 'image' ? 'images' : t.accepts === 'pdf' ? 'PDF documents' : 'audio tracks'} to convert
-                </strong>
-                <span className="stage-drop-subtitle">
-                  Click to browse  ·  Paste from clipboard ⌘V
                 </span>
-
-                <div className="stage-format-pills">
-                  {FORMAT_HINTS[t.accepts]?.map((fmt) => (
-                    <span key={fmt} className="stage-format-chip">
-                      {fmt}
-                    </span>
-                  ))}
-                </div>
-
-                {/* Sample Generator Button */}
-                <div className="stage-quick-start" onClick={(e) => e.stopPropagation()}>
-                  <span className="stage-quick-label">Try sample:</span>
+                <span className="dropzone-copy">
+                  <strong id="drop-heading" className="dropzone-title">
+                    {jobs.length ? `Add more ${KIND_PLURAL[t.accepts]}` : `Drop ${KIND_PLURAL[t.accepts]} here`}
+                  </strong>
+                  <span className="dropzone-sub">
+                    or click to browse · paste with <kbd>Ctrl V</kbd>
+                  </span>
+                </span>
+                {!jobs.length && (
+                  <span className="dropzone-formats">
+                    {KIND_HINTS[t.accepts].map((hint) => (
+                      <span key={hint} className="format-pill">
+                        {hint}
+                      </span>
+                    ))}
+                  </span>
+                )}
+                <span className="dropzone-sample">
                   <button
                     type="button"
-                    className="stage-sample-btn"
+                    className="link"
                     disabled={sampleLoading}
-                    onClick={handleLoadSample}
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      void handleLoadSample();
+                    }}
                   >
-                    {sampleLoading ? 'Generating…' : `Sample ${domainLabel} file`}
+                    {sampleLoading ? 'Preparing sample…' : 'Try a sample file'}
                   </button>
-                </div>
-              </div>
-
-              <input
-                id={inputId}
-                className="visually-hidden"
-                type="file"
-                multiple
-                accept={ACCEPT[t.accepts]}
-                onChange={(e) => {
-                  if (e.target.files?.length) {
-                    onAddFiles([...e.target.files]);
-                    e.target.value = '';
-                  }
-                }}
-              />
-            </label>
-          </section>
-
-          {/* 02 / Target Pipeline Configuration */}
-          <section className="pipeline-section" aria-labelledby="pipeline-heading">
-            <div className="section-label-row">
-              <span className="section-step-num">02</span>
-              <span className="section-step-slash">/</span>
-              <h2 id="pipeline-heading" className="section-step-title">
-                Configuration ({t.label})
-              </h2>
-              <span className="pipeline-tool-desc">{t.blurb}</span>
-            </div>
-
-            <div className="pipeline-dock">
-              <OptionsForm
-                specs={t.options}
-                values={options}
-                onChange={onOptionsChange}
-                onReset={onResetOptions}
-              />
-            </div>
-          </section>
-
-          {/* 03 / Quick Recipes */}
-          <section className="recipes-section" aria-labelledby="recipes-heading">
-            <div className="section-label-row">
-              <span className="section-step-num">03</span>
-              <span className="section-step-slash">/</span>
-              <h2 id="recipes-heading" className="section-step-title">Quick recipes</h2>
-              <span className="recipes-domain-tag">({domainLabel})</span>
-            </div>
-
-            <div className="recipes-grid">
-              {RECIPES_BY_DOMAIN[domainId]?.map((r) => (
-                <button
-                  key={r.id}
-                  type="button"
-                  className="recipe-card-btn"
-                  onClick={() => onApplyRecipe(r)}
-                >
-                  <span className="recipe-btn-title">{r.label}</span>
-                  <span className="recipe-btn-arrow">→</span>
-                </button>
-              ))}
-            </div>
-          </section>
-        </div>
-      ) : (
-        /* Workspace Active Processing Layout (Queue Left + Output Settings Right) */
-        <div className="workspace-active-layout">
-          {/* Top Compact File Staging Bar */}
-          <div className="queue-top-action-bar">
-            <label
-              htmlFor={inputId}
-              className={`queue-top-dropbar${isDropOver ? ' over' : ''}`}
-              data-testid="dropzone"
-              onDragOver={(e) => {
-                e.preventDefault();
-                setIsDropOver(true);
-              }}
-              onDragLeave={() => setIsDropOver(false)}
-              onDrop={handleDrop}
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <line x1="12" y1="5" x2="12" y2="19" />
-                <line x1="5" y1="12" x2="19" y2="12" />
-              </svg>
-              <span className="queue-dropbar-text">
-                Add more files to queue or drop anywhere (⌘V)
+                </span>
               </span>
-              <span className="queue-dropbar-badge">{t.accepts}</span>
-
               <input
                 id={inputId}
                 className="visually-hidden"
@@ -356,163 +257,156 @@ export function ToolWorkspacePage({
                 }}
               />
             </label>
+          </section>
 
-            <div className="queue-top-actions">
-              {savedCount > 0 && (
-                <button
-                  type="button"
-                  className="button clear-btn queue-clear-action"
-                  onClick={onClearJobs}
-                  title="Clear finished jobs from queue"
-                >
-                  Clear Finished (✕)
-                </button>
-              )}
-            </div>
-          </div>
-
-          {/* Split Queue + Persistent Output Inspector */}
-          <div className="queue-split-layout">
-            {/* Left Column: Processing Queue & Job Cards */}
-            <div className="queue-main-col">
-              <div className="queue-header-row">
-                <div className="queue-header-left">
-                  <span className="queue-header-label">Processing Queue</span>
-                  <span className="queue-count-pill">
-                    {jobs.length} {jobs.length === 1 ? 'file' : 'files'}
-                  </span>
+          {jobs.length > 0 && (
+            <section className="panel queue-panel" aria-labelledby="queue-heading">
+              <div className="queue-head">
+                <div className="queue-head-main">
+                  <h2 id="queue-heading" className="queue-title">
+                    Queue
+                  </h2>
+                  <span className="queue-count">{jobs.length}</span>
                   {batch && (
-                    <span className="queue-batch-status" data-batch={batch}>
-                      ● {batch}
+                    <span className={`queue-batch is-${batch}`} data-batch={batch}>
+                      <span className="queue-batch-dot" aria-hidden="true" />
+                      {BATCH_LABEL[batch]}
                     </span>
                   )}
-                  <div className="queue-status-breakdown">
-                    {runningCount > 0 && <span className="status-chip running">{runningCount} active</span>}
-                    {waitingCount > 0 && <span className="status-chip waiting">{waitingCount} waiting</span>}
-                    {savedCount > 0 && <span className="status-chip saved">{savedCount} ready</span>}
-                    {failedCount > 0 && <span className="status-chip failed">{failedCount} failed</span>}
-                  </div>
                 </div>
 
-                {totalInputBytes > 0 && totalOutputBytes > 0 && (
-                  <div className="queue-savings-badge">
-                    <span className="savings-label">Saved:</span>
-                    <span className={`savings-val ${savedPercentage > 0 ? 'is-good' : ''}`}>
-                      {savedPercentage > 0 ? `-${savedPercentage}%` : `+${Math.abs(savedPercentage)}%`}
+                <div className="queue-head-side">
+                  {runningCount > 0 && <span className="status-chip is-running">{runningCount} active</span>}
+                  {waitingCount > 0 && <span className="status-chip is-waiting">{waitingCount} waiting</span>}
+                  {savedCount > 0 && <span className="status-chip is-saved">{savedCount} ready</span>}
+                  {failedCount > 0 && <span className="status-chip is-failed">{failedCount} failed</span>}
+                  {totalInputBytes > 0 && totalOutputBytes > 0 && savedPercentage !== 0 && (
+                    <span
+                      className={`queue-savings${sizeChange > 0 ? ' is-grown' : ''}`}
+                      title={sizeChange > 0 ? 'Total size increase across finished jobs' : 'Total size saved across finished jobs'}
+                    >
+                      {savedPercentage > 0 ? `−${savedPercentage}%` : `+${Math.abs(savedPercentage)}%`}
+                      <span>{size(Math.abs(sizeChange))}</span>
                     </span>
-                    <span className="savings-detail">({size(totalSavedBytes)})</span>
-                  </div>
-                )}
+                  )}
+                  {savedCount > 0 && (
+                    <button type="button" className="link" onClick={onClearJobs}>
+                      Clear finished
+                    </button>
+                  )}
+                </div>
               </div>
 
               <ul className="jobs" aria-label="Jobs">
-                {jobs.map((j) => (
+                {jobs.map((job) => (
                   <JobCard
-                    key={j.id}
-                    job={j}
-                    onCancel={() => onCancelJob(j.id)}
-                    onRetry={() => onRetryJob(j.id)}
-                    onPassword={(pw, all) => onAnswerPassword(j.id, pw, all)}
+                    key={job.id}
+                    job={job}
+                    onCancel={() => onCancelJob(job.id)}
+                    onRetry={() => onRetryJob(job.id)}
+                    onPassword={(pw, all) => onAnswerPassword(job.id, pw, all)}
                     onUseInTool={onUseInTool}
-                    onRemove={() => onRemoveJob(j.id)}
+                    onRemove={() => onRemoveJob(job.id)}
                   />
                 ))}
               </ul>
-            </div>
-
-            {/* Right Column: Output Inspector & Batch Settings */}
-            <div className="queue-inspector-col">
-              <div className="inspector-dock-sticky">
-                <div className="inspector-header">
-                  <div className="section-label-row">
-                    <span className="section-step-num">02</span>
-                    <span className="section-step-slash">/</span>
-                    <h3 className="section-step-title">Output configuration</h3>
-                  </div>
-                  <span className="inspector-tool-tag">{t.label}</span>
-                </div>
-
-                {/* Data-Driven Settings Form */}
-                <div className="inspector-options-body">
-                  <OptionsForm
-                    specs={t.options}
-                    values={options}
-                    onChange={onOptionsChange}
-                    onReset={onResetOptions}
-                  />
-                </div>
-
-                {/* Batch Action Box */}
-                <div className="inspector-download-box">
-                  {savedCount > 1 ? (
-                    allZipUrl ? (
-                      <a
-                        className="button primary inspector-zip-btn"
-                        href={allZipUrl}
-                        download="refract.zip"
-                        onClick={() => setTimeout(onClearZipUrl, 0)}
-                      >
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                          <polyline points="7 10 12 15 17 10" />
-                          <line x1="12" y1="15" x2="12" y2="3" />
-                        </svg>
-                        <span>Download refract.zip</span>
-                      </a>
-                    ) : (
-                      <button
-                        type="button"
-                        className="button primary inspector-zip-btn"
-                        onClick={onSaveAllZip}
-                      >
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                          <polyline points="7 10 12 15 17 10" />
-                          <line x1="12" y1="15" x2="12" y2="3" />
-                        </svg>
-                        <span>Save all as ZIP</span>
-                      </button>
-                    )
-                  ) : savedCount === 1 && savedJobs[0]?.url ? (
-                    <a
-                      className="button primary inspector-zip-btn"
-                      href={savedJobs[0].url}
-                      download={savedJobs[0].outputName}
-                    >
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                        <polyline points="7 10 12 15 17 10" />
-                        <line x1="12" y1="15" x2="12" y2="3" />
-                      </svg>
-                      <span>Download {savedJobs[0].outputName}</span>
-                    </a>
-                  ) : (
-                    <div className="inspector-waiting-box">
-                      <span className="waiting-spinner" aria-hidden="true" />
-                      <span>
-                        {runningCount > 0 ? 'Processing files in WebAssembly memory…' : 'Queue ready for new files'}
-                      </span>
-                    </div>
-                  )}
-
-                  {/* Re-process entire queue button */}
-                  <button
-                    type="button"
-                    className="button subtle-btn rerun-all-btn"
-                    onClick={onReRunAll}
-                    title="Re-run all files with updated settings"
-                  >
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                      <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
-                    </svg>
-                    <span>Re-process queue with current settings</span>
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
+            </section>
+          )}
         </div>
-      )}
+
+        <aside className="workspace-side">
+          <div className="side-sticky">
+            <section className="panel settings-panel" aria-labelledby="settings-heading">
+              <div className="panel-head">
+                <h2 id="settings-heading">Settings</h2>
+                <span className="panel-tag">{t.label}</span>
+              </div>
+
+              {t.options.length > 0 ? (
+                <OptionsForm specs={t.options} values={options} onChange={onOptionsChange} onReset={onResetOptions} />
+              ) : (
+                <p className="panel-empty">This tool has no settings. Drop a file and it runs with sensible defaults.</p>
+              )}
+
+              {quickPresets.length > 0 && (
+                <div className="quick-presets">
+                  <span className="quick-presets-label">Quick presets</span>
+                  <div className="quick-preset-row">
+                    {quickPresets.map((preset) => (
+                      <button key={preset.id} type="button" className="quick-preset" onClick={() => onApplyPreset(preset)}>
+                        {preset.title}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </section>
+
+            <section className="panel export-panel" aria-labelledby="export-heading">
+              <div className="panel-head">
+                <h2 id="export-heading">Export</h2>
+                <span className="panel-tag">{savedCount === 1 ? '1 file ready' : `${savedCount} files ready`}</span>
+              </div>
+
+              {savedCount > 1 ? (
+                allZipUrl ? (
+                  <a
+                    className="button primary export-button"
+                    href={allZipUrl}
+                    download="refract.zip"
+                    onClick={() => setTimeout(onClearZipUrl, 0)}
+                  >
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                      <polyline points="7 10 12 15 17 10" />
+                      <line x1="12" y1="15" x2="12" y2="3" />
+                    </svg>
+                    Download refract.zip
+                  </a>
+                ) : (
+                  <button type="button" className="button primary export-button" onClick={onSaveAllZip}>
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                      <polyline points="7 10 12 15 17 10" />
+                      <line x1="12" y1="15" x2="12" y2="3" />
+                    </svg>
+                    Save all as ZIP
+                  </button>
+                )
+              ) : savedCount === 1 && savedJobs[0]?.url ? (
+                <a
+                  className="button primary export-button"
+                  href={savedJobs[0].url}
+                  download={savedJobs[0].outputName}
+                >
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                    <polyline points="7 10 12 15 17 10" />
+                    <line x1="12" y1="15" x2="12" y2="3" />
+                  </svg>
+                  Download {savedJobs[0].outputName}
+                </a>
+              ) : (
+                <p className="export-empty">
+                  {runningCount > 0
+                    ? 'Working in your browser. Finished files appear here.'
+                    : 'Finished files appear here, ready to download.'}
+                </p>
+              )}
+
+              {toolJobs.length > 0 && (
+                <button type="button" className="button export-rerun" onClick={onReRunAll}>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+                    <path d="M3 3v5h5" />
+                  </svg>
+                  Re-process
+                </button>
+              )}
+            </section>
+          </div>
+        </aside>
+      </div>
     </div>
   );
 }

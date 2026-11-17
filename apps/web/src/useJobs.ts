@@ -121,11 +121,12 @@ export function useJobs() {
     [start],
   );
 
-  /** Re-run all existing jobs in the queue with new options or target tool */
+  /** Re-run existing jobs with new options. When a tool is given, leave other tools' jobs alone. */
   const reRunAll = useCallback(
     (targetTool?: ToolId, newOptions?: Options) => {
       setJobs((all) => {
         return all.map((old) => {
+          if (targetTool && old.tool !== targetTool) return old;
           const picked = files.current.get(old.id);
           if (!picked) return old;
           controllers.current.get(old.id)?.abort();

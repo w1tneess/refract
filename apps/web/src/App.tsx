@@ -1,19 +1,18 @@
-import { useEffect, useRef, useState, type DragEvent } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { FORMATS, resolveOptions, TOOLS, type Options, type ToolId } from '@refract/core';
 import { useJobs, type JobView } from './useJobs.ts';
 import { useTheme } from './hooks/useTheme.ts';
 import { Topbar } from './components/layout/Topbar.tsx';
-import { Navigation, DOMAIN_GROUPS } from './components/layout/Navigation.tsx';
+import { Sidebar } from './components/layout/Sidebar.tsx';
 import { MobileNavigation } from './components/layout/MobileNavigation.tsx';
-import { TelemetryBar } from './components/layout/TelemetryBar.tsx';
 import { Footer } from './components/layout/Footer.tsx';
 import { HomePage } from './pages/HomePage.tsx';
 import { ToolWorkspacePage } from './pages/ToolWorkspacePage.tsx';
-import { CommandPalette, type Preset } from './CommandPalette.tsx';
+import { CommandPalette } from './CommandPalette.tsx';
 import { ShortcutsModal } from './ShortcutsModal.tsx';
-import { UseCasesSection } from './UseCasesSection.tsx';
-import { FaqSection } from './FaqSection.tsx';
-import type { DomainId, Recipe } from './config/recipes.ts';
+import { DOMAINS, domainIdOfTool } from './config/domains.ts';
+import { describeGroups, groupFilesByTool } from './config/routing.ts';
+import type { Preset } from './config/presets.ts';
 
 const toolFromHash = (): ToolId => {
   const h = location.hash.slice(1) as ToolId;
@@ -46,7 +45,7 @@ export function App() {
   const { theme, toggleTheme } = useTheme();
 
   const [tool, setTool] = useState<ToolId>(toolFromHash);
-  const [isHome, setIsHome] = useState<boolean>(() => isHomeFromHash() && jobs.length === 0);
+  const [isHome, setIsHome] = useState<boolean>(isHomeFromHash);
   const [options, setOptions] = useState<Options>(() => loadOptions(toolFromHash()));
   const [allZipUrl, setAllZipUrl] = useState<string>();
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -56,9 +55,9 @@ export function App() {
   const dragCounter = useRef(0);
 
   const t = TOOLS[tool];
-  const currentDomain = (DOMAIN_GROUPS.find((g) => g.tools.includes(tool))?.id ?? 'image') as DomainId;
+  const runningCount = jobs.filter((j) => j.state === 'Running' || j.state === 'Probing' || j.state === 'Verifying').length;
 
-  // Sync hash changes
+  // Sync hash changes (back/forward buttons, hand-edited URLs, links in job cards).
   useEffect(() => {
     const onHash = () => {
       const h = location.hash.slice(1);
@@ -80,19 +79,51 @@ export function App() {
     saveOptions(tool, resolveOptions(t.options, o));
   };
 
-  const add = (files: File[]) => {
+  /** Add files to the tool that is already open. */
+  const addHere = (files: File[]) => {
+    if (!files.length) return;
     addFiles(tool, resolveOptions(t.options, options), files);
     setIsHome(false);
   };
 
-  // Full-Viewport Drag & Drop Listener
+  /**
+   * Add files without an explicit destination. Files go to the current tool when
+   * it understands them, and to the obvious default tool otherwise. Mixed
+   * batches are split, so dropping photos and a PDF together still works.
+   */
+  const addAnywhere = (files: File[]) => {
+    if (!files.length) return;
+    const groups = groupFilesByTool(files, tool);
+
+    if (!groups.length) {
+      addHere(files);
+      return;
+    }
+
+    for (const group of groups) {
+      const groupOptions = group.tool === tool ? resolveOptions(t.options, options) : loadOptions(group.tool);
+      addFiles(group.tool, groupOptions, group.files);
+    }
+
+    const first = groups[0]!;
+    if (first.tool !== tool) {
+      const nextOptions = loadOptions(first.tool);
+      setTool(first.tool);
+      setOptions(nextOptions);
+      location.hash = `#${first.tool}`;
+    }
+    if (groups.length > 1) {
+      setActivePresetNotice(`Routed ${files.length} files: ${describeGroups(groups)}`);
+    }
+    setIsHome(false);
+  };
+
+  // Full-viewport drag feedback. Drops outside a dropzone are handled here.
   useEffect(() => {
     const onDragEnter = (e: globalThis.DragEvent) => {
       e.preventDefault();
       dragCounter.current += 1;
-      if (e.dataTransfer?.types?.includes('Files')) {
-        setIsDraggingViewport(true);
-      }
+      if (e.dataTransfer?.types?.includes('Files')) setIsDraggingViewport(true);
     };
 
     const onDragLeave = (e: globalThis.DragEvent) => {
@@ -112,9 +143,12 @@ export function App() {
       e.preventDefault();
       dragCounter.current = 0;
       setIsDraggingViewport(false);
-      if (e.dataTransfer?.files?.length) {
-        add([...e.dataTransfer.files]);
-      }
+      const target = e.target as HTMLElement | null;
+      if (target?.closest?.('[data-testid="dropzone"]')) return;
+      const files = [...(e.dataTransfer?.files ?? [])];
+      if (!files.length) return;
+      if (isHome) addAnywhere(files);
+      else addHere(files);
     };
 
     window.addEventListener('dragenter', onDragEnter);
@@ -128,20 +162,19 @@ export function App() {
       window.removeEventListener('dragover', onDragOver);
       window.removeEventListener('drop', onGlobalDrop);
     };
-  }, [tool, options]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isHome, tool, options]);
 
-  // Clipboard paste support & Global shortcuts
+  // Clipboard paste and global shortcuts.
   useEffect(() => {
     const onPaste = (e: ClipboardEvent) => {
       const target = e.target as HTMLElement | null;
-      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT')) {
-        return;
-      }
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT')) return;
       const files = Array.from(e.clipboardData?.files ?? []);
-      if (files.length > 0) {
-        e.preventDefault();
-        add(files);
-      }
+      if (!files.length) return;
+      e.preventDefault();
+      if (isHome) addAnywhere(files);
+      else addHere(files);
     };
 
     const onKeyDown = (e: KeyboardEvent) => {
@@ -155,11 +188,11 @@ export function App() {
         e.preventDefault();
         setShortcutsOpen((prev) => !prev);
       } else if (!isTyping && e.key === '1') {
-        selectTool(DOMAIN_GROUPS[0]!.tools[0]!);
+        selectTool(DOMAINS[0]!.tools[0]!);
       } else if (!isTyping && e.key === '2') {
-        selectTool(DOMAIN_GROUPS[1]!.tools[0]!);
+        selectTool(DOMAINS[1]!.tools[0]!);
       } else if (!isTyping && e.key === '3') {
-        selectTool(DOMAIN_GROUPS[2]!.tools[0]!);
+        selectTool(DOMAINS[2]!.tools[0]!);
       }
     };
 
@@ -169,7 +202,8 @@ export function App() {
       window.removeEventListener('paste', onPaste);
       window.removeEventListener('keydown', onKeyDown);
     };
-  }, [tool, options]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isHome, tool, options]);
 
   const selectTool = (targetTool: ToolId) => {
     location.hash = `#${targetTool}`;
@@ -193,28 +227,7 @@ export function App() {
     const merged: Options = preset.options ? { ...defaultOpts, ...preset.options } : defaultOpts;
     setOptions(merged);
     saveOptions(preset.tool, resolveOptions(TOOLS[preset.tool].options, merged));
-    setActivePresetNotice(`Configured: ${preset.title}`);
-  };
-
-  const applyRecipe = (recipe: Recipe) => {
-    location.hash = `#${recipe.tool}`;
-    setTool(recipe.tool);
-    setIsHome(false);
-    const defaultOpts = loadOptions(recipe.tool);
-    const merged: Options = recipe.options ? { ...defaultOpts, ...recipe.options } : defaultOpts;
-    setOptions(merged);
-    saveOptions(recipe.tool, resolveOptions(TOOLS[recipe.tool].options, merged));
-    setActivePresetNotice(`Recipe activated: ${recipe.label}`);
-  };
-
-  const applyWorkflow = (targetTool: ToolId, customOptions?: Options) => {
-    location.hash = `#${targetTool}`;
-    setTool(targetTool);
-    setIsHome(false);
-    const defaultOpts = loadOptions(targetTool);
-    const merged: Options = customOptions ? { ...defaultOpts, ...customOptions } : defaultOpts;
-    setOptions(merged);
-    saveOptions(targetTool, resolveOptions(TOOLS[targetTool].options, merged));
+    setActivePresetNotice(`Applied “${preset.title}”. Drop a file to run it.`);
   };
 
   const useInTool = (targetTool: ToolId, job: JobView) => {
@@ -225,147 +238,105 @@ export function App() {
     setIsHome(false);
     const targetOptions = loadOptions(targetTool);
     setOptions(targetOptions);
+    setActivePresetNotice(null);
     addFiles(targetTool, resolveOptions(TOOLS[targetTool].options, targetOptions), newFiles);
   };
 
-  // Telemetry metrics
-  const activeJobsCount = jobs.filter((j) => j.state === 'Running' || j.state === 'Probing' || j.state === 'Verifying').length;
-  const savedJobs = jobs.filter((j) => j.state === 'Saved');
-  const completedWithSizes = savedJobs.filter((j) => j.inputSize && j.outputSize);
-  const totalInputBytes = completedWithSizes.reduce((acc, j) => acc + (j.inputSize || 0), 0);
-
-  const engineLabel =
-    currentDomain === 'image'
-      ? 'libwebp / mozjpeg / libpng WASM'
-      : currentDomain === 'pdf'
-      ? 'pdf-lib / qpdf WASM'
-      : 'ffmpeg-wasm / PCM WebAudio';
-
-  const memoryEstimateMb = Math.min(
-    512,
-    Math.max(38, Math.round((jobs.length * 9.5) + (totalInputBytes / 1024 / 1024 * 0.4) + 38))
-  );
-
   return (
     <div className="app-shell">
-      {/* Full-Viewport Drag & Drop Overlay */}
       {isDraggingViewport && (
-        <div className="full-viewport-drag-overlay" aria-hidden="true">
+        <div className="drag-overlay" aria-hidden="true">
           <div className="drag-overlay-box">
-            <span className="drag-crosshair tl">+</span>
-            <span className="drag-crosshair tr">+</span>
-            <span className="drag-crosshair bl">+</span>
-            <span className="drag-crosshair br">+</span>
-
-            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="drag-overlay-icon">
+            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
               <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
               <polyline points="17 8 12 3 7 8" />
               <line x1="12" y1="3" x2="12" y2="15" />
             </svg>
-            <h2 className="drag-overlay-title">Drop files anywhere to convert</h2>
-            <p className="drag-overlay-sub">Processing 100% on-device in isolated WebAssembly memory</p>
+            <strong>Drop files to add them</strong>
+            <span>Everything is processed on this device.</span>
           </div>
         </div>
       )}
 
-      {/* Topbar: Wordmark, Status Pill, Search Trigger, Shortcuts, Theme */}
-      <Topbar
-        activeJobsCount={activeJobsCount}
-        theme={theme}
-        onToggleTheme={toggleTheme}
-        onOpenSearch={() => setPaletteOpen(true)}
-        onOpenShortcuts={() => setShortcutsOpen(true)}
-        onSelectHome={selectHome}
-      />
-
-      {/* Semantic Accessible Coherent Navigation */}
-      <Navigation
+      <Sidebar
         currentTool={tool}
-        isHome={isHome && jobs.length === 0}
+        isHome={isHome}
+        jobCount={jobs.length}
         onSelectTool={selectTool}
         onSelectHome={selectHome}
       />
 
-      {/* Main Content Workspace */}
-      <main className="shell">
-        {isHome && jobs.length === 0 ? (
-          <HomePage
-            onSelectTool={selectTool}
-            onApplyPreset={applyPreset}
-            onDropFiles={add}
-            activePresetNotice={activePresetNotice}
-            onDismissNotice={() => setActivePresetNotice(null)}
-            defaultTool={tool}
-          />
-        ) : (
-          <ToolWorkspacePage
-            tool={tool}
-            options={options}
-            onOptionsChange={changeOptions}
-            onResetOptions={() => changeOptions(resolveOptions(t.options))}
-            jobs={jobs}
-            onAddFiles={add}
-            onCancelJob={cancel}
-            onRetryJob={retry}
-            onAnswerPassword={answerPassword}
-            onUseInTool={useInTool}
-            onRemoveJob={removeJob}
-            onClearJobs={clearJobs}
-            onReRunAll={() => reRunAll(tool, resolveOptions(t.options, options))}
-            onSaveAllZip={async () => {
-              const url = await saveAllUrl(jobs);
-              setAllZipUrl(url);
-              return url;
-            }}
-            allZipUrl={allZipUrl}
-            onClearZipUrl={() => setAllZipUrl(undefined)}
-            activePresetNotice={activePresetNotice}
-            onDismissNotice={() => setActivePresetNotice(null)}
-            onApplyRecipe={applyRecipe}
-            onNavigateHome={selectHome}
-          />
-        )}
-
-        {/* Status Toast Notice */}
-        <div role="status" aria-live="polite" className="toast">
-          {toast}
-        </div>
-
-        {/* Architectural Reference & FAQ below workspace */}
-        <UseCasesSection
-          onSelectTool={selectTool}
-          onApplyWorkflow={applyWorkflow}
+      <div className="app-body">
+        <Topbar
+          tool={tool}
+          isHome={isHome}
+          jobCount={jobs.length}
+          runningCount={runningCount}
+          theme={theme}
+          onToggleTheme={toggleTheme}
+          onOpenSearch={() => setPaletteOpen(true)}
+          onOpenShortcuts={() => setShortcutsOpen(true)}
+          onSelectHome={selectHome}
         />
 
-        <FaqSection />
-      </main>
+        <main className="shell">
+          {isHome ? (
+            <HomePage
+              defaultTool={tool}
+              jobCount={jobs.length}
+              onOpenQueue={() => selectTool(jobs[jobs.length - 1]?.tool ?? tool)}
+              onSelectTool={selectTool}
+              onApplyPreset={applyPreset}
+              onDropFiles={addAnywhere}
+              activePresetNotice={activePresetNotice}
+              onDismissNotice={() => setActivePresetNotice(null)}
+            />
+          ) : (
+            <ToolWorkspacePage
+              tool={tool}
+              options={options}
+              onOptionsChange={changeOptions}
+              onResetOptions={() => changeOptions(resolveOptions(t.options))}
+              jobs={jobs}
+              onAddFiles={addHere}
+              onCancelJob={cancel}
+              onRetryJob={retry}
+              onAnswerPassword={answerPassword}
+              onUseInTool={useInTool}
+              onRemoveJob={removeJob}
+              onClearJobs={clearJobs}
+              onReRunAll={() => reRunAll(tool, resolveOptions(t.options, options))}
+              onSaveAllZip={async () => {
+                const url = await saveAllUrl(jobs);
+                setAllZipUrl(url);
+                return url;
+              }}
+              allZipUrl={allZipUrl}
+              onClearZipUrl={() => setAllZipUrl(undefined)}
+              activePresetNotice={activePresetNotice}
+              onDismissNotice={() => setActivePresetNotice(null)}
+              onApplyPreset={applyPreset}
+              onSelectTool={selectTool}
+              onNavigateHome={selectHome}
+            />
+          )}
 
-      {/* Engine Telemetry Bar */}
-      <TelemetryBar
-        activeJobsCount={activeJobsCount}
-        engineLabel={engineLabel}
-        memoryEstimateMb={memoryEstimateMb}
-        hasJobs={jobs.length > 0}
-        onReRunQueue={() => reRunAll(tool, resolveOptions(t.options, options))}
-      />
+          <div role="status" aria-live="polite" className="toast">
+            {toast}
+          </div>
+        </main>
 
-      {/* Footer */}
-      <Footer
-        onSelectTool={selectTool}
-        onOpenShortcuts={() => setShortcutsOpen(true)}
-        onOpenSearch={() => setPaletteOpen(true)}
-      />
+        <Footer onOpenShortcuts={() => setShortcutsOpen(true)} onOpenSearch={() => setPaletteOpen(true)} />
+      </div>
 
-      {/* Mobile Bottom Navigation */}
       <MobileNavigation
-        currentDomain={currentDomain}
-        isHome={isHome && jobs.length === 0}
+        currentDomain={domainIdOfTool(tool)}
+        isHome={isHome}
         onSelectTool={selectTool}
         onSelectHome={selectHome}
         onOpenSearch={() => setPaletteOpen(true)}
       />
 
-      {/* Overlays */}
       <CommandPalette
         isOpen={paletteOpen}
         onClose={() => setPaletteOpen(false)}
@@ -373,10 +344,7 @@ export function App() {
         onApplyPreset={applyPreset}
       />
 
-      <ShortcutsModal
-        isOpen={shortcutsOpen}
-        onClose={() => setShortcutsOpen(false)}
-      />
+      <ShortcutsModal isOpen={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
     </div>
   );
 }
