@@ -45,10 +45,33 @@ mod tests {
     #[test]
     fn test_image_resize_pixels() {
         let plain_png = std::fs::read(fixture_path("plain.png")).expect("Read plain.png");
-        // Resize to width 200, height 0 (should maintain 4:3 aspect ratio -> 200x150)
+        // Resize to width 200, height 0 (should maintain 4:3 aspect ratio -> 200x150) and preserve PNG format
         let resized = image::resize_image(&plain_png, 200, 0).expect("Resize image");
+        assert_eq!(refract_core::detect(&resized), Some(Format::Png));
         let (w, h) = image::probe_dimensions(&resized).expect("Probe resized");
         assert_eq!((w, h), (200, 150));
+    }
+
+    #[test]
+    fn test_image_rotated_jpeg_bakes_orientation() {
+        let rotated_jpg = std::fs::read(fixture_path("rotated.jpg")).expect("Read rotated.jpg");
+        // Displayed dimensions respect EXIF orientation 6 (400x300 stored -> 300x400 displayed)
+        assert_eq!(image::probe_dimensions(&rotated_jpg).expect("Probe rotated"), (300, 400));
+        let converted = image::convert_image(&rotated_jpg, Format::Png, None).expect("Convert rotated JPEG to PNG");
+        assert_eq!(image::probe_dimensions(&converted).expect("Probe converted PNG"), (300, 400));
+    }
+
+    #[test]
+    fn test_image_rgba_png_to_jpeg_flattens_alpha() {
+        // Create an RGBA PNG with semi-transparent pixels and ensure JPEG conversion succeeds without Rgba8 error
+        let rgba = ::image::RgbaImage::from_pixel(32, 32, ::image::Rgba([255, 0, 0, 128]));
+        let mut png_buf = Vec::new();
+        ::image::DynamicImage::ImageRgba8(rgba)
+            .write_to(&mut std::io::Cursor::new(&mut png_buf), ::image::ImageFormat::Png)
+            .expect("Write RGBA PNG");
+        let jpg = image::convert_image(&png_buf, Format::Jpeg, Some(85)).expect("RGBA PNG -> JPEG");
+        assert_eq!(refract_core::detect(&jpg), Some(Format::Jpeg));
+        assert_eq!(image::probe_dimensions(&jpg).unwrap(), (32, 32));
     }
 
     #[test]
@@ -57,6 +80,9 @@ mod tests {
         assert_eq!(audio::parse_timestamp("1:30").unwrap(), 90.0);
         assert_eq!(audio::parse_timestamp("01:30.5").unwrap(), 90.5);
         assert_eq!(audio::parse_timestamp("01:00:00").unwrap(), 3600.0);
+        assert!(audio::parse_timestamp("-5").is_err());
+        assert!(audio::parse_timestamp("NaN").is_err());
+        assert!(audio::parse_timestamp("inf").is_err());
     }
 
     #[test]
@@ -112,6 +138,15 @@ mod tests {
         let ranges = pdf::parse_ranges("1-2, 3", 3).expect("Parse ranges");
         assert_eq!(ranges, vec![vec![1, 2], vec![3]]);
 
+        let open_end = pdf::parse_ranges("2-", 4).expect("Parse open-ended range");
+        assert_eq!(open_end, vec![vec![2, 3, 4]]);
+
+        let end_kw = pdf::parse_ranges("2-end", 4).expect("Parse end keyword");
+        assert_eq!(end_kw, vec![vec![2, 3, 4]]);
+
+        let empty_all = pdf::parse_ranges("", 3).expect("Empty splits every page");
+        assert_eq!(empty_all, vec![vec![1], vec![2], vec![3]]);
+
         let order = pdf::parse_order("3, 1, 2", 3).expect("Parse order");
         assert_eq!(order, vec![3, 1, 2]);
 
@@ -132,9 +167,12 @@ mod tests {
     #[test]
     fn test_pdf_merge() {
         let plain_pdf = std::fs::read(fixture_path("plain.pdf")).expect("Read plain.pdf");
-        let merged = pdf::merge_pdfs(&[&plain_pdf, &plain_pdf]).expect("Merge PDFs");
+        let five_pages = std::fs::read(fixture_path("5pages.pdf")).expect("Read 5pages.pdf");
+        let merged = pdf::merge_pdfs(&[&plain_pdf, &five_pages]).expect("Merge PDFs");
         assert!(!merged.is_empty());
         assert_eq!(refract_core::detect(&merged), Some(Format::Pdf));
+        let info = pdf::probe_pdf(&merged).expect("Probe merged PDF");
+        assert_eq!(info.page_count, 8); // 3 + 5 pages
     }
 
     #[test]

@@ -4,14 +4,14 @@
  */
 
 /** Generate a synthetic high-resolution sample PNG image with geometric prism refraction graphics. */
-export function createSampleImage(): Promise<File> {
+export function createSampleImage(suffix = ''): Promise<File> {
   return new Promise((resolve) => {
     const canvas = document.createElement('canvas');
     canvas.width = 1200;
     canvas.height = 800;
     const ctx = canvas.getContext('2d');
     if (!ctx) {
-      resolve(new File(['sample'], 'sample.png', { type: 'image/png' }));
+      resolve(new File(['sample'], `sample${suffix}.png`, { type: 'image/png' }));
       return;
     }
 
@@ -65,26 +65,26 @@ export function createSampleImage(): Promise<File> {
 
     // Technical Typography
     ctx.fillStyle = '#ffffff';
-    ctx.font = 'bold 36px "IBM Plex Sans", sans-serif';
+    ctx.font = 'bold 36px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
     ctx.textAlign = 'center';
     ctx.fillText('REFRACT LOCAL ENGINE', 600, 420);
 
-    ctx.font = '16px "IBM Plex Mono", monospace';
+    ctx.font = '16px ui-monospace, Menlo, monospace';
     ctx.fillStyle = '#94a3b8';
     ctx.fillText('1200 × 800 · 24-BIT RGB · WASM TEST SAMPLE', 600, 460);
 
     canvas.toBlob((blob) => {
       if (blob) {
-        resolve(new File([blob], 'sample-refract-photo.png', { type: 'image/png' }));
+        resolve(new File([blob], `sample-refract-photo${suffix}.png`, { type: 'image/png' }));
       } else {
-        resolve(new File(['sample'], 'sample.png', { type: 'image/png' }));
+        resolve(new File(['sample'], `sample${suffix}.png`, { type: 'image/png' }));
       }
     }, 'image/png');
   });
 }
 
 /** Generate a multi-page sample PDF using pdf-lib entirely in browser memory. */
-export async function createSamplePdf(): Promise<File> {
+export async function createSamplePdf(suffix = ''): Promise<File> {
   const { PDFDocument, rgb, StandardFonts } = await import('pdf-lib');
   const doc = await PDFDocument.create();
   const font = await doc.embedFont(StandardFonts.HelveticaBold);
@@ -146,11 +146,11 @@ export async function createSamplePdf(): Promise<File> {
   });
 
   const bytes = await doc.save();
-  return new File([bytes as unknown as BlobPart], 'sample-refract-document.pdf', { type: 'application/pdf' });
+  return new File([bytes as unknown as BlobPart], `sample-refract-document${suffix}.pdf`, { type: 'application/pdf' });
 }
 
 /** Generate a pleasant 2.5-second harmonic audio chime in WAV format using raw PCM synthesis. */
-export function createSampleAudio(): File {
+export function createSampleAudio(suffix = ''): File {
   const sampleRate = 44100;
   const duration = 2.5; // 2.5 seconds
   const numSamples = Math.floor(sampleRate * duration);
@@ -188,5 +188,5 @@ export function createSampleAudio(): File {
     view.setInt16(44 + i * 2, sample, true);
   }
 
-  return new File([buffer], 'sample-refract-tone.wav', { type: 'audio/wav' });
+  return new File([buffer], `sample-refract-tone${suffix}.wav`, { type: 'audio/wav' });
 }

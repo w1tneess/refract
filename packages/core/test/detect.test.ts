@@ -43,6 +43,8 @@ describe('names', () => {
   it('formatFromName guesses only from the extension', () => {
     expect(formatFromName('a.JPEG')).toBe('jpeg');
     expect(formatFromName('a.unknown')).toBeUndefined();
+    expect(formatFromName('png')).toBeUndefined();
+    expect(formatFromName('.png')).toBeUndefined();
   });
 });
 
@@ -80,7 +82,11 @@ describe('probeImage', () => {
     expect(probeImage('jpeg', fakeJpeg(400, 300, { orientation: 3 }))).toMatchObject({ width: 400, height: 300, orientation: 3 });
     expect(jpegOrientation(fakeJpeg(10, 10, { orientation: 8 }))).toBe(8);
   });
-  it('throws Corrupt on a header that ends early', () => {
+  it('throws Corrupt on a header that ends early or has invalid JPEG segment length', () => {
     try { probeImage('png', fakePng(1, 1).subarray(0, 12)); expect.unreachable(); } catch (e) { expect((e as RefractError).code).toBe('Corrupt'); }
+    // Malformed JPEG with APP0 segment length < 2 must not infinite-loop
+    const badJpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x00, 0xff, 0xd9]);
+    expect(jpegOrientation(badJpeg)).toBe(1);
+    try { probeImage('jpeg', badJpeg); expect.unreachable(); } catch (e) { expect((e as RefractError).code).toBe('Corrupt'); }
   });
 });

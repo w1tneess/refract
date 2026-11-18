@@ -1,6 +1,6 @@
+use lopdf::{Dictionary, Document, Object, ObjectId};
 use refract_core::error::{ErrorCode, RefractError};
-use lopdf::Document;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 #[derive(Debug, Clone)]
 pub struct PdfInfo {
@@ -42,11 +42,15 @@ pub fn probe_pdf(bytes: &[u8]) -> Result<PdfInfo, RefractError> {
 }
 
 /// Parse page range string into groups of page numbers.
-/// e.g. "1-2, 3" with total 3 pages -> [[1, 2], [3]]
+/// Supports "1-2, 3", "2-", "2-end", and empty string (every page as its own group).
 pub fn parse_ranges(spec: &str, total_pages: u32) -> Result<Vec<Vec<u32>>, RefractError> {
+    if total_pages == 0 {
+        return Err(RefractError::new(ErrorCode::DamagedFile, "PDF has 0 pages"));
+    }
+
     let clean = spec.trim();
     if clean.is_empty() {
-        return Err(RefractError::new(ErrorCode::DamagedFile, "Page range cannot be empty"));
+        return Ok((1..=total_pages).map(|p| vec![p]).collect());
     }
 
     let mut groups = Vec::new();
@@ -60,10 +64,11 @@ pub fn parse_ranges(spec: &str, total_pages: u32) -> Result<Vec<Vec<u32>>, Refra
             let start: u32 = start_s.trim().parse().map_err(|_| {
                 RefractError::new(ErrorCode::DamagedFile, format!("Invalid range start: {}", start_s))
             })?;
-            let end: u32 = if end_s.trim().eq_ignore_ascii_case("end") {
+            let end_trimmed = end_s.trim();
+            let end: u32 = if end_trimmed.is_empty() || end_trimmed.eq_ignore_ascii_case("end") {
                 total_pages
             } else {
-                end_s.trim().parse().map_err(|_| {
+                end_trimmed.parse().map_err(|_| {
                     RefractError::new(ErrorCode::DamagedFile, format!("Invalid range end: {}", end_s))
                 })?
             };
@@ -247,6 +252,10 @@ pub fn split_pdf(bytes: &[u8], ranges_spec: &str) -> Result<Vec<(String, Vec<u8>
         pages_dict.set("Kids", lopdf::Object::Array(group_kids));
         pages_dict.set("Count", lopdf::Object::Integer(group.len() as i64));
 
+        // Remove unreferenced pages and their resources so split files only carry their own pages.
+        group_doc.prune_objects();
+        group_doc.renumber_objects();
+
         let mut out = Vec::new();
         group_doc.save_to(&mut out).map_err(|e| {
             RefractError::with_details(ErrorCode::EngineFailed, "Failed to save split PDF", e.to_string())
@@ -263,6 +272,34 @@ pub fn split_pdf(bytes: &[u8], ranges_spec: &str) -> Result<Vec<(String, Vec<u8>
     Ok(outputs)
 }
 
+/// Propagate inheritable page attributes (MediaBox, CropBox, Resources, Rotate) from ancestor Pages nodes
+/// onto a Page dictionary before reparenting it to a new Pages root.
+fn inherit_page_attributes(doc: &Document, page_id: ObjectId) -> Option<Dictionary> {
+    let mut page_dict = doc.get_object(page_id).ok()?.as_dict().ok()?.clone();
+    let inheritable: [&[u8]; 4] = [b"MediaBox", b"CropBox", b"Resources", b"Rotate"];
+
+    let mut parent_ref = page_dict.get(b"Parent").ok().and_then(|o| o.as_reference().ok());
+    let mut visited = HashSet::new();
+    while let Some(pid) = parent_ref {
+        if !visited.insert(pid) {
+            break;
+        }
+        let Ok(parent_dict) = doc.get_object(pid).and_then(|o| o.as_dict()) else {
+            break;
+        };
+        for key in inheritable {
+            if !page_dict.has(key) {
+                if let Ok(val) = parent_dict.get(key) {
+                    page_dict.set(key, val.clone());
+                }
+            }
+        }
+        parent_ref = parent_dict.get(b"Parent").ok().and_then(|o| o.as_reference().ok());
+    }
+
+    Some(page_dict)
+}
+
 /// Merge multiple PDF documents into one in the provided order.
 pub fn merge_pdfs(pdf_list: &[&[u8]]) -> Result<Vec<u8>, RefractError> {
     if pdf_list.is_empty() {
@@ -273,12 +310,12 @@ pub fn merge_pdfs(pdf_list: &[&[u8]]) -> Result<Vec<u8>, RefractError> {
         return Ok(pdf_list[0].to_vec());
     }
 
-    let mut first = Document::load_mem(pdf_list[0]).map_err(|e| {
-        RefractError::with_details(ErrorCode::DamagedFile, "Failed to load first PDF", e.to_string())
-    })?;
+    let mut max_id = 1u32;
+    let mut ordered_pages: Vec<(ObjectId, Dictionary)> = Vec::new();
+    let mut merged_objects: BTreeMap<ObjectId, Object> = BTreeMap::new();
 
-    for (idx, &bytes) in pdf_list.iter().enumerate().skip(1) {
-        let other = Document::load_mem(bytes).map_err(|e| {
+    for (idx, &bytes) in pdf_list.iter().enumerate() {
+        let mut doc = Document::load_mem(bytes).map_err(|e| {
             RefractError::with_details(
                 ErrorCode::DamagedFile,
                 format!("Failed to load PDF #{}", idx + 1),
@@ -286,17 +323,63 @@ pub fn merge_pdfs(pdf_list: &[&[u8]]) -> Result<Vec<u8>, RefractError> {
             )
         })?;
 
-        // Merge pages and objects from `other` into `first`
-        let pages_other = other.get_pages();
-        for (_, page_id) in pages_other {
-            if let Ok(obj) = other.get_object(page_id) {
-                first.add_object(obj.clone());
+        doc.renumber_objects_with(max_id);
+        max_id = doc.max_id + 1;
+
+        let pages = doc.get_pages();
+        for (_, page_id) in pages {
+            if let Some(page_dict) = inherit_page_attributes(&doc, page_id) {
+                ordered_pages.push((page_id, page_dict));
+            }
+        }
+
+        for (object_id, object) in doc.objects {
+            let skip = object
+                .as_dict()
+                .ok()
+                .and_then(|d| d.get(b"Type").ok())
+                .and_then(|t| t.as_name().ok())
+                .is_some_and(|name| name == b"Catalog" || name == b"Pages");
+            if !skip {
+                merged_objects.insert(object_id, object);
             }
         }
     }
 
+    if ordered_pages.is_empty() {
+        return Err(RefractError::new(ErrorCode::DamagedFile, "No pages found in PDF documents"));
+    }
+
+    let mut document = Document::with_version("1.5");
+    document.objects = merged_objects;
+    document.max_id = max_id;
+
+    let pages_id = document.new_object_id();
+    let mut kids = Vec::with_capacity(ordered_pages.len());
+
+    for (page_id, mut page_dict) in ordered_pages {
+        page_dict.set("Parent", Object::Reference(pages_id));
+        document.objects.insert(page_id, Object::Dictionary(page_dict));
+        kids.push(Object::Reference(page_id));
+    }
+
+    let mut pages_dict = Dictionary::new();
+    pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+    pages_dict.set("Count", Object::Integer(kids.len() as i64));
+    pages_dict.set("Kids", Object::Array(kids));
+    document.objects.insert(pages_id, Object::Dictionary(pages_dict));
+
+    let catalog_id = document.new_object_id();
+    let mut catalog = Dictionary::new();
+    catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+    catalog.set("Pages", Object::Reference(pages_id));
+    document.objects.insert(catalog_id, Object::Dictionary(catalog));
+
+    document.trailer.set("Root", Object::Reference(catalog_id));
+    document.compress();
+
     let mut out = Vec::new();
-    first.save_to(&mut out).map_err(|e| {
+    document.save_to(&mut out).map_err(|e| {
         RefractError::with_details(ErrorCode::EngineFailed, "Failed to save merged PDF", e.to_string())
     })?;
 

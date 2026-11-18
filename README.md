@@ -19,42 +19,66 @@ Refract Web uses an **Apple-inspired interface** — calm, exact, and quiet:
 - **Single accent** — Apple blue (`#0071e3`) used only for the primary action and live-job indicator. Everything else is graphite neutral.
 - **One signature** — a single amber dot marks a job that is still developing; nothing else competes for attention.
 
-## Supported Tools & Formats (Web v1)
+## Supported Tools & Formats
 
-Refract Web v1 runs 12 dedicated file conversion and transformation tools across three primary domains:
+### Web App (11 tools via WebAssembly)
 
-### Images
-- **Convert image**: Convert between HEIC, JPEG, PNG, and WebP with EXIF orientation baking and removal.
-- **Compress image**: Target-size compression (in KB) using binary quality search across JPEG, PNG, and WebP.
+Refract Web runs 11 dedicated file conversion and transformation tools across three domains:
+
+#### Images
+- **Convert image**: Convert between HEIC, JPEG, PNG, and WebP with EXIF orientation baking and metadata removal.
+- **Compress image**: Target-size compression (in KB) using binary quality search with automatic scale-down fallback, outputting JPEG or WebP (accepts HEIC, JPEG, PNG, WebP).
 - **Resize image**: Lanczos-3 resampling by pixel dimensions or physical size (cm + DPI), with aspect ratio preservation.
 
-### PDF
-- **Merge PDF**: Combine multiple PDFs into a single document in custom drop order.
-- **Split PDF**: Split documents by page numbers or ranges (e.g. `1-3, 5, 8-end`) into a downloadable ZIP.
-- **Reorder PDF**: Reorder pages with strict sequence validation.
-- **Images to PDF**: Convert image files (JPEG, PNG, WebP) into multi-page PDF documents.
-- **PDF to images**: Render PDF pages into full-resolution PNG or JPEG images bundled in a ZIP.
-- **Compress PDF**: Lossless linearization and stream compression powered by QPDF WebAssembly.
-- **Password Support**: Built-in support for encrypted PDFs (user password unlock and owner-only bypass).
+#### PDF
+- **Merge PDFs**: Combine 2+ PDFs into a single document in drop order.
+- **Split PDF**: Split documents into every page or by custom ranges (e.g. `1-3, 5, 8-` or `8-end`) into a downloadable ZIP.
+- **Reorder pages**: Reorder pages with strict 1-to-1 sequence validation.
+- **Images to PDF**: Compile HEIC, JPEG, PNG, and WebP images (with EXIF orientation baked upright) into A4, Letter, or image-sized PDF pages.
+- **PDF to images**: Render PDF pages onto white backgrounds into full-resolution PNG or JPEG images bundled in a ZIP.
+- **Compress PDF**: Lossless Flate stream re-compression and compressed object streams powered by QPDF WebAssembly.
+- **Password Support**: Built-in support for encrypted PDFs (user password unlock and transparent owner-only bypass).
 
-### Audio
-- **Convert audio**: Transcode between MP3, WAV, M4A, and OGG with customizable bitrates (64–320 kbps).
-- **Trim audio**: Fast audio trimming with exact timestamp boundaries (`mm:ss` or seconds).
-- **Lazy Load**: Heavy FFmpeg WASM binaries are loaded on demand only when an audio job is scheduled.
+#### Audio
+- **Convert audio**: Transcode between MP3, WAV, M4A, and OGG with configurable bitrates (128–320 kbps).
+- **Trim audio**: Trim audio clips with exact start and end timestamps (in seconds).
+- **Lazy Load**: Heavy FFmpeg WASM binaries (~32 MB) are loaded on demand only when an audio job is scheduled.
+
+### Native Desktop App (9 tools via Rust + Slint UI)
+
+Refract Desktop (`apps/desktop`) runs as a standalone native executable with no webview:
+- **Images**: Convert image (JPEG/PNG/WebP with EXIF orientation baking and RGBA-to-white flattening), Compress image (target KB with scale-down fallback), Resize image (Lanczos-3 resampling preserving format).
+- **PDF**: Merge PDF (full multi-document page & object merging), Split PDF (range extraction with object pruning), Reorder PDF, Compress PDF (via `lopdf`).
+- **Audio**: Convert audio and Trim audio (with `mm:ss` / `hh:mm:ss` / seconds timestamps) via system `ffmpeg` / `ffprobe`.
+
+---
+
+## Workspace Structure
+
+| Path | Description |
+| --- | --- |
+| `packages/core` | `@refract/core` — DOM-free TypeScript pipeline: magic-byte detection, HEIF/JPEG/PNG/WebP header probing, route planner, limits & memory budgets, job state machine, output verification. |
+| `packages/engine-wasm` | `@refract/engine-wasm` — Dedicated Web Worker codecs (`libheif-js`, `@jsquash/*`, `pdf-lib`, `pdfjs-dist`, `qpdf-wasm`, `@ffmpeg/ffmpeg`). |
+| `apps/web` | `@refract/web` — React 19 + Vite web UI with Command Palette, Optical Loupe comparison modal, batch queue, and Playwright E2E suite. |
+| `crates/refract-core` | Native Rust core types, magic-byte detection, error & job models. |
+| `crates/refract-engine` | Native Rust image (`image`), PDF (`lopdf`), and audio (`ffmpeg`/`ffprobe`) processing engine. |
+| `apps/desktop` | Native Slint 1.9 desktop application. |
 
 ---
 
 ## Key Architecture Principles
 
-1. **Local-Only Web Workers**: All file parsing, decoding, and encoding happens in Web Workers via `@refract/engine-wasm`. The main thread never blocks, and files never leave the browser.
-2. **DOM-Free Core (`@refract/core`)**: Business logic, magic byte detection, format routing, memory heuristics, and job state machines are 100% DOM-free and reusable by the upcoming desktop app.
-3. **Verified Outputs**: Output files are probed and validated before marking jobs as complete (e.g. verifying valid headers, dimensions, and decodability).
+1. **Local-Only Processing**: All web decoding and encoding runs inside dedicated Web Workers via `@refract/engine-wasm`, and the desktop app runs natively via `refract-engine`. Zero external network requests (no web fonts, no analytics, no uploads).
+2. **DOM-Free Core (`@refract/core` & `refract-core`)**: Business logic, magic-byte detection, format routing, memory heuristics, and job state machines are platform-agnostic and unit-tested independently.
+3. **Verified Outputs**: Output files are probed and validated before marking jobs as complete (verifying headers, EXIF stripping, dimensions, page counts, and decodability).
 4. **Resilient UX**:
-   - Multi-file batch queue with concurrency limiting (2 concurrent jobs).
-   - "Use in another tool" pipeline to chain operations without re-uploading.
-   - "Save all as ZIP" for batch downloads.
+   - Multi-file batch queue with concurrency limiting (2 concurrent jobs on Web).
+   - "Use in another tool" pipeline to chain compatible operations without re-uploading.
+   - "Save all as ZIP" for batch downloads with automatic Blob URL lifecycle management.
    - Per-tool remembered settings with "Reset to defaults".
    - Clear, user-friendly error diagnostics with technical details available on demand.
+
+For the full codebase audit and fixes changelog, see [docs/audit-report.md](docs/audit-report.md).
 
 ---
 
@@ -107,15 +131,15 @@ Refract Web is a **purely client-side static site** — no backend, no server, n
 # Install Vercel CLI
 npm i -g vercel
 
-# Deploy to production
-cd apps/web
+# Deploy to production from the repo root
 vercel --prod
 ```
 
 The `vercel.json` at the repo root configures:
-- **SPA fallback** — all routes serve `index.html`
+- **Monorepo build** — builds `@refract/web` and serves `apps/web/dist`
+- **SPA rewrite** — non-asset routes rewrite to `/index.html`
 - **WASM MIME type** — `.wasm` files are served as `application/wasm` (required for WebAssembly to compile)
-- **Long-term caching** for hashed JS/CSS/WASM assets
+- **Long-term caching** for hashed JS/MJS/CSS/WASM assets and COOP/COEP isolation headers
 
 #### Netlify
 

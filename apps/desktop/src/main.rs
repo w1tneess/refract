@@ -10,7 +10,7 @@ use std::thread;
 #[derive(Clone, Debug)]
 struct JobRecord {
     id: i32,
-    input_path: PathBuf,
+    input_paths: Vec<PathBuf>,
     name: String,
     size_bytes: u64,
     tool: String,
@@ -19,7 +19,25 @@ struct JobRecord {
     output_path: String,
 }
 
+#[derive(Clone, Debug)]
+struct JobOptions {
+    image_format: String,
+    image_quality: u8,
+    target_kb: u32,
+    resize_w: u32,
+    resize_h: u32,
+    audio_format: String,
+    audio_bitrate: u32,
+    trim_start: String,
+    trim_end: String,
+    pdf_ranges: String,
+    pdf_order: String,
+}
+
 fn format_size(bytes: u64) -> String {
+    if bytes == 0 {
+        return "0 KB".to_string();
+    }
     if bytes < 1024 * 1024 {
         format!("{} KB", (bytes as f64 / 1024.0).max(1.0).round() as u64)
     } else {
@@ -39,6 +57,7 @@ fn map_format_str(fmt: &str) -> Format {
     match fmt.to_lowercase().as_str() {
         "png" => Format::Png,
         "webp" => Format::Webp,
+        "mp3" => Format::Mp3,
         "wav" => Format::Wav,
         "m4a" => Format::M4a,
         "ogg" => Format::Ogg,
@@ -46,6 +65,21 @@ fn map_format_str(fmt: &str) -> Format {
         "heic" => Format::Heic,
         _ => Format::Jpeg,
     }
+}
+
+/// Build a non-colliding output path in `dir` (appending ` (2)`, ` (3)`, ... if the file already exists).
+fn unique_output_path(dir: &Path, base: &str, ext: &str) -> PathBuf {
+    let first = dir.join(format!("{}.{}", base, ext));
+    if !first.exists() {
+        return first;
+    }
+    for n in 2..10_000u32 {
+        let candidate = dir.join(format!("{} ({}).{}", base, n, ext));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    first
 }
 
 fn main() -> Result<(), slint::PlatformError> {
@@ -74,25 +108,75 @@ fn main() -> Result<(), slint::PlatformError> {
             dialog = dialog.add_filter(filter_name, extensions);
 
             if let Some(files) = dialog.pick_files() {
+                if files.is_empty() {
+                    return;
+                }
                 let mut store = jobs_store.lock().unwrap();
                 let mut id_lock = next_id.lock().unwrap();
 
-                for path in files {
-                    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "Unknown".to_string());
-                    let size_bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-                    let id = *id_lock;
-                    *id_lock += 1;
+                if tool == "Merge PDF" {
+                    // Combine multi-selected PDFs into a single Merge PDF job (or append to an existing waiting Merge PDF job).
+                    let total_size: u64 = files
+                        .iter()
+                        .map(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
+                        .sum();
+                    if let Some(existing) = store.iter_mut().find(|j| j.tool == "Merge PDF" && j.status == "Waiting") {
+                        existing.input_paths.extend(files);
+                        existing.size_bytes += total_size;
+                        let first_name = existing.input_paths[0]
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| "document.pdf".to_string());
+                        let count = existing.input_paths.len();
+                        existing.name = if count > 1 {
+                            format!("{} + {} more", first_name, count - 1)
+                        } else {
+                            first_name
+                        };
+                    } else {
+                        let first_name = files[0]
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| "document.pdf".to_string());
+                        let name = if files.len() > 1 {
+                            format!("{} + {} more", first_name, files.len() - 1)
+                        } else {
+                            first_name
+                        };
+                        let id = *id_lock;
+                        *id_lock += 1;
+                        store.push(JobRecord {
+                            id,
+                            input_paths: files,
+                            name,
+                            size_bytes: total_size,
+                            tool: tool.clone(),
+                            status: "Waiting".to_string(),
+                            error: String::new(),
+                            output_path: String::new(),
+                        });
+                    }
+                } else {
+                    for path in files {
+                        let name = path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| "Unknown".to_string());
+                        let size_bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                        let id = *id_lock;
+                        *id_lock += 1;
 
-                    store.push(JobRecord {
-                        id,
-                        input_path: path,
-                        name,
-                        size_bytes,
-                        tool: tool.clone(),
-                        status: "Waiting".to_string(),
-                        error: String::new(),
-                        output_path: String::new(),
-                    });
+                        store.push(JobRecord {
+                            id,
+                            input_paths: vec![path],
+                            name,
+                            size_bytes,
+                            tool: tool.clone(),
+                            status: "Waiting".to_string(),
+                            error: String::new(),
+                            output_path: String::new(),
+                        });
+                    }
                 }
 
                 update_ui_jobs(&window, &store);
@@ -135,29 +219,31 @@ fn main() -> Result<(), slint::PlatformError> {
         let is_busy = Arc::clone(&is_busy);
 
         main_window.on_start_processing(move || {
-            if is_busy.swap(true, Ordering::SeqCst) {
-                return;
-            }
-
             let window = match window_weak.upgrade() {
                 Some(w) => w,
                 None => return,
             };
 
+            if is_busy.swap(true, Ordering::SeqCst) {
+                return;
+            }
+
             window.set_is_running(true);
 
             // Snapshot options from UI
-            let image_format = window.get_opt_image_format().to_string();
-            let image_quality = window.get_opt_image_quality() as u8;
-            let target_kb: u32 = window.get_opt_target_kb().parse().unwrap_or(200);
-            let resize_w: u32 = window.get_opt_resize_width().parse().unwrap_or(800);
-            let resize_h: u32 = window.get_opt_resize_height().parse().unwrap_or(0);
-            let audio_format = window.get_opt_audio_format().to_string();
-            let audio_bitrate: u32 = window.get_opt_audio_bitrate().parse().unwrap_or(192);
-            let trim_start = window.get_opt_trim_start().to_string();
-            let trim_end = window.get_opt_trim_end().to_string();
-            let pdf_ranges = window.get_opt_pdf_ranges().to_string();
-            let pdf_order = window.get_opt_pdf_order().to_string();
+            let opts = JobOptions {
+                image_format: window.get_opt_image_format().to_string(),
+                image_quality: window.get_opt_image_quality().clamp(1, 100) as u8,
+                target_kb: window.get_opt_target_kb().trim().parse().unwrap_or(200),
+                resize_w: window.get_opt_resize_width().trim().parse().unwrap_or(800),
+                resize_h: window.get_opt_resize_height().trim().parse().unwrap_or(0),
+                audio_format: window.get_opt_audio_format().to_string(),
+                audio_bitrate: window.get_opt_audio_bitrate().trim().parse().unwrap_or(192),
+                trim_start: window.get_opt_trim_start().to_string(),
+                trim_end: window.get_opt_trim_end().to_string(),
+                pdf_ranges: window.get_opt_pdf_ranges().to_string(),
+                pdf_order: window.get_opt_pdf_order().to_string(),
+            };
 
             let worker_window = window_weak.clone();
             let worker_jobs = Arc::clone(&jobs_store);
@@ -174,11 +260,12 @@ fn main() -> Result<(), slint::PlatformError> {
                         continue;
                     }
 
-                    // Set job to Working
+                    // Set job to Working and clear any previous error
                     {
                         let mut store = worker_jobs.lock().unwrap();
                         if let Some(j) = store.iter_mut().find(|j| j.id == job.id) {
                             j.status = "Working".to_string();
+                            j.error.clear();
                         }
                         let snapshot = store.clone();
                         let w_weak = worker_window.clone();
@@ -190,20 +277,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     }
 
                     // Execute operation
-                    let result = process_job(
-                        &job,
-                        &image_format,
-                        image_quality,
-                        target_kb,
-                        resize_w,
-                        resize_h,
-                        &audio_format,
-                        audio_bitrate,
-                        &trim_start,
-                        &trim_end,
-                        &pdf_ranges,
-                        &pdf_order,
-                    );
+                    let result = process_job(&job, &opts);
 
                     // Update result
                     {
@@ -212,11 +286,12 @@ fn main() -> Result<(), slint::PlatformError> {
                             match result {
                                 Ok(out_path) => {
                                     j.status = "Done".to_string();
+                                    j.error.clear();
                                     j.output_path = out_path.to_string_lossy().to_string();
                                 }
                                 Err(err) => {
                                     j.status = "Failed".to_string();
-                                    j.error = err.to_string();
+                                    j.error = err;
                                 }
                             }
                         }
@@ -263,98 +338,94 @@ fn update_ui_jobs(window: &MainWindow, records: &[JobRecord]) {
     window.set_jobs(model.into());
 }
 
-fn process_job(
-    job: &JobRecord,
-    image_fmt: &str,
-    image_quality: u8,
-    target_kb: u32,
-    resize_w: u32,
-    resize_h: u32,
-    audio_fmt: &str,
-    audio_bitrate: u32,
-    trim_start: &str,
-    trim_end: &str,
-    pdf_ranges: &str,
-    pdf_order: &str,
-) -> Result<PathBuf, String> {
-    let parent = job.input_path.parent().unwrap_or(Path::new("."));
-    let stem = job.input_path.file_stem().and_then(|s| s.to_str()).unwrap_or("file");
+fn process_job(job: &JobRecord, opts: &JobOptions) -> Result<PathBuf, String> {
+    let first_path = job
+        .input_paths
+        .first()
+        .ok_or_else(|| "Job has no input files".to_string())?;
+    let parent = first_path.parent().unwrap_or(Path::new("."));
+    let stem = first_path.file_stem().and_then(|s| s.to_str()).unwrap_or("file");
 
     match job.tool.as_str() {
         "Convert image" => {
-            let bytes = std::fs::read(&job.input_path).map_err(|e| e.to_string())?;
-            let target_format = map_format_str(image_fmt);
-            let out_bytes = refract_engine::image::convert_image(&bytes, target_format, Some(image_quality))
+            let bytes = std::fs::read(first_path).map_err(|e| e.to_string())?;
+            let target_format = map_format_str(&opts.image_format);
+            let out_bytes = refract_engine::image::convert_image(&bytes, target_format, Some(opts.image_quality))
                 .map_err(|e| e.to_string())?;
-            let out_path = parent.join(format!("{} (converted).{}", stem, target_format.primary_extension()));
+            let out_path = unique_output_path(parent, &format!("{} (converted)", stem), target_format.primary_extension());
             std::fs::write(&out_path, out_bytes).map_err(|e| e.to_string())?;
             Ok(out_path)
         }
         "Compress image" => {
-            let bytes = std::fs::read(&job.input_path).map_err(|e| e.to_string())?;
-            let out_bytes = refract_engine::image::compress_image(&bytes, target_kb).map_err(|e| e.to_string())?;
-            let out_path = parent.join(format!("{} (compressed).jpg", stem));
+            let bytes = std::fs::read(first_path).map_err(|e| e.to_string())?;
+            let out_bytes = refract_engine::image::compress_image(&bytes, opts.target_kb).map_err(|e| e.to_string())?;
+            let out_path = unique_output_path(parent, &format!("{} (compressed)", stem), "jpg");
             std::fs::write(&out_path, out_bytes).map_err(|e| e.to_string())?;
             Ok(out_path)
         }
         "Resize image" => {
-            let bytes = std::fs::read(&job.input_path).map_err(|e| e.to_string())?;
-            let out_bytes = refract_engine::image::resize_image(&bytes, resize_w, resize_h).map_err(|e| e.to_string())?;
-            let out_path = parent.join(format!("{} (resized).jpg", stem));
+            let bytes = std::fs::read(first_path).map_err(|e| e.to_string())?;
+            let (out_bytes, out_fmt) =
+                refract_engine::image::resize_image_with_format(&bytes, opts.resize_w, opts.resize_h, None)
+                    .map_err(|e| e.to_string())?;
+            let out_path = unique_output_path(parent, &format!("{} (resized)", stem), out_fmt.primary_extension());
             std::fs::write(&out_path, out_bytes).map_err(|e| e.to_string())?;
             Ok(out_path)
         }
         "Convert audio" => {
-            let target_format = map_format_str(audio_fmt);
-            let out_path = parent.join(format!("{} (converted).{}", stem, target_format.primary_extension()));
-            refract_engine::audio::convert_audio(&job.input_path, &out_path, target_format, Some(audio_bitrate))
+            let target_format = map_format_str(&opts.audio_format);
+            let out_path = unique_output_path(parent, &format!("{} (converted)", stem), target_format.primary_extension());
+            refract_engine::audio::convert_audio(first_path, &out_path, target_format, Some(opts.audio_bitrate))
                 .map_err(|e| e.to_string())?;
             Ok(out_path)
         }
         "Trim audio" => {
-            let ext = job.input_path.extension().and_then(|e| e.to_str()).unwrap_or("mp3");
-            let out_path = parent.join(format!("{} (trimmed).{}", stem, ext));
-            refract_engine::audio::trim_audio(&job.input_path, &out_path, Some(trim_start), Some(trim_end))
-                .map_err(|e| e.to_string())?;
+            let ext = first_path.extension().and_then(|e| e.to_str()).unwrap_or("mp3");
+            let out_path = unique_output_path(parent, &format!("{} (trimmed)", stem), ext);
+            let start = (!opts.trim_start.trim().is_empty()).then_some(opts.trim_start.as_str());
+            let end = (!opts.trim_end.trim().is_empty()).then_some(opts.trim_end.as_str());
+            refract_engine::audio::trim_audio(first_path, &out_path, start, end).map_err(|e| e.to_string())?;
             Ok(out_path)
         }
         "Compress PDF" => {
-            let bytes = std::fs::read(&job.input_path).map_err(|e| e.to_string())?;
+            let bytes = std::fs::read(first_path).map_err(|e| e.to_string())?;
             let out_bytes = refract_engine::pdf::compress_pdf(&bytes).map_err(|e| e.to_string())?;
-            let out_path = parent.join(format!("{} (compressed).pdf", stem));
+            let out_path = unique_output_path(parent, &format!("{} (compressed)", stem), "pdf");
             std::fs::write(&out_path, out_bytes).map_err(|e| e.to_string())?;
             Ok(out_path)
         }
         "Split PDF" => {
-            let bytes = std::fs::read(&job.input_path).map_err(|e| e.to_string())?;
-            let parts = refract_engine::pdf::split_pdf(&bytes, pdf_ranges).map_err(|e| e.to_string())?;
+            let bytes = std::fs::read(first_path).map_err(|e| e.to_string())?;
+            let parts = refract_engine::pdf::split_pdf(&bytes, &opts.pdf_ranges).map_err(|e| e.to_string())?;
             let mut last_path = parent.to_path_buf();
             for (label, part_bytes) in parts {
-                let out_path = parent.join(format!("{}-{}.pdf", stem, label));
+                let out_path = unique_output_path(parent, &format!("{}-{}", stem, label), "pdf");
                 std::fs::write(&out_path, part_bytes).map_err(|e| e.to_string())?;
                 last_path = out_path;
             }
             Ok(last_path)
         }
         "Reorder PDF" => {
-            let bytes = std::fs::read(&job.input_path).map_err(|e| e.to_string())?;
-            let out_bytes = refract_engine::pdf::reorder_pdf(&bytes, pdf_order).map_err(|e| e.to_string())?;
-            let out_path = parent.join(format!("{} (reordered).pdf", stem));
+            let bytes = std::fs::read(first_path).map_err(|e| e.to_string())?;
+            let out_bytes = refract_engine::pdf::reorder_pdf(&bytes, &opts.pdf_order).map_err(|e| e.to_string())?;
+            let out_path = unique_output_path(parent, &format!("{} (reordered)", stem), "pdf");
             std::fs::write(&out_path, out_bytes).map_err(|e| e.to_string())?;
             Ok(out_path)
         }
         "Merge PDF" => {
-            let bytes = std::fs::read(&job.input_path).map_err(|e| e.to_string())?;
-            let out_bytes = refract_engine::pdf::compress_pdf(&bytes).map_err(|e| e.to_string())?;
-            let out_path = parent.join(format!("{} (merged).pdf", stem));
+            if job.input_paths.len() < 2 {
+                return Err("Merge PDF needs at least 2 PDF files. Select multiple PDFs or add another PDF.".to_string());
+            }
+            let mut buffers: Vec<Vec<u8>> = Vec::with_capacity(job.input_paths.len());
+            for path in &job.input_paths {
+                buffers.push(std::fs::read(path).map_err(|e| format!("{}: {}", path.display(), e))?);
+            }
+            let slices: Vec<&[u8]> = buffers.iter().map(|b| b.as_slice()).collect();
+            let out_bytes = refract_engine::pdf::merge_pdfs(&slices).map_err(|e| e.to_string())?;
+            let out_path = unique_output_path(parent, &format!("{} (merged)", stem), "pdf");
             std::fs::write(&out_path, out_bytes).map_err(|e| e.to_string())?;
             Ok(out_path)
         }
-        _ => {
-            let bytes = std::fs::read(&job.input_path).map_err(|e| e.to_string())?;
-            let out_path = parent.join(format!("{} (output).bin", stem));
-            std::fs::write(&out_path, bytes).map_err(|e| e.to_string())?;
-            Ok(out_path)
-        }
+        other => Err(format!("Unsupported tool: {}", other)),
     }
 }

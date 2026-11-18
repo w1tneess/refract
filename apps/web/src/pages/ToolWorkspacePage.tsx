@@ -1,5 +1,5 @@
 import { useId, useState, type DragEvent } from 'react';
-import { batchStatus, FORMATS, resolveOptions, TOOLS, type Kind, type Options, type ToolId } from '@refract/core';
+import { batchStatus, FORMATS, isTerminal, TOOLS, type Kind, type Options, type ToolId } from '@refract/core';
 import { JobCard, size } from '../JobCard.tsx';
 import { OptionsForm } from '../OptionsForm.tsx';
 import type { JobView } from '../useJobs.ts';
@@ -119,11 +119,15 @@ export function ToolWorkspacePage({
   const handleLoadSample = async () => {
     try {
       setSampleLoading(true);
-      let file: File;
-      if (t.accepts === 'image') file = await createSampleImage();
-      else if (t.accepts === 'pdf') file = await createSamplePdf();
-      else file = createSampleAudio();
-      onAddFiles([file]);
+      const count = t.minInputs && t.minInputs > 1 ? t.minInputs : 1;
+      const sampleFiles: File[] = [];
+      for (let i = 0; i < count; i++) {
+        const suffix = count > 1 ? `-${i + 1}` : '';
+        if (t.accepts === 'image') sampleFiles.push(await createSampleImage(suffix));
+        else if (t.accepts === 'pdf') sampleFiles.push(await createSamplePdf(suffix));
+        else sampleFiles.push(createSampleAudio(suffix));
+      }
+      onAddFiles(sampleFiles);
     } finally {
       setSampleLoading(false);
     }
@@ -289,7 +293,7 @@ export function ToolWorkspacePage({
                       <span>{size(Math.abs(sizeChange))}</span>
                     </span>
                   )}
-                  {savedCount > 0 && (
+                  {jobs.some((j) => isTerminal(j.state)) && (
                     <button type="button" className="link" onClick={onClearJobs}>
                       Clear finished
                     </button>

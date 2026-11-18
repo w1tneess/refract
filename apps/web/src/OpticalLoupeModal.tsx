@@ -12,6 +12,7 @@ export function OpticalLoupeModal({ job, onClose }: OpticalLoupeModalProps) {
   const [zoom, setZoom] = useState<1 | 2 | 4>(1);
 
   const containerRef = useRef<HTMLDivElement>(null);
+  const zoomCanvasRef = useRef<HTMLDivElement>(null);
   const clipLayerRef = useRef<HTMLDivElement>(null);
   const dividerRef = useRef<HTMLDivElement>(null);
   const posTextRef = useRef<HTMLSpanElement>(null);
@@ -20,10 +21,45 @@ export function OpticalLoupeModal({ job, onClose }: OpticalLoupeModalProps) {
   const currentPctRef = useRef(50);
   const rafIdRef = useRef<number | null>(null);
 
-  // Close on Escape key
+  const applyPosition = (pct: number) => {
+    const clamped = Math.max(0, Math.min(100, pct));
+    currentPctRef.current = clamped;
+    if (rafIdRef.current !== null) return;
+
+    rafIdRef.current = requestAnimationFrame(() => {
+      rafIdRef.current = null;
+      const p = currentPctRef.current;
+      if (zoomCanvasRef.current) {
+        zoomCanvasRef.current.style.transformOrigin = `${p}% 50%`;
+      }
+      if (clipLayerRef.current) {
+        clipLayerRef.current.style.clipPath = `polygon(0 0, ${p}% 0, ${p}% 100%, 0 100%)`;
+      }
+      if (dividerRef.current) {
+        dividerRef.current.style.left = `${p}%`;
+      }
+      if (posTextRef.current) {
+        posTextRef.current.textContent = `${Math.round(p)}% split`;
+      }
+    });
+  };
+
+  // Close on Escape key; allow ArrowLeft / ArrowRight to scrub the divider
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
+      if (e.key === 'Escape') {
+        onClose();
+      } else if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        const next = Math.max(0, Math.round(currentPctRef.current) - 5);
+        applyPosition(next);
+        setSliderPos(next);
+      } else if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        const next = Math.min(100, Math.round(currentPctRef.current) + 5);
+        applyPosition(next);
+        setSliderPos(next);
+      }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
@@ -37,25 +73,6 @@ export function OpticalLoupeModal({ job, onClose }: OpticalLoupeModalProps) {
       }
     };
   }, []);
-
-  const applyPosition = (pct: number) => {
-    currentPctRef.current = pct;
-    if (rafIdRef.current !== null) return;
-
-    rafIdRef.current = requestAnimationFrame(() => {
-      rafIdRef.current = null;
-      const p = currentPctRef.current;
-      if (clipLayerRef.current) {
-        clipLayerRef.current.style.clipPath = `polygon(0 0, ${p}% 0, ${p}% 100%, 0 100%)`;
-      }
-      if (dividerRef.current) {
-        dividerRef.current.style.left = `${p}%`;
-      }
-      if (posTextRef.current) {
-        posTextRef.current.textContent = `${Math.round(p)}% split`;
-      }
-    });
-  };
 
   const handlePointerDown = (e: PointerEvent<HTMLDivElement>) => {
     if (!containerRef.current) return;
@@ -153,6 +170,7 @@ export function OpticalLoupeModal({ job, onClose }: OpticalLoupeModalProps) {
         >
           {/* Zoom Wrapper (Hardware-accelerated scale transform) */}
           <div
+            ref={zoomCanvasRef}
             className="loupe-zoom-canvas"
             style={{
               transform: `scale(${zoom})`,

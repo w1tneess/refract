@@ -6,10 +6,10 @@ November 2026 · branch `phase-4-desktop-rust`
 
 Phase 4 delivers the native desktop application for Refract. While originally scoped as a Tauri 2 webview wrapper, Phase 4 was transitioned into a **Pure Native Rust Application** with **Slint UI** and a modular native Rust workspace (`crates/refract-core`, `crates/refract-engine`, `apps/desktop`).
 
-- **Status**: Complete. All 12 tools across Images, PDF, and Audio are implemented and wired to the Slint GUI.
+- **Status**: Complete. All 9 desktop tools across Images, PDF, and Audio are implemented and wired to the Slint GUI.
 - **Binary Footprint**: Standalone single executable is **17.3 MB** uncompressed (**~6.5 MB** zipped) with zero runtime dependencies.
 - **Cold Boot Time**: < 20 ms.
-- **Test Suite**: 18 unit tests in Rust passing (`refract-core` + `refract-engine`), along with full Web v1 test suites passing in CI.
+- **Test Suite**: Full Rust unit test suite (`refract-core` + `refract-engine`), along with full Web v1 unit and E2E test suites passing in CI.
 
 ---
 
@@ -17,7 +17,7 @@ Phase 4 delivers the native desktop application for Refract. While originally sc
 
 | Decision | Choice | Benefit |
 | --- | --- | --- |
-| **Desktop UI Framework** | Slint 1.19 | Pure declarative UI, hardware-accelerated GPU rendering (FemtoVG/Skia), zero webview/DOM requirements. |
+| **Desktop UI Framework** | Slint 1.9 | Pure declarative UI, hardware-accelerated GPU rendering (FemtoVG/Skia), zero webview/DOM requirements. |
 | **Core Logic** | `crates/refract-core` | Native Rust reimplementation of `@refract/core` logic (magic bytes detection, formats, error models, job state machine). |
 | **Image Engine** | `image` (0.25) | Native Rust codecs for JPEG, PNG, and WebP, Lanczos-3 resampling, target-size binary search. |
 | **Audio Engine** | Native FFmpeg / FFprobe | Direct process execution with stream copying, bitrate control, and millisecond trimming. |
@@ -64,7 +64,7 @@ Phase 4 delivers the native desktop application for Refract. While originally sc
 - Multi-document merging (`merge_pdfs`).
 
 ### Milestone D4: Slint Desktop UI Wiring (`apps/desktop`)
-- Sidebar tool navigation across all 12 tools.
+- Sidebar tool navigation across all 9 desktop tools (3 Image, 4 PDF, 2 Audio).
 - Dynamic options form updating based on active tool (formats, quality, target KB, dimensions, bitrates, timestamps, ranges).
 - Non-blocking background worker thread executing operations via `refract-engine`.
 - Asynchronous UI state updates via `slint::invoke_from_event_loop`.

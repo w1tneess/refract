@@ -11,44 +11,48 @@ async function getFFmpeg(ctx: Ctx): Promise<FFmpeg> {
   if (ffmpegPromise) return ffmpegPromise;
   const t = performance.now();
   ffmpegPromise = (async () => {
-    const [{ FFmpeg }, { default: coreJsUrl }, { default: coreWasmUrl }] = await Promise.all([
-      import('@ffmpeg/ffmpeg'),
-      import('@ffmpeg/core?url'),
-      import('@ffmpeg/core/wasm?url'),
-    ]);
-    const ffmpeg = new FFmpeg();
-    await ffmpeg.load({
-      coreURL: coreJsUrl,
-      wasmURL: coreWasmUrl,
-    });
-    ctx.timing('wasmLoadMs', performance.now() - t);
-    ctx.heartbeat();
-    return ffmpeg;
+    try {
+      const [{ FFmpeg }, { default: coreJsUrl }, { default: coreWasmUrl }] = await Promise.all([
+        import('@ffmpeg/ffmpeg'),
+        import('@ffmpeg/core?url'),
+        import('@ffmpeg/core/wasm?url'),
+      ]);
+      const ffmpeg = new FFmpeg();
+      await ffmpeg.load({
+        coreURL: coreJsUrl,
+        wasmURL: coreWasmUrl,
+      });
+      ctx.timing('wasmLoadMs', performance.now() - t);
+      ctx.heartbeat();
+      return ffmpeg;
+    } catch (e) {
+      ffmpegPromise = null;
+      throw e;
+    }
   })();
   return ffmpegPromise;
 }
 
 export async function inspect(item: Item, ctx: Ctx): Promise<Inspect> {
   const t = performance.now();
+  let ffmpeg: FFmpeg | undefined;
+  let inName: string | undefined;
+  let durationS: number | undefined;
+  const onLog = ({ message }: { message: string }) => {
+    ctx.logs.push(message);
+    const m = message.match(/Duration:\s*(\d{2}):(\d{2}):(\d{2}(?:\.\d+)?)/);
+    if (m) {
+      durationS = Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]);
+    }
+  };
   try {
-    const ffmpeg = await getFFmpeg(ctx);
-    const inName = `inspect_${Date.now()}.${ext(item.format)}`;
-    let durationS: number | undefined;
-
-    const onLog = ({ message }: { message: string }) => {
-      ctx.logs.push(message);
-      const m = message.match(/Duration:\s*(\d{2}):(\d{2}):(\d{2}(?:\.\d+)?)/);
-      if (m) {
-        durationS = Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]);
-      }
-    };
+    ffmpeg = await getFFmpeg(ctx);
+    inName = `inspect_${Date.now()}.${ext(item.format)}`;
 
     ffmpeg.on('log', onLog);
     await ffmpeg.writeFile(inName, item.bytes);
     // '-f null -' processes input and writes null format output, printing media stats
     await ffmpeg.exec(['-i', inName, '-f', 'null', '-']);
-    await ffmpeg.deleteFile(inName);
-    ffmpeg.off('log', onLog);
 
     ctx.timing('inspectMs', performance.now() - t);
     ctx.heartbeat();
@@ -60,6 +64,13 @@ export async function inspect(item: Item, ctx: Ctx): Promise<Inspect> {
   } catch (e) {
     if (e instanceof RefractError) throw e;
     return { format: 'unknown' };
+  } finally {
+    if (ffmpeg) {
+      ffmpeg.off('log', onLog);
+      if (inName) {
+        try { await ffmpeg.deleteFile(inName); } catch {}
+      }
+    }
   }
 }
 
@@ -120,14 +131,13 @@ export async function run(op: string, items: Item[], opts: Options, ctx: Ctx): P
     const outData = await ffmpeg.readFile(outName);
     const bytes = typeof outData === 'string' ? new TextEncoder().encode(outData) : new Uint8Array(outData);
 
-    try { await ffmpeg.deleteFile(inName); } catch {}
-    try { await ffmpeg.deleteFile(outName); } catch {}
-
     return [{ bytes, format: toFormat }];
   } catch (e) {
     if (e instanceof RefractError) throw e;
     throw damaged(e instanceof Error ? e.message : String(e));
   } finally {
+    try { await ffmpeg.deleteFile(inName); } catch {}
+    try { await ffmpeg.deleteFile(outName); } catch {}
     ffmpeg.off('log', onLog);
   }
 }

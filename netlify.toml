@@ -2,7 +2,6 @@
   base = "apps/web"
   command = "pnpm build"
   publish = "dist"
-  functions = ""
 
 [build.environment]
   VITE_BASE = "/"
@@ -14,7 +13,17 @@
     Cache-Control = "public, max-age=31536000, immutable"
 
 [[headers]]
-  for = "/assets/*.{js,mjs,css}"
+  for = "/assets/*.js"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+
+[[headers]]
+  for = "/assets/*.mjs"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+
+[[headers]]
+  for = "/assets/*.css"
   [headers.values]
     Cache-Control = "public, max-age=31536000, immutable"
 
@@ -28,4 +37,3 @@
   from = "/*"
   to = "/index.html"
   status = 200
-  conditions = {Path = ["!assets/*"]}

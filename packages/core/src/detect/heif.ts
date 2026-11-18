@@ -58,23 +58,30 @@ export function probeHeif(b: Uint8Array): HeifProbe {
   const ipma = iprp && child(b, iprp, 'ipma');
   if (!pitm || !ipco || !ipma) throw corrupt('the image metadata is incomplete');
 
-  const primary = b[pitm.start] === 0 ? u16(b, pitm.start + 4) : u32(b, pitm.start + 4);
+  if (pitm.end - pitm.start < 6) throw corrupt('the primary item box ends early');
+  const pitmVersion = b[pitm.start]!;
+  if (pitmVersion !== 0 && pitm.end - pitm.start < 8) throw corrupt('the primary item box ends early');
+  const primary = pitmVersion === 0 ? u16(b, pitm.start + 4) : u32(b, pitm.start + 4);
   const props = [...boxes(b, ipco.start, ipco.end)];
 
+  if (ipma.end - ipma.start < 8) throw corrupt('the property map ends early');
   const version = b[ipma.start]!;
   const wideIndex = (b[ipma.start + 3]! & 1) === 1;
   let p = ipma.start + 4;
   const count = u32(b, p);
   p += 4;
   let assoc: Box[] = [];
-  for (let i = 0; i < count && p < ipma.end; i++) {
+  const idBytes = version < 1 ? 2 : 4;
+  const idxBytes = wideIndex ? 2 : 1;
+  for (let i = 0; i < count && p + idBytes + 1 <= ipma.end; i++) {
     const item = version < 1 ? u16(b, p) : u32(b, p);
-    p += version < 1 ? 2 : 4;
+    p += idBytes;
     const n = b[p++]!;
+    if (p + n * idxBytes > ipma.end) throw corrupt('the property map ends early');
     const found: Box[] = [];
     for (let j = 0; j < n; j++) {
       const index = wideIndex ? u16(b, p) & 0x7fff : b[p]! & 0x7f;
-      p += wideIndex ? 2 : 1;
+      p += idxBytes;
       const prop = props[index - 1];
       if (prop) found.push(prop);
     }
@@ -88,7 +95,7 @@ export function probeHeif(b: Uint8Array): HeifProbe {
   if (w === 0 || h === 0) throw corrupt('the image size is zero');
 
   const irot = assoc.find((x) => x.type === 'irot');
-  const rotation = (((irot ? b[irot.start]! & 3 : 0) * 90) as HeifProbe['rotation']);
+  const rotation = (((irot && irot.end - irot.start >= 1 ? b[irot.start]! & 3 : 0) * 90) as HeifProbe['rotation']);
   const swap = rotation === 90 || rotation === 270;
   return {
     width: swap ? h : w,

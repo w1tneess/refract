@@ -73,9 +73,13 @@ export const wasmEngine: Engine = {
   kind: 'wasm',
   edges: edges(),
   run,
-  inspect: async (items, ctx) => (await inWorker({ type: 'inspect', items: copy(items) }, ctx)).info ?? [],
+  inspect: async (items, ctx) => {
+    const input = copy(items);
+    return (await inWorker({ type: 'inspect', items: input }, ctx, input.map((i) => i.bytes.buffer))).info ?? [];
+  },
   unlock: async (item, password, ctx) => {
-    const done = await inWorker({ type: 'unlock', item: copy([item])[0]!, password }, ctx);
+    const [copied] = copy([item]);
+    const done = await inWorker({ type: 'unlock', item: copied!, password }, ctx, [copied!.bytes.buffer]);
     return done.wrongPassword ? 'wrong-password' : done.items![0]!;
   },
 };

@@ -31,14 +31,19 @@ export function jpegOrientation(b: Uint8Array): number {
   let p = 2;
   while (p + 4 <= b.length && b[p] === 0xff) {
     const marker = b[p + 1]!;
+    if (marker === 0xff) { p++; continue; }
+    if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) { p += 2; continue; }
     if (marker === 0xda || marker === 0xd9) break;
     const len = be16(b, p + 2);
-    if (marker === 0xe1 && ascii(b, p + 4, p + 10) === 'Exif\0\0') {
+    if (len < 2) break;
+    if (marker === 0xe1 && p + 10 <= b.length && ascii(b, p + 4, p + 10) === 'Exif\0\0') {
       const t = p + 10; // TIFF header
-      const little = ascii(b, t, t + 2) === 'II';
+      if (t + 8 > b.length) return 1;
+      const byteOrder = ascii(b, t, t + 2);
+      if (byteOrder !== 'II' && byteOrder !== 'MM') return 1;
+      const little = byteOrder === 'II';
       const u16 = (q: number) => (little ? le16(b, q) : be16(b, q));
       const u32 = (q: number) => (little ? (b[q]! | (b[q + 1]! << 8) | (b[q + 2]! << 16)) + b[q + 3]! * 2 ** 24 : be32(b, q));
-      if (t + 8 > b.length) return 1;
       const ifd = t + u32(t + 4);
       if (ifd + 2 > b.length) return 1;
       const n = u16(ifd);
@@ -59,14 +64,17 @@ export function jpegOrientation(b: Uint8Array): number {
 
 function probeJpeg(b: Uint8Array): ImageProbe {
   let p = 2;
-  while (p + 9 <= b.length) {
+  while (p + 4 <= b.length) {
     if (b[p] !== 0xff) throw corrupt('a header is malformed');
     const marker = b[p + 1]!;
     if (marker === 0xff) { p++; continue; }
     if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) { p += 2; continue; }
     if (marker === 0xda || marker === 0xd9) break;
+    const len = be16(b, p + 2);
+    if (len < 2) throw corrupt('a header is malformed');
     const sof = marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc;
     if (sof) {
+      if (p + 9 > b.length) throw corrupt('the header ends early');
       const h = be16(b, p + 5);
       const w = be16(b, p + 7);
       if (!w || !h) throw corrupt('the image size is zero');
@@ -75,7 +83,7 @@ function probeJpeg(b: Uint8Array): ImageProbe {
         ? { width: h, height: w, orientation, hasAlpha: false }
         : { width: w, height: h, orientation, hasAlpha: false };
     }
-    p += 2 + be16(b, p + 2);
+    p += 2 + len;
   }
   throw corrupt('the image size is missing');
 }
@@ -98,7 +106,10 @@ function probeWebp(b: Uint8Array): ImageProbe {
     return { width: le24(b, 24) + 1, height: le24(b, 27) + 1, orientation: 1, hasAlpha: (b[20]! & 0x10) !== 0 };
   }
   if (chunk === 'VP8 ') {
-    return { width: le16(b, 26) & 0x3fff, height: le16(b, 28) & 0x3fff, orientation: 1, hasAlpha: false };
+    const width = le16(b, 26) & 0x3fff;
+    const height = le16(b, 28) & 0x3fff;
+    if (!width || !height) throw corrupt('the image size is zero');
+    return { width, height, orientation: 1, hasAlpha: false };
   }
   if (chunk === 'VP8L') {
     const bits = b[21]! | (b[22]! << 8) | (b[23]! << 16) | (b[24]! << 24);

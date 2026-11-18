@@ -13,29 +13,49 @@ pub fn is_ffprobe_available() -> bool {
     which::which("ffprobe").is_ok()
 }
 
-/// Parse time string ("90", "1:30", "01:30.5") into total seconds.
+/// Parse time string ("90", "1:30", "01:30.5") into total non-negative finite seconds.
 pub fn parse_timestamp(ts: &str) -> Result<f64, RefractError> {
     let ts = ts.trim();
     if ts.is_empty() {
         return Ok(0.0);
     }
 
+    let validate = |v: f64, label: &str| -> Result<f64, RefractError> {
+        if !v.is_finite() || v < 0.0 {
+            return Err(RefractError::new(
+                ErrorCode::DamagedFile,
+                format!("Invalid {} in timestamp: {}", label, ts),
+            ));
+        }
+        Ok(v)
+    };
+
     if let Ok(sec) = ts.parse::<f64>() {
-        return Ok(sec);
+        return validate(sec, "seconds");
     }
 
     let parts: Vec<&str> = ts.split(':').collect();
     match parts.len() {
         2 => {
-            let m: f64 = parts[0].parse().map_err(|_| RefractError::new(ErrorCode::DamagedFile, "Invalid minutes in timestamp"))?;
-            let s: f64 = parts[1].parse().map_err(|_| RefractError::new(ErrorCode::DamagedFile, "Invalid seconds in timestamp"))?;
-            Ok(m * 60.0 + s)
+            let m: f64 = parts[0]
+                .parse()
+                .map_err(|_| RefractError::new(ErrorCode::DamagedFile, "Invalid minutes in timestamp"))?;
+            let s: f64 = parts[1]
+                .parse()
+                .map_err(|_| RefractError::new(ErrorCode::DamagedFile, "Invalid seconds in timestamp"))?;
+            Ok(validate(m, "minutes")? * 60.0 + validate(s, "seconds")?)
         }
         3 => {
-            let h: f64 = parts[0].parse().map_err(|_| RefractError::new(ErrorCode::DamagedFile, "Invalid hours in timestamp"))?;
-            let m: f64 = parts[1].parse().map_err(|_| RefractError::new(ErrorCode::DamagedFile, "Invalid minutes in timestamp"))?;
-            let s: f64 = parts[2].parse().map_err(|_| RefractError::new(ErrorCode::DamagedFile, "Invalid seconds in timestamp"))?;
-            Ok(h * 3600.0 + m * 60.0 + s)
+            let h: f64 = parts[0]
+                .parse()
+                .map_err(|_| RefractError::new(ErrorCode::DamagedFile, "Invalid hours in timestamp"))?;
+            let m: f64 = parts[1]
+                .parse()
+                .map_err(|_| RefractError::new(ErrorCode::DamagedFile, "Invalid minutes in timestamp"))?;
+            let s: f64 = parts[2]
+                .parse()
+                .map_err(|_| RefractError::new(ErrorCode::DamagedFile, "Invalid seconds in timestamp"))?;
+            Ok(validate(h, "hours")? * 3600.0 + validate(m, "minutes")? * 60.0 + validate(s, "seconds")?)
         }
         _ => Err(RefractError::new(ErrorCode::DamagedFile, format!("Invalid timestamp format: {}", ts))),
     }
@@ -83,7 +103,7 @@ pub fn probe_duration(input: &Path) -> Result<f64, RefractError> {
 pub fn convert_audio(
     input: &Path,
     output: &Path,
-    _target: Format,
+    target: Format,
     bitrate_kbps: Option<u32>,
 ) -> Result<(), RefractError> {
     if !is_ffmpeg_available() {
@@ -96,8 +116,34 @@ pub fn convert_audio(
     let mut cmd = Command::new("ffmpeg");
     cmd.arg("-y").arg("-i").arg(input);
 
-    if let Some(br) = bitrate_kbps {
-        cmd.arg("-b:a").arg(format!("{}k", br));
+    match target {
+        Format::Mp3 => {
+            cmd.args(["-c:a", "libmp3lame"]);
+            if let Some(br) = bitrate_kbps {
+                cmd.args(["-b:a", &format!("{}k", br)]);
+            }
+        }
+        Format::Wav => {
+            cmd.args(["-c:a", "pcm_s16le"]);
+        }
+        Format::M4a => {
+            cmd.args(["-c:a", "aac"]);
+            if let Some(br) = bitrate_kbps {
+                cmd.args(["-b:a", &format!("{}k", br)]);
+            }
+        }
+        Format::Ogg => {
+            cmd.args(["-c:a", "libvorbis"]);
+            if let Some(br) = bitrate_kbps {
+                cmd.args(["-b:a", &format!("{}k", br)]);
+            }
+        }
+        _ => {
+            return Err(RefractError::new(
+                ErrorCode::UnsupportedFormat,
+                format!("Unsupported target audio format: {:?}", target),
+            ));
+        }
     }
 
     cmd.arg(output);
@@ -132,16 +178,33 @@ pub fn trim_audio(
         ));
     }
 
+    let start_secs = match start.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(s) => Some(parse_timestamp(s)?),
+        None => None,
+    };
+    let end_secs = match end.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(e) => Some(parse_timestamp(e)?),
+        None => None,
+    };
+
+    if let Some(e) = end_secs {
+        let s = start_secs.unwrap_or(0.0);
+        if e <= s {
+            return Err(RefractError::new(
+                ErrorCode::DamagedFile,
+                format!("End time ({:.3}s) must be greater than start time ({:.3}s)", e, s),
+            ));
+        }
+    }
+
     let mut cmd = Command::new("ffmpeg");
     cmd.arg("-y");
 
-    if let Some(s) = start {
-        let secs = parse_timestamp(s)?;
+    if let Some(secs) = start_secs {
         cmd.arg("-ss").arg(format!("{:.3}", secs));
     }
 
-    if let Some(e) = end {
-        let secs = parse_timestamp(e)?;
+    if let Some(secs) = end_secs {
         cmd.arg("-to").arg(format!("{:.3}", secs));
     }
 

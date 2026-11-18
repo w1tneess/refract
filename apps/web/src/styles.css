@@ -138,7 +138,7 @@ svg {
 
 ::selection {
   background: var(--accent-soft);
-  color: var(--accent-text);
+  color: var(--text);
 }
 
 :focus-visible {

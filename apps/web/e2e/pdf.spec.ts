@@ -48,6 +48,20 @@ test.describe('M2 PDF: merge, split, reorder, images-to-pdf, pdf-to-images, comp
     await expectPdf(out.bytes, 2);
   });
 
+  test('images-to-pdf: applies EXIF orientation for rotated JPEG', async ({ page }) => {
+    await page.goto('/#images-to-pdf');
+    await page.locator('fieldset.options select').first().selectOption('fit');
+    await addFiles(page, ['rotated.jpg']);
+    const c = card(page);
+    await waitForState(c, 'Saved');
+    const out = await download(page, c);
+    await expectPdf(out.bytes, 1);
+    const { PDFDocument } = await import('pdf-lib');
+    const doc = await PDFDocument.load(out.bytes);
+    const { width, height } = doc.getPage(0).getSize();
+    expect([Math.round(width), Math.round(height)]).toEqual([300, 400]);
+  });
+
   test('pdf-to-images: renders PDF pages to images inside a ZIP', async ({ page }) => {
     await page.goto('/#pdf-to-images');
     await addFiles(page, ['plain.pdf']);

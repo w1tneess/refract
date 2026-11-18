@@ -6,7 +6,7 @@ November 2026 · branch `phase-3-web-v1`
 
 Phase 3 (Web v1) delivers a full, zero-server in-browser file converter across **Images**, **PDF**, and **Audio** on Refract's shared pipeline. All files remain on the user's device and are processed inside dedicated Web Workers.
 
-- **Status**: Complete. All 12 tools across 3 domains are implemented and verified.
+- **Status**: Complete. All 11 tools across 3 domains are implemented and verified.
 - **Test Suite**: 64 unit tests (`@refract/core`) and 74 Playwright E2E tests (`@refract/web`) passing across Chromium and Firefox (72 passed, 2 skipped pending manual real-phone fixtures).
 - **Core Principles Maintained**:
   - Pinned dependencies ≥ 2 weeks old, all compatible with GPL-3.0.
@@ -22,8 +22,8 @@ Phase 3 (Web v1) delivers a full, zero-server in-browser file converter across *
 | Tool | Formats | Engine / Codecs | Key Behaviors |
 | --- | --- | --- | --- |
 | **Convert image** | HEIC, WebP, PNG, JPEG ↔ each other | `libheif-js`, `@jsquash/jpeg`, `@jsquash/png`, `@jsquash/webp` | Preserves dimensions, handles transparency, removes EXIF tags while baking in correct visual orientation. |
-| **Compress image** | JPEG, WebP, PNG | `@jsquash/*` | Binary search for target file size (KB) within ±10% or best effort within quality bounds (min quality 10). |
-| **Resize image** | JPEG, WebP, PNG | `@jsquash/resize` (Lanczos-3) | Resize by px or cm (with customizable DPI, default 300). Maintains aspect ratio if one dimension is left 0. |
+| **Compress image** | HEIC, JPEG, WebP, PNG → JPEG, WebP | `@jsquash/*` | Binary search for target file size (KB) with automatic scale-down fallback (quality 10–95). |
+| **Resize image** | HEIC, JPEG, WebP, PNG → JPEG, WebP, PNG | `@jsquash/resize` (Lanczos-3) | Resize by px or cm (with customizable DPI, default 300). Maintains aspect ratio if one dimension is left 0. |
 
 - **Orientation Guarantee**: JPEG EXIF orientation (tags 1–8) is baked directly into the pixel buffer upon decode and stripped from the encoded output, eliminating browser orientation inconsistencies. For HEIC, container `irot`/`imir` boxes govern orientation without double-rotation.
 - **Damaged & Truncated Files**: Corrupt files fail early with typed diagnostics (`CorruptData`) and offer a one-click Retry button.
@@ -36,15 +36,15 @@ Phase 3 (Web v1) delivers a full, zero-server in-browser file converter across *
 | **Reorder PDF** | `pdf-lib` | Reorders pages based on exact user list (`3, 1, 2`), strictly enforcing 1-to-1 page matching. |
 | **Images to PDF** | `pdf-lib` | Embeds JPEG, PNG, WebP images as single-page PDF leaves sized to original image dimensions. |
 | **PDF to images** | `pdfjs-dist` + OffscreenCanvas | Renders each PDF page at full resolution to PNG or JPEG, packaged into a ZIP archive. |
-| **Compress PDF** | `@neslinesli93/qpdf-wasm` | Lossless linearization, stream compression, and object deduping via QPDF. |
+| **Compress PDF** | `@neslinesli93/qpdf-wasm` | Lossless Flate stream re-compression and compressed object streams via QPDF. |
 
 - **Password Handling (`NeedsPassword`)**: Owner-only protected PDFs open transparently without user friction. User-locked PDFs trigger the inline password flow, supporting a "Use for all locked files" batch option and distinguishing incorrect passwords from corrupt files.
 
 ### Audio
 | Tool | Formats | Engine | Key Behaviors |
 | --- | --- | --- | --- |
-| **Convert audio** | MP3, WAV, M4A, OGG ↔ each other | `@ffmpeg/ffmpeg` + `@ffmpeg/core` | Format conversion with configurable bitrates (64–320 kbps) and sample rates. |
-| **Trim audio** | MP3, WAV, M4A, OGG | `@ffmpeg/ffmpeg` | Exact millisecond or timestamp (`mm:ss`) trimming via `-ss` and `-to`. |
+| **Convert audio** | MP3, WAV, M4A, OGG ↔ each other | `@ffmpeg/ffmpeg` + `@ffmpeg/core` | Format conversion with configurable bitrates (128–320 kbps). |
+| **Trim audio** | MP3, WAV, M4A, OGG | `@ffmpeg/ffmpeg` | Exact start and end trimming in seconds via `-ss` and `-to`. |
 
 - **Lazy FFmpeg Instantiation**: FFmpeg WASM core (~32 MB) is loaded only when an audio job is first dispatched. Timing instrumentation measures `wasmLoadMs` distinctly during first load and reuses the worker instance for subsequent operations.
 

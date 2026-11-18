@@ -4,6 +4,7 @@ import type { Engine } from '../engine.ts';
 import { RefractError } from '../errors.ts';
 import { planRoute, type Item, type OptionSpec, type Options, type RunContext } from '../graph/graph.ts';
 import { parseOrder, parseRanges } from '../presets/pages.ts';
+import { outputName } from '../presets/naming.ts';
 import { cmToPx } from '../presets/targetSize.ts';
 
 export type ToolId =
@@ -127,15 +128,15 @@ export const TOOLS: Record<ToolId, Tool> = {
       { key: 'to', label: 'Save as', type: 'select', choices: [{ value: 'same', label: 'Same format' }, ...IMAGE_OUT.map(choice)], default: 'same' },
     ],
     output: (o, f) => ({ template: '{name}_resized', ext: ext(o.to === 'same' ? sameOrJpeg(f) : (o.to as Format)), multi: false }),
-    memory: (ins, o) => Math.max(maxPixels(ins), Number(o.width) * Number(o.height) || 0) * 4 * 4,
+    memory: (ins, o) => {
+      const target = ins[0]?.image ? resolveResizeDimensions(ins[0].image, o) : null;
+      const targetPixels = target ? target.w * target.h : 0;
+      return Math.max(maxPixels(ins), targetPixels) * 4 * 4;
+    },
     plan: ([p], o, engine) => {
-      const size = (v: number) => (o.unit === 'cm' ? cmToPx(v, Number(o.dpi)) : Math.round(v));
-      let w = size(Number(o.width));
-      let h = size(Number(o.height));
-      const src = p!.image!;
-      if (!w && !h) throw unsupported('no width or height was given', 'Enter a width, a height, or both.');
-      if (!w) w = Math.max(1, Math.round((h * src.width) / src.height));
-      if (!h) h = Math.max(1, Math.round((w * src.height) / src.width));
+      const dims = resolveResizeDimensions(p!.image!, o);
+      if (!dims) throw unsupported('no width or height was given', 'Enter a width, a height, or both.');
+      const { w, h } = dims;
       const to = o.to === 'same' ? sameOrJpeg(p!.item.format) : (o.to as Format);
       return { steps: [op(engine, 'image.convert', { to, quality: 90, width: w, height: h })], expect: [{ format: to, width: w, height: h }] };
     },
@@ -161,10 +162,14 @@ export const TOOLS: Record<ToolId, Tool> = {
     plan: ([p], o, engine) => {
       const groups = parseRanges(String(o.ranges), p!.pages!);
       const stem = stemOf(p!.name);
+      const entryTaken = new Set<string>();
       return {
         steps: [op(engine, 'pdf.split', { groups: JSON.stringify(groups) })],
         expect: groups.map((g) => ({ format: 'pdf', pages: g.length })),
-        entryNames: groups.map((g) => `${stem}-p${g.length > 1 ? `${g[0]}-${g.at(-1)}` : g[0]}.pdf`),
+        entryNames: groups.map((g) => {
+          const suffix = g.length > 1 ? `${g[0]}-${g.at(-1)}` : `${g[0]}`;
+          return outputName(`{name}-p${suffix}`, `${stem}.pdf`, 'pdf', entryTaken);
+        }),
       };
     },
   },
@@ -275,6 +280,16 @@ function bitrate(): OptionSpec {
     choices: ['128k', '192k', '256k', '320k'].map((v) => ({ value: v, label: `${parseInt(v)} kbps` })),
     showIf: { key: 'to', is: ['mp3', 'm4a', 'ogg'] },
   };
+}
+
+function resolveResizeDimensions(src: { width: number; height: number }, o: Options): { w: number; h: number } | null {
+  const size = (v: number) => (o.unit === 'cm' ? cmToPx(v, Number(o.dpi)) : Math.round(v));
+  let w = size(Number(o.width));
+  let h = size(Number(o.height));
+  if (!w && !h) return null;
+  if (!w) w = Math.max(1, Math.round((h * src.width) / src.height));
+  if (!h) h = Math.max(1, Math.round((w * src.height) / src.width));
+  return { w, h };
 }
 
 export function stemOf(name: string): string {

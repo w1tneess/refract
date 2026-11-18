@@ -60,4 +60,29 @@ mod tests {
         bytes[8..12].copy_from_slice(b"heic");
         assert_eq!(detect(&bytes), Some(Format::Heic));
     }
+
+    #[test]
+    fn test_detect_mp3_vs_adts_aac() {
+        // MPEG-1 Layer III frame sync -> MP3
+        assert_eq!(detect(&[0xFF, 0xFB, 0x90, 0x00]), Some(Format::Mp3));
+        // ADTS AAC (layer bits == 0) must NOT be misdetected as MP3
+        assert_eq!(detect(&[0xFF, 0xF1, 0x50, 0x80]), None);
+    }
+
+    #[test]
+    fn test_detect_m4a_brands_and_bounded_ftyp() {
+        let mut bytes = vec![0; 24];
+        bytes[0..4].copy_from_slice(&16u32.to_be_bytes()); // ftyp box ends at 16
+        bytes[4..8].copy_from_slice(b"ftyp");
+        bytes[8..12].copy_from_slice(b"avif");
+        // "heic" placed AFTER the ftyp box boundary must not be scanned
+        bytes[16..20].copy_from_slice(b"heic");
+        assert_eq!(detect(&bytes), None);
+
+        let mut m4b = vec![0; 12];
+        m4b[0..4].copy_from_slice(&12u32.to_be_bytes());
+        m4b[4..8].copy_from_slice(b"ftyp");
+        m4b[8..12].copy_from_slice(b"M4B ");
+        assert_eq!(detect(&m4b), Some(Format::M4a));
+    }
 }

@@ -10,8 +10,19 @@ export default defineConfig(({ mode }) => {
     // base supports subpath hosting. Defaults to '/' for root-domain hosting. Set VITE_BASE=/refract/
     // for GitHub Pages user/organization sites or any host that serves the app under a path prefix.
     base: env.VITE_BASE ?? '/',
-    // jSquash loads its .wasm via new URL(…, import.meta.url); pre-bundling would break that path.
-    optimizeDeps: { exclude: ['@jsquash/jpeg'] },
+    // WASM packages load their .wasm assets via new URL(…, import.meta.url); pre-bundling breaks those paths in dev mode.
+    optimizeDeps: {
+      exclude: [
+        '@jsquash/jpeg',
+        '@jsquash/png',
+        '@jsquash/webp',
+        '@jsquash/resize',
+        'libheif-js',
+        '@neslinesli93/qpdf-wasm',
+        '@ffmpeg/ffmpeg',
+        '@ffmpeg/core',
+      ],
+    },
     worker: { format: 'es' },
     preview: { port: 4173, strictPort: true },
     build: {

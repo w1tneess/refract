@@ -49,9 +49,9 @@ Refract uses an absolute **Graphite** neutral base with a singular, high-contras
 
 | Token | Light | Dark | Usage |
 |---|---|---|---|
-| Success / Saved | `#16a34a` | `#4cc38a` | Completed jobs, savings |
-| Error / Failed | `#dc2626` | `#e5484d` | Failed jobs, errors |
-| Warning / Notice | `#d97706` | `#f59e0b` | Amber — live job indicator |
+| Success / Saved | `#32d74b` | `#32d74b` | Completed jobs, savings |
+| Error / Failed | `#ff453a` | `#ff453a` | Failed jobs, errors |
+| Warning / Notice | `#ffcc00` | `#ffcc00` | Amber — live job indicator |
 
 ---
 

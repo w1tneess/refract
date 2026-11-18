@@ -111,6 +111,6 @@ jobs:
             - **Verification**: `SHA256SUMS.txt`
 
             ### Supported Operations
-            - **Images**: Convert, Compress (target KB), Resize (pixels & cm with DPI) across JPEG, PNG, WebP.
-            - **PDF**: Merge, Split by page ranges, Reorder pages, Lossless QPDF/lopdf compression.
-            - **Audio**: Transcode between MP3, WAV, M4A, OGG with configurable bitrates and exact timestamp trimming.
+            - **Images**: Convert (with EXIF orientation baking and alpha flattening), Compress (target KB), Resize (Lanczos-3) across JPEG, PNG, WebP.
+            - **PDF**: Merge multiple PDFs, Split by page ranges (with object pruning), Reorder pages, Lossless `lopdf` compression.
+            - **Audio**: Transcode between MP3, WAV, M4A, OGG with configurable bitrates and exact timestamp trimming (via system FFmpeg).

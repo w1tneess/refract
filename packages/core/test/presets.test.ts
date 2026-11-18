@@ -47,9 +47,11 @@ describe('limits', () => {
 });
 
 describe('page ranges', () => {
-  it('empty means every page; ranges, single pages and open ends work', () => {
+  it('empty means every page; ranges, single pages and open ends (7- and 7-end) work', () => {
     expect(parseRanges('', 3)).toEqual([[1], [2], [3]]);
     expect(parseRanges('1-3, 5, 7-', 8)).toEqual([[1, 2, 3], [5], [7, 8]]);
+    expect(parseRanges('1-2, 6-end', 8)).toEqual([[1, 2], [6, 7, 8]]);
+    expect(parseRanges('7-END', 8)).toEqual([[7, 8]]);
   });
   it('rejects bad syntax and pages that do not exist', () => {
     expect(code(() => parseRanges('a-b', 3))).toBe('Unsupported');

@@ -6,6 +6,19 @@ declare const self: DedicatedWorkerGlobalScope;
 
 const post = (m: WorkerResponse, transfer: Transferable[] = []) => self.postMessage(m, transfer);
 
+/** Ensure every returned Item owns a standalone, non-duplicated ArrayBuffer safe to transfer. */
+function detachForTransfer(items: Item[]): { items: Item[]; transfer: Transferable[] } {
+  const seen = new Set<ArrayBufferLike>();
+  const normalized = items.map((item) => {
+    const b = item.bytes;
+    const isStandalone = b.byteOffset === 0 && b.byteLength === b.buffer.byteLength && !seen.has(b.buffer);
+    const owned = isStandalone ? b : b.slice();
+    seen.add(owned.buffer);
+    return { bytes: owned, format: item.format };
+  });
+  return { items: normalized, transfer: normalized.map((i) => i.bytes.buffer) };
+}
+
 // Some WASM builds log failures to console instead of throwing; keep them for the "Details" toggle.
 const logs: string[] = [];
 for (const level of ['log', 'info', 'warn', 'error'] as const) {
@@ -44,14 +57,18 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
   ctx.heartbeat();
   try {
     if (msg.type === 'run') {
-      const items = await (await codec(msg.op.split('.')[0]!)).run(msg.op, msg.items, msg.opts, ctx);
-      post({ type: 'done', items }, items.map((i) => i.bytes.buffer));
+      const raw = await (await codec(msg.op.split('.')[0]!)).run(msg.op, msg.items, msg.opts, ctx);
+      const { items, transfer } = detachForTransfer(raw);
+      post({ type: 'done', items }, transfer);
     } else if (msg.type === 'inspect') {
       post({ type: 'done', info: await inspectAll(msg.items) });
     } else {
       const result = await (await import('./codecs/pdf.ts')).unlock(msg.item, msg.password, ctx);
       if (result === 'wrong-password') post({ type: 'done', wrongPassword: true });
-      else post({ type: 'done', items: [result] }, [result.bytes.buffer]);
+      else {
+        const { items, transfer } = detachForTransfer([result]);
+        post({ type: 'done', items }, transfer);
+      }
     }
   } catch (err) {
     if (err instanceof RefractError) {

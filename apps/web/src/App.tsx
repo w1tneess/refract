@@ -53,13 +53,27 @@ export function App() {
   const [activePresetNotice, setActivePresetNotice] = useState<string | null>(null);
   const [isDraggingViewport, setIsDraggingViewport] = useState(false);
   const dragCounter = useRef(0);
+  const skipNextHash = useRef<string | null>(null);
+  const pendingZipRevoke = useRef<number | null>(null);
 
   const t = TOOLS[tool];
   const runningCount = jobs.filter((j) => j.state === 'Running' || j.state === 'Probing' || j.state === 'Verifying').length;
 
+  const setHashProgrammatically = (hash: string) => {
+    if (location.hash !== hash) {
+      skipNextHash.current = hash;
+      location.hash = hash;
+    }
+  };
+
   // Sync hash changes (back/forward buttons, hand-edited URLs, links in job cards).
   useEffect(() => {
     const onHash = () => {
+      if (skipNextHash.current === location.hash) {
+        skipNextHash.current = null;
+        return;
+      }
+      skipNextHash.current = null;
       const h = location.hash.slice(1);
       if (h === 'home' || h === '') {
         setIsHome(true);
@@ -73,6 +87,14 @@ export function App() {
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
+
+  // Revoke any active allZipUrl on unmount.
+  useEffect(() => {
+    return () => {
+      if (pendingZipRevoke.current !== null) clearTimeout(pendingZipRevoke.current);
+      if (allZipUrl) URL.revokeObjectURL(allZipUrl);
+    };
+  }, [allZipUrl]);
 
   const changeOptions = (o: Options) => {
     setOptions(o);
@@ -110,7 +132,7 @@ export function App() {
       const nextOptions = loadOptions(first.tool);
       setTool(first.tool);
       setOptions(nextOptions);
-      location.hash = `#${first.tool}`;
+      setHashProgrammatically(`#${first.tool}`);
     }
     if (groups.length > 1) {
       setActivePresetNotice(`Routed ${files.length} files: ${describeGroups(groups)}`);
@@ -179,19 +201,23 @@ export function App() {
 
     const onKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
-      const isTyping = target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT');
+      const isTyping = Boolean(
+        target &&
+          (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT' || target.isContentEditable),
+      );
+      const hasModifier = e.metaKey || e.ctrlKey || e.altKey;
 
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+      if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === 'k') {
         e.preventDefault();
         setPaletteOpen((prev) => !prev);
-      } else if (!isTyping && e.key === '?') {
+      } else if (!isTyping && !hasModifier && !paletteOpen && !shortcutsOpen && e.key === '?') {
         e.preventDefault();
-        setShortcutsOpen((prev) => !prev);
-      } else if (!isTyping && e.key === '1') {
+        setShortcutsOpen(true);
+      } else if (!isTyping && !hasModifier && !paletteOpen && !shortcutsOpen && e.key === '1') {
         selectTool(DOMAINS[0]!.tools[0]!);
-      } else if (!isTyping && e.key === '2') {
+      } else if (!isTyping && !hasModifier && !paletteOpen && !shortcutsOpen && e.key === '2') {
         selectTool(DOMAINS[1]!.tools[0]!);
-      } else if (!isTyping && e.key === '3') {
+      } else if (!isTyping && !hasModifier && !paletteOpen && !shortcutsOpen && e.key === '3') {
         selectTool(DOMAINS[2]!.tools[0]!);
       }
     };
@@ -203,10 +229,10 @@ export function App() {
       window.removeEventListener('keydown', onKeyDown);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isHome, tool, options]);
+  }, [isHome, tool, options, paletteOpen, shortcutsOpen]);
 
   const selectTool = (targetTool: ToolId) => {
-    location.hash = `#${targetTool}`;
+    setHashProgrammatically(`#${targetTool}`);
     setTool(targetTool);
     setOptions(loadOptions(targetTool));
     setIsHome(false);
@@ -214,13 +240,13 @@ export function App() {
   };
 
   const selectHome = () => {
-    location.hash = '#home';
+    setHashProgrammatically('#home');
     setIsHome(true);
     setActivePresetNotice(null);
   };
 
   const applyPreset = (preset: Preset) => {
-    location.hash = `#${preset.tool}`;
+    setHashProgrammatically(`#${preset.tool}`);
     setTool(preset.tool);
     setIsHome(false);
     const defaultOpts = loadOptions(preset.tool);
@@ -233,7 +259,7 @@ export function App() {
   const useInTool = (targetTool: ToolId, job: JobView) => {
     if (!job.outputs?.length) return;
     const newFiles = job.outputs.map((o) => new File([o.bytes as BlobPart], o.name, { type: FORMATS[o.format].mime }));
-    location.hash = `#${targetTool}`;
+    setHashProgrammatically(`#${targetTool}`);
     setTool(targetTool);
     setIsHome(false);
     const targetOptions = loadOptions(targetTool);
@@ -307,12 +333,25 @@ export function App() {
               onClearJobs={clearJobs}
               onReRunAll={() => reRunAll(tool, resolveOptions(t.options, options))}
               onSaveAllZip={async () => {
+                if (pendingZipRevoke.current !== null) {
+                  clearTimeout(pendingZipRevoke.current);
+                  pendingZipRevoke.current = null;
+                }
                 const url = await saveAllUrl(jobs);
                 setAllZipUrl(url);
                 return url;
               }}
               allZipUrl={allZipUrl}
-              onClearZipUrl={() => setAllZipUrl(undefined)}
+              onClearZipUrl={() => {
+                const urlToRevoke = allZipUrl;
+                setAllZipUrl(undefined);
+                if (urlToRevoke) {
+                  pendingZipRevoke.current = window.setTimeout(() => {
+                    URL.revokeObjectURL(urlToRevoke);
+                    pendingZipRevoke.current = null;
+                  }, 30_000);
+                }
+              }}
               activePresetNotice={activePresetNotice}
               onDismissNotice={() => setActivePresetNotice(null)}
               onApplyPreset={applyPreset}

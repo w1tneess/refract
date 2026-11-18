@@ -18,6 +18,7 @@
     "@refract/core": "workspace:*",
     "@refract/engine-wasm": "workspace:*",
     "client-zip": "2.5.1",
+    "pdf-lib": "1.17.1",
     "react": "19.3.1",
     "react-dom": "19.3.1"
   },
@@ -27,7 +28,6 @@
     "@types/react": "19.3.0",
     "@types/react-dom": "19.3.0",
     "@vitejs/plugin-react": "6.1.2",
-    "pdf-lib": "1.17.1",
     "vite": "8.3.5"
   }
 }

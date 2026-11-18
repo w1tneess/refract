@@ -3,17 +3,18 @@ import { RefractError } from '../errors.ts';
 const bad = (why: string, todo: string) => new RefractError('Unsupported', why, todo);
 
 /**
- * Parse "1-3, 5, 7-" into page groups (1-based). Empty text means one group per page.
- * "7-" runs to the last page.
+ * Parse "1-3, 5, 7-" or "1-3, 5, 7-end" into page groups (1-based). Empty text means one group per page.
+ * "7-" and "7-end" both run to the last page.
  */
 export function parseRanges(text: string, pageCount: number): number[][] {
   const t = text.trim();
   if (!t) return Array.from({ length: pageCount }, (_, i) => [i + 1]);
   return t.split(',').map((part) => {
-    const m = /^\s*(\d+)\s*(?:-\s*(\d*)\s*)?$/.exec(part);
-    if (!m) throw bad(`"${part.trim()}" isn't a page range`, 'Use ranges like 1-3, 5, 8-.');
+    const m = /^\s*(\d+)\s*(?:-\s*(\d*|end)\s*)?$/i.exec(part);
+    if (!m) throw bad(`"${part.trim()}" isn't a page range`, 'Use ranges like 1-3, 5, 8- or 8-end.');
     const a = Number(m[1]);
-    const b = m[2] === undefined ? a : m[2] === '' ? pageCount : Number(m[2]);
+    const rawEnd = m[2];
+    const b = rawEnd === undefined ? a : (rawEnd === '' || rawEnd.toLowerCase() === 'end') ? pageCount : Number(rawEnd);
     if (a < 1 || b > pageCount || a > b) {
       throw bad(`pages ${part.trim()} don't exist in a ${pageCount}-page document`, `Use pages between 1 and ${pageCount}.`);
     }

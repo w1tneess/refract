@@ -60,7 +60,7 @@ export function checkMemory(estimate: number, platform: Platform): void {
     throw new RefractError(
       'TooLarge',
       `it needs about ${mb(estimate)} MB of memory to convert and the browser budget is ${mb(budget)} MB`,
-      'Use a smaller file, or the desktop app once it is available.',
+      'Use a smaller file, or the Refract desktop app.',
     );
   }
 }

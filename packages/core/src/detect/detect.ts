@@ -57,7 +57,9 @@ export function detect(b: Uint8Array): Format | 'unknown' {
 
 /** Best guess from a file name, used only to pre-assign output names; detection still decides. */
 export function formatFromName(name: string): Format | undefined {
-  const e = name.slice(name.lastIndexOf('.') + 1).toLowerCase();
+  const dot = name.lastIndexOf('.');
+  if (dot <= 0) return undefined;
+  const e = name.slice(dot + 1).toLowerCase();
   return (Object.keys(FORMATS) as Format[]).find((f) => FORMATS[f].ext.includes(e));
 }
 

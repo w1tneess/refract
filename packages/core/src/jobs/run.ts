@@ -1,4 +1,4 @@
-import { detect, extensionMismatch, formatFromName, FORMATS, type Format } from '../detect/detect.ts';
+import { detect, ext, extensionMismatch, formatFromName, FORMATS, type Format } from '../detect/detect.ts';
 import { probeImage } from '../detect/image.ts';
 import type { Engine } from '../engine.ts';
 import { RefractError, toRefractError } from '../errors.ts';
@@ -244,8 +244,20 @@ export async function runJob(job: Job, inputs: JobInput[], deps: RunDeps): Promi
         if (got.format === 'unknown') {
           throw new RefractError('Corrupt', `${inputs.length > 1 ? `${p.name} is damaged` : 'the file is damaged'} and can't be opened`, 'Try re-downloading it.');
         }
-        if (got.encrypted) await unlock(p, job, deps, set);
-        p.pages = got.pages;
+        if (got.encrypted) {
+          await unlock(p, job, deps, set);
+          if (got.pages === undefined) {
+            const [unlockedInfo] = await guarded((ctx) => engine.inspect([p.item], ctx), budgets([]).probe, deps, job);
+            if (!unlockedInfo || unlockedInfo.format === 'unknown') {
+              throw new RefractError('Corrupt', `${inputs.length > 1 ? `${p.name} is damaged` : 'the file is damaged'} and can't be opened`, 'Try re-downloading it.');
+            }
+            p.pages = unlockedInfo.pages;
+          } else {
+            p.pages = got.pages;
+          }
+        } else {
+          p.pages = got.pages;
+        }
         p.durationS = got.durationS;
         if (p.pages !== undefined) checkLimits(limits, { bytes: p.item.bytes.length, pages: p.pages });
       }
@@ -296,6 +308,14 @@ export async function runJob(job: Job, inputs: JobInput[], deps: RunDeps): Promi
     await guarded((ctx) => verifyOutputs(outs, plan.expect, (items) => engine.inspect(items, ctx)), b.finish, deps, job);
     job.timings.verifyMs = clock.now() - tVerify;
 
+    if (!job.multi && outs[0]) {
+      const actualExt = ext(outs[0].format);
+      const dot = job.outputName.lastIndexOf('.');
+      const currentExt = dot > 0 ? job.outputName.slice(dot + 1).toLowerCase() : '';
+      if (currentExt && !FORMATS[outs[0].format].ext.includes(currentExt)) {
+        job.outputName = `${job.outputName.slice(0, dot)}.${actualExt}`;
+      }
+    }
     const names = job.multi ? plan.entryNames ?? outs.map((_, i) => `${i + 1}`) : [job.outputName];
     job.outputs = outs.map((o, i) => ({ name: names[i]!, bytes: o.bytes, format: o.format }));
     job.outputSize = outs.reduce((n, o) => n + o.bytes.length, 0);
@@ -310,6 +330,9 @@ export async function runJob(job: Job, inputs: JobInput[], deps: RunDeps): Promi
       set('Canceled');
     } else {
       job.error = toRefractError(e);
+      if (job.state === 'Queued' || job.state === 'NeedsPassword') {
+        set('Probing');
+      }
       set(job.state === 'Probing' ? 'Rejected' : 'Failed');
     }
   } finally {

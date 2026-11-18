@@ -1,4 +1,4 @@
-import { RefractError, type Format, type Inspect, type Item, type Options } from '@refract/core';
+import { jpegOrientation, RefractError, type Format, type Inspect, type Item, type Options } from '@refract/core';
 import type { Ctx } from '../protocol.ts';
 import { decode, encode } from './image.ts';
 
@@ -123,27 +123,45 @@ const PAGE_SIZES: Record<string, [number, number]> = {
   letter: [612, 792],
 };
 
-async function fromImages(items: Item[], pageSize: string, ctx: Ctx): Promise<Item[]> {
+async function fromImages(items: Item[], pageSize: string, orientationsJson: string | undefined, ctx: Ctx): Promise<Item[]> {
   const t = performance.now();
   const { PDFDocument } = await import('pdf-lib');
   const doc = await PDFDocument.create();
+  let orientations: number[] = [];
+  if (orientationsJson) {
+    try {
+      orientations = JSON.parse(orientationsJson);
+    } catch {
+      orientations = [];
+    }
+  }
 
-  for (const item of items) {
+  for (const [idx, item] of items.entries()) {
     let embedded;
     let imgW: number;
     let imgH: number;
 
     if (item.format === 'jpeg') {
-      try {
-        embedded = await doc.embedJpg(item.bytes);
-        imgW = embedded.width;
-        imgH = embedded.height;
-      } catch {
+      const orientation = orientations[idx] ?? jpegOrientation(item.bytes);
+      if (orientation !== 1) {
+        // pdf-lib embeds raw JPEG bytes without applying EXIF orientation; bake upright pixels and strip EXIF.
         const pixels = await decode(item, ctx);
-        const pngBytes = await encode(pixels, 'png', 100, ctx);
-        embedded = await doc.embedPng(pngBytes);
+        const uprightJpg = await encode(pixels, 'jpeg', 92, ctx);
+        embedded = await doc.embedJpg(uprightJpg);
         imgW = embedded.width;
         imgH = embedded.height;
+      } else {
+        try {
+          embedded = await doc.embedJpg(item.bytes);
+          imgW = embedded.width;
+          imgH = embedded.height;
+        } catch {
+          const pixels = await decode(item, ctx);
+          const pngBytes = await encode(pixels, 'png', 100, ctx);
+          embedded = await doc.embedPng(pngBytes);
+          imgW = embedded.width;
+          imgH = embedded.height;
+        }
       }
     } else if (item.format === 'png') {
       try {
@@ -194,34 +212,41 @@ async function toImages(item: Item, to: Format, dpi: number, ctx: Ctx): Promise<
   ]);
   pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
 
-  const doc = await pdfjsLib.getDocument({
+  const loadingTask = pdfjsLib.getDocument({
     data: item.bytes,
     useSystemFonts: true,
-  }).promise;
+  });
+  const doc = await loadingTask.promise;
 
   const n = doc.numPages;
   const scale = (dpi || 150) / 72;
   const results: Item[] = [];
 
-  for (let i = 1; i <= n; i++) {
-    const page = await doc.getPage(i);
-    const viewport = page.getViewport({ scale });
-    const w = Math.round(viewport.width);
-    const h = Math.round(viewport.height);
-    const canvas = new OffscreenCanvas(w, h);
-    const canvasContext = canvas.getContext('2d')!;
-    await page.render({
-      canvasContext: canvasContext as unknown as CanvasRenderingContext2D,
-      viewport,
-      canvas: canvas as unknown as HTMLCanvasElement,
-    }).promise;
-    const imgData = canvasContext.getImageData(0, 0, w, h);
-    const bytes = await encode(new ImageData(imgData.data, w, h), to, 90, ctx);
-    results.push({ bytes, format: to });
-    ctx.heartbeat();
+  try {
+    for (let i = 1; i <= n; i++) {
+      const page = await doc.getPage(i);
+      const viewport = page.getViewport({ scale });
+      const w = Math.max(1, Math.round(viewport.width));
+      const h = Math.max(1, Math.round(viewport.height));
+      const canvas = new OffscreenCanvas(w, h);
+      const canvasContext = canvas.getContext('2d')!;
+      canvasContext.fillStyle = '#ffffff';
+      canvasContext.fillRect(0, 0, w, h);
+      await page.render({
+        canvasContext: canvasContext as unknown as CanvasRenderingContext2D,
+        viewport,
+        canvas: canvas as unknown as HTMLCanvasElement,
+      }).promise;
+      const imgData = canvasContext.getImageData(0, 0, w, h);
+      const bytes = await encode(new ImageData(imgData.data, w, h), to, 90, ctx);
+      results.push({ bytes, format: to });
+      ctx.heartbeat();
+    }
+  } finally {
+    await doc.cleanup();
+    await loadingTask.destroy();
   }
 
-  await doc.cleanup();
   ctx.timing('toImagesMs', performance.now() - t);
   return results;
 }
@@ -266,7 +291,7 @@ export async function run(op: string, items: Item[], opts: Options, ctx: Ctx): P
   if (op === 'pdf.merge') return merge(items, ctx);
   if (op === 'pdf.split') return split(first, String(opts.groups ?? '[]'), ctx);
   if (op === 'pdf.reorder') return reorder(first, String(opts.order ?? '[]'), ctx);
-  if (op === 'pdf.fromImages') return fromImages(items, String(opts.pageSize ?? 'fit'), ctx);
+  if (op === 'pdf.fromImages') return fromImages(items, String(opts.pageSize ?? 'fit'), opts.orientations ? String(opts.orientations) : undefined, ctx);
   if (op === 'pdf.toImages') return toImages(first, opts.to as Format, Number(opts.dpi ?? 150), ctx);
   if (op === 'pdf.compress') return compress(first, ctx);
 

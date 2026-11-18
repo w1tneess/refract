@@ -145,6 +145,38 @@ describe('runJob: convert', () => {
     expect(j.error?.why).toMatch(/MB of memory/);
   });
 
+  it('resize-image enforces memory budget for cm + DPI and aspect-ratio targets', async () => {
+    let ran = false;
+    const s = setup([], { run: async () => { ran = true; return []; } });
+    const small = fakeJpeg(100, 100);
+    // 50 cm × 50 cm @ 1200 DPI ≈ 23,622 × 23,622 px (~8.9 GB)
+    const j = await runJob(
+      s.job('resize-image', { unit: 'cm', width: 50, height: 50, dpi: 1200 }, ['a.jpg']),
+      s.inputs(['a.jpg', small]),
+      s.deps,
+    );
+    expect([j.state, j.error?.code, ran]).toEqual(['Rejected', 'TooLarge', false]);
+  });
+
+  it('updates output extension when detected format differs from mismatched input filename', async () => {
+    const pngBytes = new Uint8Array([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52,
+      0, 0, 0, 100, 0, 0, 0, 100, 8, 2, 0, 0, 0,
+    ]);
+    const s = setup([], {
+      run: async () => [{ bytes: pngBytes, format: 'png' }],
+      inspect: async () => [{ format: 'png', width: 50, height: 50 }],
+    });
+    const j = await runJob(
+      s.job('resize-image', { unit: 'px', width: 50, height: 50, to: 'same' }, ['really-png.jpg']),
+      s.inputs(['really-png.jpg', pngBytes]),
+      s.deps,
+    );
+    expect(j.state).toBe('Saved');
+    expect(j.outputName).toBe('really-png_resized.png');
+    expect(j.outputs?.[0]?.name).toBe('really-png_resized.png');
+  });
+
   it('engine error → Failed with a typed error and the raw text in details', async () => {
     const s = setup([edge(async () => { throw new Error('libheif: bad stream'); })]);
     const j = await runJob(s.job(), s.inputs(['IMG.HEIC', heic]), s.deps);
@@ -255,6 +287,25 @@ describe('runJob: PDF tools', () => {
     expect(tried).toEqual(['', 'nope', 'right']);
     expect(s.asked).toEqual([false, true]);
     expect(s.states).toEqual(['Probing', 'NeedsPassword', 'Probing', 'NeedsPassword', 'Probing', 'Running', 'Verifying', 'Saved']);
+    expect(j.outputs?.[0]?.bytes).toBe(unlocked);
+  });
+
+  it('split names every file inside one ZIP and deduplicates repeated ranges', async () => {
+    const s = setup([], { run: async () => [onePage, onePage].map((bytes) => ({ bytes, format: 'pdf' as const })) });
+    const j = await runJob(s.job('split-pdf', { ranges: '1, 1' }, ['doc.pdf']), s.inputs(['doc.pdf', pdfB]), s.deps);
+    expect(j.state).toBe('Saved');
+    expect(j.outputs?.map((o) => o.name)).toEqual(['doc-p1.pdf', 'doc-p1 (2).pdf']);
+  });
+
+  it('encrypted PDF with unknown page count is re-inspected after unlock', async () => {
+    const lockedOpaque = fakePdf('OPAQUE_LOCKED');
+    facts.set(key(lockedOpaque), { format: 'pdf', encrypted: true });
+    const s = setup([], {
+      unlock: async (_i, pw) => (pw === 'secret' ? { bytes: unlocked, format: 'pdf' } : 'wrong-password'),
+      run: async (_op, items) => items,
+    }, ['secret']);
+    const j = await runJob(s.job('compress-pdf', {}, ['opaque.pdf']), s.inputs(['opaque.pdf', lockedOpaque]), s.deps);
+    expect(j.state).toBe('Saved');
     expect(j.outputs?.[0]?.bytes).toBe(unlocked);
   });
 

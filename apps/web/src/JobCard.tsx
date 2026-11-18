@@ -1,4 +1,4 @@
-import { useId, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 import { describeError, FORMATS, isTerminal, TOOLS, type ToolId } from '@refract/core';
 import type { JobView } from './useJobs.ts';
 import { OpticalLoupeModal } from './OpticalLoupeModal.tsx';
@@ -122,11 +122,24 @@ export function JobCard({
 }) {
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [loupeOpen, setLoupeOpen] = useState(false);
+
+  useEffect(() => {
+    if (!lightboxOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setLightboxOpen(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [lightboxOpen]);
+
   const isBusy = !isTerminal(job.state);
   const title = job.inputNames.length > 1 ? `${job.inputName} + ${job.inputNames.length - 1} more` : job.inputName;
+  const outCount = job.outputs?.length ?? 0;
   const outKind = job.outputs?.[0] ? FORMATS[job.outputs[0]!.format].kind : null;
   const compatibleTools = outKind
-    ? (Object.keys(TOOLS) as ToolId[]).filter((id) => TOOLS[id].accepts === outKind && id !== job.tool)
+    ? (Object.keys(TOOLS) as ToolId[]).filter(
+        (id) => TOOLS[id].accepts === outKind && id !== job.tool && (TOOLS[id].minInputs ?? 1) <= outCount,
+      )
     : [];
 
   let sizeDeltaBadge = null;
@@ -196,13 +209,15 @@ export function JobCard({
             <span className="job-thumb-overlay">Preview</span>
           </button>
 
-          <button type="button" className="job-loupe-btn" onClick={() => setLoupeOpen(true)} title="Compare before and after">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <circle cx="12" cy="12" r="3" />
-              <path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7z" />
-            </svg>
-            Compare
-          </button>
+          {job.originalUrl && (
+            <button type="button" className="job-loupe-btn" onClick={() => setLoupeOpen(true)} title="Compare before and after">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <circle cx="12" cy="12" r="3" />
+                <path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7z" />
+              </svg>
+              Compare
+            </button>
+          )}
         </div>
       )}
 
@@ -217,8 +232,14 @@ export function JobCard({
       )}
 
       {lightboxOpen && job.url && (
-        <div className="lightbox-backdrop" onClick={() => setLightboxOpen(false)}>
-          <div className="lightbox-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="lightbox-backdrop" onClick={() => setLightboxOpen(false)} role="presentation">
+          <div
+            className="lightbox-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label={`Image preview: ${job.outputName}`}
+            onClick={(e) => e.stopPropagation()}
+          >
             <div className="lightbox-header">
               <span className="lightbox-title">{job.outputName}</span>
               <button type="button" className="job-dismiss-btn" onClick={() => setLightboxOpen(false)} aria-label="Close image preview">
