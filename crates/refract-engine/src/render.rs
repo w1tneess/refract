@@ -312,6 +312,24 @@ fn render_page(
     }
 }
 
+/// Minimum and maximum supported DPI for PDF rasterization.
+pub const MIN_RENDER_DPI: u32 = 36;
+pub const MAX_RENDER_DPI: u32 = 600;
+
+/// Validate requested PDF rasterization DPI explicitly (never silently clamping).
+pub fn validate_render_dpi(dpi: u32) -> Result<u32, RefractError> {
+    if !(MIN_RENDER_DPI..=MAX_RENDER_DPI).contains(&dpi) {
+        return Err(RefractError::new(
+            ErrorCode::InvalidOption,
+            format!(
+                "Invalid PDF render DPI {}. Must be between {} and {}.",
+                dpi, MIN_RENDER_DPI, MAX_RENDER_DPI
+            ),
+        ));
+    }
+    Ok(dpi)
+}
+
 /// Validated, decrypted render request ready to invoke an external rasterizer.
 #[derive(Debug, Clone)]
 pub struct PreparedPdfRender {
@@ -337,15 +355,7 @@ pub fn prepare_pdf_for_render(
     }
 
     let requested_format = RenderImageFormat::parse(format)?;
-    if !(36..=600).contains(&dpi) {
-        return Err(RefractError::new(
-            ErrorCode::InvalidOption,
-            format!(
-                "Invalid PDF render DPI {}. Must be between 36 and 600.",
-                dpi
-            ),
-        ));
-    }
+    let dpi = validate_render_dpi(dpi)?;
 
     let info = crate::pdf::probe_pdf(pdf_bytes)?;
     let (prepared_bytes, page_count) = if info.is_encrypted {
@@ -438,6 +448,7 @@ pub fn render_pdf_path_to_images_cancellable(
 ) -> Result<Vec<RenderedPage>, RefractError> {
     cancel.check()?;
     let requested_format = RenderImageFormat::parse(format)?;
+    let dpi = validate_render_dpi(dpi)?;
     if page_count == 0 {
         return Err(RefractError::new(
             ErrorCode::DamagedFile,
@@ -450,7 +461,6 @@ pub fn render_pdf_path_to_images_cancellable(
             "No PDF rasterizer found. Install mutool, pdftoppm, pdftocairo, or Ghostscript (gs).",
         )
     })?;
-    let dpi = dpi.clamp(36, 600);
     let temp_dir = tempdir().map_err(|e| {
         RefractError::with_details(
             ErrorCode::EngineFailed,
@@ -802,5 +812,59 @@ mod tests {
                 .unwrap()
                 .is_encrypted
         );
+    }
+
+    #[test]
+    fn path_based_renderer_validates_dpi_range_without_clamping() {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let plain_path = manifest_dir.join("../../fixtures/plain.pdf");
+
+        // Boundary validation helper
+        assert_eq!(
+            validate_render_dpi(35).unwrap_err().code,
+            ErrorCode::InvalidOption
+        );
+        assert_eq!(
+            validate_render_dpi(0).unwrap_err().code,
+            ErrorCode::InvalidOption
+        );
+        assert_eq!(
+            validate_render_dpi(601).unwrap_err().code,
+            ErrorCode::InvalidOption
+        );
+        assert_eq!(validate_render_dpi(36).unwrap(), 36);
+        assert_eq!(validate_render_dpi(150).unwrap(), 150);
+        assert_eq!(validate_render_dpi(600).unwrap(), 600);
+
+        // Path-based render API rejects below-min and above-max DPI before renderer lookup
+        let low =
+            render_pdf_path_to_images_cancellable(&plain_path, 3, 35, "png", &CancelToken::none())
+                .unwrap_err();
+        assert_eq!(low.code, ErrorCode::InvalidOption);
+
+        let high =
+            render_pdf_path_to_images_cancellable(&plain_path, 3, 601, "jpg", &CancelToken::none())
+                .unwrap_err();
+        assert_eq!(high.code, ErrorCode::InvalidOption);
+
+        // Valid DPI passes validation (returns Ok if a renderer is installed, or MissingDependency if not)
+        for valid_dpi in [36u32, 150, 600] {
+            match render_pdf_path_to_images_cancellable(
+                &plain_path,
+                3,
+                valid_dpi,
+                "png",
+                &CancelToken::none(),
+            ) {
+                Ok(pages) => assert_eq!(pages.len(), 3),
+                Err(e) => assert_eq!(
+                    e.code,
+                    ErrorCode::MissingDependency,
+                    "valid DPI {} must pass validation, got {:?}",
+                    valid_dpi,
+                    e
+                ),
+            }
+        }
     }
 }
