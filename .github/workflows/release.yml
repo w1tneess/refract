@@ -92,7 +92,7 @@ jobs:
           cat SHA256SUMS.txt
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@c95fe1489396fe8a9ec87453c663f532452554ff # v2.2.1
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           tag_name: ${{ github.event.inputs.tag_name || github.ref_name }}
           name: Refract ${{ github.event.inputs.tag_name || github.ref_name }}
