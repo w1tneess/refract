@@ -5,7 +5,9 @@ target/
 test-results/
 playwright-report/
 *.tsbuildinfo
-.agents/
+.agents/*
+!.agents/rules/
+!.agents/skills/
 skills-lock.json
 
 # Rust
