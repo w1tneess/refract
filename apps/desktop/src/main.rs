@@ -1,6 +1,15 @@
 slint::include_modules!();
 
+mod pipeline;
+
+use pipeline::{
+    plan_execution_units, select_batch_retry_indices, DesktopToolOptions, JobRequest,
+    OutputDestination, PlannedUnit, TrimEnd, UiOptionInput,
+};
+use refract_core::cancel::CancelToken;
+use refract_core::error::{ErrorCode, RefractError};
 use refract_core::format::Format;
+use refract_core::tools::ToolId;
 use refract_engine::{audio, image, pdf, render};
 use slint::{ComponentHandle, Model, SharedString, VecModel};
 use std::path::{Path, PathBuf};
@@ -15,8 +24,9 @@ struct JobRecord {
     input_path: PathBuf,
     name: String,
     size_bytes: u64,
-    tool_id: String,
     tool_label: String,
+    request: JobRequest,
+    last_batch_member_ids: Vec<i32>,
     status: JobStatus,
     error: String,
     output_path: PathBuf,
@@ -43,32 +53,8 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
-fn map_format_str(fmt: &str) -> Format {
-    match fmt.to_lowercase().as_str() {
-        "png" => Format::Png,
-        "webp" => Format::Webp,
-        "mp3" => Format::Mp3,
-        "wav" => Format::Wav,
-        "m4a" => Format::M4a,
-        "ogg" => Format::Ogg,
-        "pdf" => Format::Pdf,
-        "heic" => Format::Heic,
-        _ => Format::Jpeg,
-    }
-}
-
 fn format_primary_extension(fmt: Format) -> &'static str {
-    match fmt {
-        Format::Jpeg => "jpg",
-        Format::Png => "png",
-        Format::Webp => "webp",
-        Format::Heic => "heic",
-        Format::Pdf => "pdf",
-        Format::Mp3 => "mp3",
-        Format::Wav => "wav",
-        Format::M4a => "m4a",
-        Format::Ogg => "ogg",
-    }
+    fmt.primary_extension()
 }
 
 fn uniquify_path(path: &Path) -> PathBuf {
@@ -159,7 +145,10 @@ fn to_refract_err(e: std::io::Error) -> refract_core::error::RefractError {
 
 fn set_combo_model(window: &MainWindow, items: &[&str], selected: &str) {
     let model = Rc::new(VecModel::from(
-        items.iter().map(|s| SharedString::from(*s)).collect::<Vec<_>>(),
+        items
+            .iter()
+            .map(|s| SharedString::from(*s))
+            .collect::<Vec<_>>(),
     ));
     window.set_opt_combo_1_model(model.into());
     window.set_opt_combo_1(selected.into());
@@ -195,44 +184,70 @@ fn apply_tool_selection(
     );
     window.set_current_tool_batch(spec.batch);
 
-    // Populate sensible defaults and dropdown models per tool
-    match spec.id.as_str() {
-        "convert-image" => {
-            set_combo_model(window, &["jpg", "png", "webp"], "jpg");
-            window.set_opt_int_1(90);
+    // Populate defaults and dropdown models from the canonical manifest
+    if let Some(tool_id) = ToolId::from_id_str(spec.id.as_str()) {
+        if let Ok(defaults) = DesktopToolOptions::default_for(tool_id) {
+            match defaults {
+                DesktopToolOptions::ConvertImage { target, quality } => {
+                    set_combo_model(window, &["jpg", "png", "webp"], target.primary_extension());
+                    window.set_opt_int_1(i32::from(quality));
+                }
+                DesktopToolOptions::CompressImage { target_kb } => {
+                    window.set_opt_int_1(target_kb as i32);
+                }
+                DesktopToolOptions::ResizeImage { width, height, .. } => {
+                    window.set_opt_int_1(width.round() as i32);
+                    window.set_opt_int_2(height.round() as i32);
+                }
+                DesktopToolOptions::ImagesToPdf { dpi, quality } => {
+                    window.set_opt_int_1(i32::from(quality));
+                    window.set_opt_int_2(dpi.round() as i32);
+                    window.set_opt_float_1(dpi as f32);
+                }
+                DesktopToolOptions::PdfToImages { target, dpi } => {
+                    set_combo_model(window, &["png", "jpg"], target.primary_extension());
+                    window.set_opt_int_1(dpi as i32);
+                    window.set_opt_float_1(dpi as f32);
+                }
+                DesktopToolOptions::SplitPdf { ranges } => {
+                    window.set_opt_string_1(ranges.into());
+                }
+                DesktopToolOptions::ReorderPdf { order } => {
+                    window.set_opt_string_1(order.into());
+                }
+                DesktopToolOptions::ConvertAudio {
+                    target,
+                    bitrate_kbps,
+                } => {
+                    set_combo_model(
+                        window,
+                        &["mp3", "wav", "m4a", "ogg"],
+                        target.primary_extension(),
+                    );
+                    if let Some(br) = bitrate_kbps {
+                        window.set_opt_combo_2(br.to_string().into());
+                    }
+                }
+                DesktopToolOptions::TrimAudio {
+                    start_secs, end, ..
+                } => {
+                    let fmt_num = |v: f64| {
+                        if v.fract() == 0.0 {
+                            format!("{}", v as u64)
+                        } else {
+                            format!("{}", v)
+                        }
+                    };
+                    window.set_opt_string_1(fmt_num(start_secs).into());
+                    let end_str = match end {
+                        TrimEnd::EndOfFile => "0".to_string(),
+                        TrimEnd::AtSeconds(secs) => fmt_num(secs),
+                    };
+                    window.set_opt_string_2(end_str.into());
+                }
+                DesktopToolOptions::MergePdf | DesktopToolOptions::CompressPdf => {}
+            }
         }
-        "compress-image" => {
-            window.set_opt_int_1(200);
-        }
-        "resize-image" => {
-            window.set_opt_int_1(1920);
-            window.set_opt_int_2(0);
-        }
-        "images-to-pdf" => {
-            window.set_opt_int_1(85);
-            window.set_opt_int_2(150);
-            window.set_opt_float_1(150.0);
-        }
-        "pdf-to-images" => {
-            set_combo_model(window, &["png", "jpg"], "png");
-            window.set_opt_int_1(150);
-            window.set_opt_float_1(150.0);
-        }
-        "split-pdf" => {
-            window.set_opt_string_1("1-2, 3".into());
-        }
-        "reorder-pdf" => {
-            window.set_opt_string_1("1, 2".into());
-        }
-        "convert-audio" => {
-            set_combo_model(window, &["mp3", "wav", "m4a", "ogg"], "mp3");
-            window.set_opt_combo_2("192".into());
-        }
-        "trim-audio" => {
-            window.set_opt_string_1("0".into());
-            window.set_opt_string_2("30".into());
-        }
-        _ => {}
     }
 }
 
@@ -434,6 +449,68 @@ fn push_ui_event(tx: &mpsc::Sender<UiEvent>, event: UiEvent) {
     tx.send(event).ok();
 }
 
+/// Capture and validate an immutable [`JobRequest`] from current UI controls at enqueue time.
+fn capture_job_request(window: &MainWindow) -> Result<JobRequest, RefractError> {
+    let tool_id = window.get_selected_tool_id().to_string();
+    let string_1 = window.get_opt_string_1().to_string();
+    let string_2 = window.get_opt_string_2().to_string();
+    let combo_1 = window.get_opt_combo_1().to_string();
+    let combo_2 = window.get_opt_combo_2().to_string();
+    let output_folder = window.get_output_folder().to_string();
+
+    let raw = UiOptionInput {
+        string_1: &string_1,
+        string_2: &string_2,
+        int_1: window.get_opt_int_1(),
+        int_2: window.get_opt_int_2(),
+        combo_1: &combo_1,
+        combo_2: &combo_2,
+        resize_unit: None,
+        resize_dpi: None,
+        resize_target: None,
+        trim_bitrate: None,
+    };
+
+    JobRequest::from_ui(
+        &tool_id,
+        &raw,
+        window.get_output_next_to_source(),
+        &output_folder,
+    )
+}
+
+fn enqueue_files(
+    store: &mut Vec<JobRecord>,
+    next_id: &mut i32,
+    files: Vec<PathBuf>,
+    request: &JobRequest,
+) {
+    let tool_label = request.tool().label().to_string();
+    for path in files {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "Unknown".to_string());
+        let size_bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        let id = *next_id;
+        *next_id += 1;
+
+        store.push(JobRecord {
+            id,
+            input_path: path,
+            name,
+            size_bytes,
+            tool_label: tool_label.clone(),
+            request: request.clone(),
+            last_batch_member_ids: Vec::new(),
+            status: JobStatus::Waiting,
+            error: String::new(),
+            output_path: PathBuf::new(),
+            progress: -1.0,
+        });
+    }
+}
+
 fn setup_pick_files(
     window: &MainWindow,
     jobs_store: &Arc<Mutex<Vec<JobRecord>>>,
@@ -450,7 +527,15 @@ fn setup_pick_files(
             return;
         };
 
-        let tool_id = window.get_selected_tool_id().to_string();
+        let request = match capture_job_request(&window) {
+            Ok(req) => req,
+            Err(err) => {
+                push_ui_event(&ui_tx, UiEvent::StatusUpdate(err.to_string(), -1.0));
+                return;
+            }
+        };
+
+        let tool_id = request.tool().id_str();
         let spec_opt = window.get_tool_specs().iter().find(|s| s.id == tool_id);
         let extensions: Vec<String> = spec_opt
             .as_ref()
@@ -466,38 +551,9 @@ fn setup_pick_files(
         if let Some(files) = dialog.pick_files() {
             let mut store = jobs_store.lock().unwrap();
             let mut id_lock = next_id.lock().unwrap();
-
-            let mut added = Vec::new();
-            for path in files {
-                let name = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "Unknown".to_string());
-                let size_bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-                let id = *id_lock;
-                *id_lock += 1;
-
-                let tool_label = spec_opt
-                    .as_ref()
-                    .map(|s| s.title.to_string())
-                    .unwrap_or_else(|| "File".to_string());
-
-                added.push(JobRecord {
-                    id,
-                    input_path: path,
-                    name,
-                    size_bytes,
-                    tool_id: tool_id.clone(),
-                    tool_label,
-                    status: JobStatus::Waiting,
-                    error: String::new(),
-                    output_path: PathBuf::new(),
-                    progress: -1.0,
-                });
-            }
-
-            store.extend(added);
+            enqueue_files(&mut store, &mut id_lock, files, &request);
             push_ui_event(&ui_tx, UiEvent::JobsUpdated(store.clone()));
+            push_ui_event(&ui_tx, UiEvent::StatusUpdate("Ready".into(), -1.0));
         }
     });
 }
@@ -568,10 +624,7 @@ fn setup_toggle_theme(window: &MainWindow) {
     });
 }
 
-fn setup_tool_changed(
-    window: &MainWindow,
-    tool_specs: &[slint_generatedMainWindow::ToolSpec],
-) {
+fn setup_tool_changed(window: &MainWindow, tool_specs: &[slint_generatedMainWindow::ToolSpec]) {
     let window_weak = window.as_weak();
     let tool_specs = tool_specs.to_vec();
 
@@ -586,6 +639,38 @@ fn setup_tool_changed(
         settings.last_tool_id = tool_id_str;
         save_settings(&settings);
     });
+}
+
+fn try_claim_password_unlock(
+    jobs_store: &Arc<Mutex<Vec<JobRecord>>>,
+    is_busy: &AtomicBool,
+    job_id: i32,
+    ui_tx: Option<&mpsc::Sender<UiEvent>>,
+) -> Option<JobRecord> {
+    if is_busy.swap(true, Ordering::SeqCst) {
+        return None;
+    }
+
+    let job_opt = {
+        let mut store = jobs_store.lock().unwrap();
+        let job = store.iter_mut().find(|j| j.id == job_id).map(|j| {
+            j.status = JobStatus::Working;
+            j.progress = 0.0;
+            j.error.clear();
+            j.clone()
+        });
+        if job.is_some() {
+            if let Some(tx) = ui_tx {
+                push_ui_event(tx, UiEvent::JobsUpdated(store.clone()));
+            }
+        }
+        job
+    };
+
+    if job_opt.is_none() {
+        is_busy.store(false, Ordering::SeqCst);
+    }
+    job_opt
 }
 
 fn setup_password_handlers(
@@ -614,109 +699,62 @@ fn setup_password_handlers(
             return;
         };
 
-        let output_next_to_source = window.get_output_next_to_source();
-        let output_folder = if output_next_to_source {
-            None
-        } else {
-            let folder = window.get_output_folder().to_string();
-            if folder.is_empty() {
-                None
-            } else {
-                Some(PathBuf::from(folder))
-            }
+        let Some(job) = try_claim_password_unlock(&jobs_store, &is_busy, job_id, Some(&ui_tx))
+        else {
+            return;
         };
 
-        let job_opt = {
-            let store = jobs_store.lock().unwrap();
-            store.iter().find(|j| j.id == job_id).cloned()
-        };
+        window.set_is_running(true);
+        let worker_window = window_weak.clone();
+        let worker_jobs = Arc::clone(&jobs_store);
+        let worker_busy = Arc::clone(&is_busy);
+        let worker_ui_tx = ui_tx.clone();
 
-        if let Some(job) = job_opt {
-            let worker_jobs = Arc::clone(&jobs_store);
-            let worker_busy = Arc::clone(&is_busy);
-            let worker_ui_tx = ui_tx.clone();
+        thread::spawn(move || {
+            push_ui_event(
+                &worker_ui_tx,
+                UiEvent::StatusUpdate("Unlocking PDF…".into(), 0.0),
+            );
 
-            thread::spawn(move || {
-                worker_busy.store(true, Ordering::SeqCst);
-                push_ui_event(
-                    &worker_ui_tx,
-                    UiEvent::StatusUpdate("Unlocking PDF…".into(), 0.0),
-                );
+            // Uses the job's original immutable `JobRequest` — never recaptures UI options.
+            let result = process_job_with_password(&job, &password);
 
-                let result = process_job_with_password(
-                    &job,
-                    &password,
-                    output_next_to_source,
-                    output_folder.as_deref(),
-                );
-
-                let mut store = worker_jobs.lock().unwrap();
-                if let Some(j) = store.iter_mut().find(|j| j.id == job_id) {
-                    match result {
-                        Ok(out_path) => {
-                            j.status = JobStatus::Done;
-                            j.output_path = out_path;
-                            j.error.clear();
-                        }
-                        Err(refract_core::error::RefractError {
-                            code: refract_core::error::ErrorCode::WrongPassword,
-                            ..
-                        }) => {
-                            j.status = JobStatus::NeedsPassword;
-                            j.error = "Wrong password — check it and try again.".to_string();
-                        }
-                        Err(e) => {
-                            j.status = JobStatus::Failed;
-                            j.error = e.to_string();
-                        }
+            let mut store = worker_jobs.lock().unwrap();
+            if let Some(j) = store.iter_mut().find(|j| j.id == job_id) {
+                match result {
+                    Ok(out_path) => {
+                        j.status = JobStatus::Done;
+                        j.output_path = out_path;
+                        j.error.clear();
                     }
-                    j.progress = -1.0;
+                    Err(RefractError {
+                        code: ErrorCode::WrongPassword,
+                        ..
+                    }) => {
+                        j.status = JobStatus::NeedsPassword;
+                        j.error = "Wrong password — check it and try again.".to_string();
+                    }
+                    Err(e) => {
+                        j.status = JobStatus::Failed;
+                        j.error = e.to_string();
+                    }
                 }
+                j.progress = -1.0;
+            }
 
-                push_ui_event(&worker_ui_tx, UiEvent::JobsUpdated(store.clone()));
-                worker_busy.store(false, Ordering::SeqCst);
-                push_ui_event(&worker_ui_tx, UiEvent::StatusUpdate("Ready".into(), -1.0));
+            push_ui_event(&worker_ui_tx, UiEvent::JobsUpdated(store.clone()));
+            worker_busy.store(false, Ordering::SeqCst);
+            push_ui_event(&worker_ui_tx, UiEvent::StatusUpdate("Ready".into(), -1.0));
+            let _ = slint::invoke_from_event_loop({
+                let worker_window = worker_window.clone();
+                move || {
+                    if let Some(w) = worker_window.upgrade() {
+                        w.set_is_running(false);
+                    }
+                }
             });
-        }
+        });
     });
-}
-
-#[derive(Clone)]
-struct CapturedOptions {
-    opt_string_1: String,
-    opt_string_2: String,
-    opt_int_1: u32,
-    opt_int_2: u32,
-    opt_float_1: f64,
-    opt_combo_1: String,
-    opt_combo_2: String,
-    output_next_to_source: bool,
-    output_folder: Option<PathBuf>,
-}
-
-fn capture_options(window: &MainWindow) -> CapturedOptions {
-    let output_next_to_source = window.get_output_next_to_source();
-    let output_folder = if output_next_to_source {
-        None
-    } else {
-        let folder = window.get_output_folder().to_string();
-        if folder.is_empty() {
-            None
-        } else {
-            Some(PathBuf::from(folder))
-        }
-    };
-    CapturedOptions {
-        opt_string_1: window.get_opt_string_1().to_string(),
-        opt_string_2: window.get_opt_string_2().to_string(),
-        opt_int_1: window.get_opt_int_1().max(0) as u32,
-        opt_int_2: window.get_opt_int_2().max(0) as u32,
-        opt_float_1: window.get_opt_float_1() as f64,
-        opt_combo_1: window.get_opt_combo_1().to_string(),
-        opt_combo_2: window.get_opt_combo_2().to_string(),
-        output_next_to_source,
-        output_folder,
-    }
 }
 
 fn setup_start_processing(
@@ -743,7 +781,6 @@ fn setup_start_processing(
         window.set_is_running(true);
         push_ui_event(&ui_tx, UiEvent::StatusUpdate("Starting…".into(), 0.0));
 
-        let opts = capture_options(&window);
         let worker_window = window_weak.clone();
         let worker_jobs = Arc::clone(&jobs_store);
         let worker_busy = Arc::clone(&is_busy);
@@ -776,209 +813,90 @@ fn setup_start_processing(
                 return;
             }
 
-            // Separate batch merge-pdf & images-to-pdf jobs from per-file jobs
-            let merge_jobs: Vec<JobRecord> = waiting_jobs
-                .iter()
-                .filter(|j| j.tool_id == "merge-pdf")
-                .cloned()
-                .collect();
-            let images_to_pdf_jobs: Vec<JobRecord> = waiting_jobs
-                .iter()
-                .filter(|j| j.tool_id == "images-to-pdf")
-                .cloned()
-                .collect();
-            let single_jobs: Vec<JobRecord> = waiting_jobs
-                .into_iter()
-                .filter(|j| j.tool_id != "merge-pdf" && j.tool_id != "images-to-pdf")
-                .collect();
+            let planned_units = plan_execution_units(waiting_jobs, |j| &j.request);
+            let total_units = planned_units.len();
 
-            let total_units = single_jobs.len()
-                + usize::from(!merge_jobs.is_empty())
-                + usize::from(!images_to_pdf_jobs.is_empty());
-            let mut completed = 0usize;
-
-            // 1. Batch Merge PDF
-            if !merge_jobs.is_empty() {
-                let ids: Vec<i32> = merge_jobs.iter().map(|j| j.id).collect();
-                {
-                    let mut store = worker_jobs.lock().unwrap();
-                    for j in store.iter_mut().filter(|j| ids.contains(&j.id)) {
-                        j.status = JobStatus::Working;
-                        j.progress = 0.0;
-                    }
-                    push_ui_event(&worker_ui_tx, UiEvent::JobsUpdated(store.clone()));
-                }
-                push_ui_event(
-                    &worker_ui_tx,
-                    UiEvent::StatusUpdate(
-                        format!("Merging {} PDFs…", merge_jobs.len()),
-                        completed as f32 / total_units as f32,
-                    ),
-                );
-
-                let merge_result = if merge_jobs.len() < 2 {
-                    Err(refract_core::error::RefractError::new(
-                        refract_core::error::ErrorCode::DamagedFile,
-                        "Merge PDF needs at least 2 PDF files in the queue.",
-                    ))
-                } else {
-                    let read_res: Result<Vec<Vec<u8>>, _> = merge_jobs
-                        .iter()
-                        .map(|j| std::fs::read(&j.input_path).map_err(to_refract_err))
-                        .collect();
-                    read_res.and_then(|buffers| {
-                        let slices: Vec<&[u8]> = buffers.iter().map(|b| b.as_slice()).collect();
-                        let out_bytes = pdf::merge_pdfs(&slices)?;
-                        let out_path = determine_output_path(
-                            &merge_jobs[0],
-                            opts.output_next_to_source,
-                            opts.output_folder.as_deref(),
-                            "merged",
-                            "pdf",
+            for (completed, unit) in planned_units.into_iter().enumerate() {
+                match unit {
+                    PlannedUnit::Batch {
+                        tool: ToolId::MergePdf,
+                        request,
+                        items,
+                    } => {
+                        let ids: Vec<i32> = items.iter().map(|j| j.id).collect();
+                        {
+                            let mut store = worker_jobs.lock().unwrap();
+                            for j in store.iter_mut().filter(|j| ids.contains(&j.id)) {
+                                j.status = JobStatus::Working;
+                                j.progress = 0.0;
+                                j.last_batch_member_ids = ids.clone();
+                            }
+                            push_ui_event(&worker_ui_tx, UiEvent::JobsUpdated(store.clone()));
+                        }
+                        push_ui_event(
+                            &worker_ui_tx,
+                            UiEvent::StatusUpdate(
+                                format!("Merging {} PDFs…", items.len()),
+                                completed as f32 / total_units as f32,
+                            ),
                         );
-                        std::fs::write(&out_path, out_bytes).map_err(to_refract_err)?;
-                        Ok(out_path)
-                    })
-                };
 
-                {
-                    let mut store = worker_jobs.lock().unwrap();
-                    for j in store.iter_mut().filter(|j| ids.contains(&j.id)) {
-                        match &merge_result {
-                            Ok(path) => {
-                                j.status = JobStatus::Done;
-                                j.output_path = path.clone();
-                                j.error.clear();
+                        let merge_result = execute_batch_merge_pdf(&items, &request);
+                        apply_batch_result(&worker_jobs, &ids, merge_result, &worker_ui_tx);
+                    }
+                    PlannedUnit::Batch {
+                        tool: ToolId::ImagesToPdf,
+                        request,
+                        items,
+                    } => {
+                        let ids: Vec<i32> = items.iter().map(|j| j.id).collect();
+                        {
+                            let mut store = worker_jobs.lock().unwrap();
+                            for j in store.iter_mut().filter(|j| ids.contains(&j.id)) {
+                                j.status = JobStatus::Working;
+                                j.progress = 0.0;
+                                j.last_batch_member_ids = ids.clone();
                             }
-                            Err(e) => {
-                                j.status = JobStatus::Failed;
-                                j.error = e.to_string();
-                            }
+                            push_ui_event(&worker_ui_tx, UiEvent::JobsUpdated(store.clone()));
                         }
-                        j.progress = -1.0;
-                    }
-                    push_ui_event(&worker_ui_tx, UiEvent::JobsUpdated(store.clone()));
-                }
-                completed += 1;
-            }
-
-            // 2. Batch Images to PDF
-            if !images_to_pdf_jobs.is_empty() {
-                let ids: Vec<i32> = images_to_pdf_jobs.iter().map(|j| j.id).collect();
-                {
-                    let mut store = worker_jobs.lock().unwrap();
-                    for j in store.iter_mut().filter(|j| ids.contains(&j.id)) {
-                        j.status = JobStatus::Working;
-                        j.progress = 0.0;
-                    }
-                    push_ui_event(&worker_ui_tx, UiEvent::JobsUpdated(store.clone()));
-                }
-                push_ui_event(
-                    &worker_ui_tx,
-                    UiEvent::StatusUpdate(
-                        format!("Compiling {} images into PDF…", images_to_pdf_jobs.len()),
-                        completed as f32 / total_units as f32,
-                    ),
-                );
-
-                let dpi = if opts.opt_int_2 >= 72 {
-                    opts.opt_int_2 as f64
-                } else {
-                    150.0
-                };
-                let quality = opts.opt_int_1.clamp(10, 100) as u8;
-                let compile_result = images_to_pdf_jobs
-                    .iter()
-                    .map(|j| std::fs::read(&j.input_path).map_err(to_refract_err))
-                    .collect::<Result<Vec<Vec<u8>>, _>>()
-                    .and_then(|buffers| {
-                        let out_bytes = pdf::images_to_pdf(&buffers, dpi, quality)?;
-                        let out_path = determine_output_path(
-                            &images_to_pdf_jobs[0],
-                            opts.output_next_to_source,
-                            opts.output_folder.as_deref(),
-                            "images",
-                            "pdf",
+                        push_ui_event(
+                            &worker_ui_tx,
+                            UiEvent::StatusUpdate(
+                                format!("Compiling {} images into PDF…", items.len()),
+                                completed as f32 / total_units as f32,
+                            ),
                         );
-                        std::fs::write(&out_path, out_bytes).map_err(to_refract_err)?;
-                        Ok(out_path)
-                    });
 
-                {
-                    let mut store = worker_jobs.lock().unwrap();
-                    for j in store.iter_mut().filter(|j| ids.contains(&j.id)) {
-                        match &compile_result {
-                            Ok(path) => {
-                                j.status = JobStatus::Done;
-                                j.output_path = path.clone();
-                                j.error.clear();
-                            }
-                            Err(e) => {
-                                j.status = JobStatus::Failed;
-                                j.error = e.to_string();
-                            }
+                        let compile_result = execute_batch_images_to_pdf(&items, &request);
+                        apply_batch_result(&worker_jobs, &ids, compile_result, &worker_ui_tx);
+                    }
+                    PlannedUnit::Batch { items, .. } => {
+                        for job in items {
+                            run_single_job_in_store(
+                                &worker_jobs,
+                                &job,
+                                completed,
+                                total_units,
+                                &worker_ui_tx,
+                            );
                         }
-                        j.progress = -1.0;
                     }
-                    push_ui_event(&worker_ui_tx, UiEvent::JobsUpdated(store.clone()));
-                }
-                completed += 1;
-            }
-
-            // 3. Individual jobs
-            for job in single_jobs {
-                {
-                    let mut store = worker_jobs.lock().unwrap();
-                    if let Some(j) = store.iter_mut().find(|j| j.id == job.id) {
-                        j.status = JobStatus::Working;
-                        j.progress = 0.0;
+                    PlannedUnit::Single(job) => {
+                        run_single_job_in_store(
+                            &worker_jobs,
+                            &job,
+                            completed,
+                            total_units,
+                            &worker_ui_tx,
+                        );
                     }
-                    push_ui_event(&worker_ui_tx, UiEvent::JobsUpdated(store.clone()));
                 }
 
                 push_ui_event(
                     &worker_ui_tx,
                     UiEvent::StatusUpdate(
-                        format!("Processing {} of {}: {}", completed + 1, total_units, job.name),
-                        completed as f32 / total_units as f32,
-                    ),
-                );
-
-                let result = process_job(&job, &opts);
-
-                {
-                    let mut store = worker_jobs.lock().unwrap();
-                    if let Some(j) = store.iter_mut().find(|j| j.id == job.id) {
-                        match result {
-                            Ok(out_path) => {
-                                j.status = JobStatus::Done;
-                                j.output_path = out_path;
-                                j.error.clear();
-                            }
-                            Err(refract_core::error::RefractError {
-                                code: refract_core::error::ErrorCode::NeedsPassword,
-                                message,
-                                ..
-                            }) => {
-                                j.status = JobStatus::NeedsPassword;
-                                j.error = message;
-                            }
-                            Err(e) => {
-                                j.status = JobStatus::Failed;
-                                j.error = e.to_string();
-                            }
-                        }
-                        j.progress = -1.0;
-                    }
-                    push_ui_event(&worker_ui_tx, UiEvent::JobsUpdated(store.clone()));
-                }
-
-                completed += 1;
-                push_ui_event(
-                    &worker_ui_tx,
-                    UiEvent::StatusUpdate(
-                        format!("Completed {} of {}", completed, total_units),
-                        completed as f32 / total_units as f32,
+                        format!("Completed {} of {}", completed + 1, total_units),
+                        (completed + 1) as f32 / total_units as f32,
                     ),
                 );
             }
@@ -995,6 +913,184 @@ fn setup_start_processing(
             });
         });
     });
+}
+
+fn apply_batch_result(
+    jobs_store: &Arc<Mutex<Vec<JobRecord>>>,
+    ids: &[i32],
+    result: Result<PathBuf, RefractError>,
+    ui_tx: &mpsc::Sender<UiEvent>,
+) {
+    let mut store = jobs_store.lock().unwrap();
+    for j in store.iter_mut().filter(|j| ids.contains(&j.id)) {
+        match &result {
+            Ok(path) => {
+                j.status = JobStatus::Done;
+                j.output_path = path.clone();
+                j.error.clear();
+            }
+            Err(RefractError {
+                code: ErrorCode::NeedsPassword,
+                message,
+                ..
+            }) => {
+                j.status = JobStatus::NeedsPassword;
+                j.error = message.clone();
+            }
+            Err(e) => {
+                j.status = JobStatus::Failed;
+                j.error = e.to_string();
+            }
+        }
+        j.progress = -1.0;
+    }
+    push_ui_event(ui_tx, UiEvent::JobsUpdated(store.clone()));
+}
+
+fn run_single_job_in_store(
+    jobs_store: &Arc<Mutex<Vec<JobRecord>>>,
+    job: &JobRecord,
+    completed: usize,
+    total_units: usize,
+    ui_tx: &mpsc::Sender<UiEvent>,
+) {
+    {
+        let mut store = jobs_store.lock().unwrap();
+        if let Some(j) = store.iter_mut().find(|j| j.id == job.id) {
+            j.status = JobStatus::Working;
+            j.progress = 0.0;
+        }
+        push_ui_event(ui_tx, UiEvent::JobsUpdated(store.clone()));
+    }
+
+    push_ui_event(
+        ui_tx,
+        UiEvent::StatusUpdate(
+            format!(
+                "Processing {} of {}: {}",
+                completed + 1,
+                total_units,
+                job.name
+            ),
+            completed as f32 / total_units as f32,
+        ),
+    );
+
+    let result = process_job(job);
+
+    {
+        let mut store = jobs_store.lock().unwrap();
+        if let Some(j) = store.iter_mut().find(|j| j.id == job.id) {
+            match result {
+                Ok(out_path) => {
+                    j.status = JobStatus::Done;
+                    j.output_path = out_path;
+                    j.error.clear();
+                }
+                Err(RefractError {
+                    code: ErrorCode::NeedsPassword,
+                    message,
+                    ..
+                }) => {
+                    j.status = JobStatus::NeedsPassword;
+                    j.error = message;
+                }
+                Err(e) => {
+                    j.status = JobStatus::Failed;
+                    j.error = e.to_string();
+                }
+            }
+            j.progress = -1.0;
+        }
+        push_ui_event(ui_tx, UiEvent::JobsUpdated(store.clone()));
+    }
+}
+
+fn execute_retry_in_store(
+    jobs_store: &Arc<Mutex<Vec<JobRecord>>>,
+    job_id: i32,
+    ui_tx: Option<&mpsc::Sender<UiEvent>>,
+) {
+    let members: Vec<JobRecord> = {
+        let store = jobs_store.lock().unwrap();
+        let recorded_ids = store
+            .iter()
+            .find(|j| j.id == job_id)
+            .map(|j| j.last_batch_member_ids.clone())
+            .unwrap_or_default();
+        let indices = select_batch_retry_indices(
+            &store,
+            job_id,
+            &recorded_ids,
+            |j| j.id,
+            |j| &j.request,
+            |j| matches!(j.status, JobStatus::Failed | JobStatus::Waiting),
+        );
+        indices.into_iter().map(|i| store[i].clone()).collect()
+    };
+
+    let Some(primary) = members.first().cloned() else {
+        return;
+    };
+    let request = primary.request.clone();
+    let ids: Vec<i32> = members.iter().map(|j| j.id).collect();
+
+    {
+        let mut store = jobs_store.lock().unwrap();
+        for j in store.iter_mut().filter(|j| ids.contains(&j.id)) {
+            j.status = JobStatus::Working;
+            j.progress = 0.0;
+            j.error.clear();
+            if request.tool().spec().batch {
+                j.last_batch_member_ids = ids.clone();
+            }
+        }
+        if let Some(tx) = ui_tx {
+            push_ui_event(tx, UiEvent::JobsUpdated(store.clone()));
+        }
+    }
+
+    if let Some(tx) = ui_tx {
+        push_ui_event(
+            tx,
+            UiEvent::StatusUpdate(format!("Retrying: {}", primary.name), 0.0),
+        );
+    }
+
+    let result = match request.tool() {
+        ToolId::MergePdf => execute_batch_merge_pdf(&members, &request),
+        ToolId::ImagesToPdf => execute_batch_images_to_pdf(&members, &request),
+        _ => process_job(&primary),
+    };
+
+    {
+        let mut store = jobs_store.lock().unwrap();
+        for j in store.iter_mut().filter(|j| ids.contains(&j.id)) {
+            match &result {
+                Ok(out_path) => {
+                    j.status = JobStatus::Done;
+                    j.output_path = out_path.clone();
+                    j.error.clear();
+                }
+                Err(RefractError {
+                    code: ErrorCode::NeedsPassword,
+                    message,
+                    ..
+                }) => {
+                    j.status = JobStatus::NeedsPassword;
+                    j.error = message.clone();
+                }
+                Err(e) => {
+                    j.status = JobStatus::Failed;
+                    j.error = e.to_string();
+                }
+            }
+            j.progress = -1.0;
+        }
+        if let Some(tx) = ui_tx {
+            push_ui_event(tx, UiEvent::JobsUpdated(store.clone()));
+        }
+    }
 }
 
 fn setup_retry_job(
@@ -1019,63 +1115,14 @@ fn setup_retry_job(
         };
 
         window.set_is_running(true);
-        let opts = capture_options(&window);
         let worker_window = window_weak.clone();
         let worker_jobs = Arc::clone(&jobs_store);
         let worker_busy = Arc::clone(&is_busy);
         let worker_ui_tx = ui_tx.clone();
 
         thread::spawn(move || {
-            let job_opt = {
-                let store = worker_jobs.lock().unwrap();
-                store.iter().find(|j| j.id == job_id).cloned()
-            };
-
-            if let Some(job) = job_opt {
-                {
-                    let mut store = worker_jobs.lock().unwrap();
-                    if let Some(j) = store.iter_mut().find(|j| j.id == job_id) {
-                        j.status = JobStatus::Working;
-                        j.progress = 0.0;
-                        j.error.clear();
-                    }
-                    push_ui_event(&worker_ui_tx, UiEvent::JobsUpdated(store.clone()));
-                }
-
-                push_ui_event(
-                    &worker_ui_tx,
-                    UiEvent::StatusUpdate(format!("Retrying: {}", job.name), 0.0),
-                );
-
-                let result = process_job(&job, &opts);
-
-                {
-                    let mut store = worker_jobs.lock().unwrap();
-                    if let Some(j) = store.iter_mut().find(|j| j.id == job_id) {
-                        match result {
-                            Ok(out_path) => {
-                                j.status = JobStatus::Done;
-                                j.output_path = out_path;
-                                j.error.clear();
-                            }
-                            Err(refract_core::error::RefractError {
-                                code: refract_core::error::ErrorCode::NeedsPassword,
-                                message,
-                                ..
-                            }) => {
-                                j.status = JobStatus::NeedsPassword;
-                                j.error = message;
-                            }
-                            Err(e) => {
-                                j.status = JobStatus::Failed;
-                                j.error = e.to_string();
-                            }
-                        }
-                        j.progress = -1.0;
-                    }
-                    push_ui_event(&worker_ui_tx, UiEvent::JobsUpdated(store.clone()));
-                }
-            }
+            // Re-runs with the job's original immutable `JobRequest` (and compatible batch peers).
+            execute_retry_in_store(&worker_jobs, job_id, Some(&worker_ui_tx));
 
             worker_busy.store(false, Ordering::SeqCst);
             push_ui_event(&worker_ui_tx, UiEvent::StatusUpdate("Ready".into(), -1.0));
@@ -1140,16 +1187,11 @@ fn setup_move_job(
 
 fn determine_output_path(
     job: &JobRecord,
-    output_next_to_source: bool,
-    output_folder: Option<&Path>,
+    destination: &OutputDestination,
     suffix: &str,
     extension: &str,
 ) -> PathBuf {
-    let parent = if output_next_to_source {
-        job.input_path.parent().unwrap_or(Path::new("."))
-    } else {
-        output_folder.unwrap_or_else(|| Path::new("."))
-    };
+    let parent = destination.resolve_parent(&job.input_path);
     let stem = job
         .input_path
         .file_stem()
@@ -1159,160 +1201,181 @@ fn determine_output_path(
     uniquify_path(&out_path)
 }
 
-fn process_job(
+fn ensure_batch_compatible(jobs: &[JobRecord], request: &JobRequest) -> Result<(), RefractError> {
+    if jobs.is_empty() {
+        return Err(RefractError::new(
+            ErrorCode::InvalidOption,
+            "Batch job has no input files.",
+        ));
+    }
+    if jobs
+        .iter()
+        .any(|job| !request.is_batch_compatible_with(&job.request))
+    {
+        return Err(RefractError::new(
+            ErrorCode::InvalidOption,
+            "Cannot combine jobs with incompatible options or output destinations.",
+        ));
+    }
+    Ok(())
+}
+
+fn execute_batch_merge_pdf(
+    jobs: &[JobRecord],
+    request: &JobRequest,
+) -> Result<PathBuf, RefractError> {
+    ensure_batch_compatible(jobs, request)?;
+    if jobs.len() < 2 {
+        return Err(RefractError::new(
+            ErrorCode::InvalidOption,
+            "Merge PDF needs at least 2 compatible PDF files with the same output destination.",
+        ));
+    }
+    let buffers: Vec<Vec<u8>> = jobs
+        .iter()
+        .map(|j| std::fs::read(&j.input_path).map_err(to_refract_err))
+        .collect::<Result<_, _>>()?;
+    let slices: Vec<&[u8]> = buffers.iter().map(|b| b.as_slice()).collect();
+    let out_bytes = pdf::merge_pdfs(&slices)?;
+    let out_path = determine_output_path(&jobs[0], request.destination(), "merged", "pdf");
+    std::fs::write(&out_path, out_bytes).map_err(to_refract_err)?;
+    Ok(out_path)
+}
+
+fn execute_batch_images_to_pdf(
+    jobs: &[JobRecord],
+    request: &JobRequest,
+) -> Result<PathBuf, RefractError> {
+    ensure_batch_compatible(jobs, request)?;
+    let DesktopToolOptions::ImagesToPdf { dpi, quality } = *request.options() else {
+        return Err(RefractError::new(
+            ErrorCode::InvalidOption,
+            "Expected ImagesToPdf options for batch compilation.",
+        ));
+    };
+    let buffers: Vec<Vec<u8>> = jobs
+        .iter()
+        .map(|j| std::fs::read(&j.input_path).map_err(to_refract_err))
+        .collect::<Result<_, _>>()?;
+    let out_bytes = pdf::images_to_pdf(&buffers, dpi, quality)?;
+    let out_path = determine_output_path(&jobs[0], request.destination(), "images", "pdf");
+    std::fs::write(&out_path, out_bytes).map_err(to_refract_err)?;
+    Ok(out_path)
+}
+
+fn render_or_extract_pdf_images(
     job: &JobRecord,
-    opts: &CapturedOptions,
-) -> Result<PathBuf, refract_core::error::RefractError> {
-    let output_folder = opts.output_folder.as_deref();
-    match job.tool_id.as_str() {
-        "convert-image" => {
+    bytes: &[u8],
+    target: Format,
+    dpi: u32,
+    password: Option<&str>,
+) -> Result<PathBuf, RefractError> {
+    let format = format_primary_extension(target);
+    let parent = job.request.destination().resolve_parent(&job.input_path);
+    let stem = job
+        .input_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("file");
+
+    match render::render_pdf_to_images_with_password_cancellable(
+        bytes,
+        password,
+        dpi,
+        format,
+        &CancelToken::none(),
+    ) {
+        Ok(pages) => {
+            let mut first_written = parent.join(format!("{} p0001.{}", stem, format));
+            for (idx, (page_num, page_bytes, ext)) in pages.into_iter().enumerate() {
+                let out_path = parent.join(format!("{} p{:04}.{}", stem, page_num, ext));
+                let unique = uniquify_path(&out_path);
+                std::fs::write(&unique, page_bytes).map_err(to_refract_err)?;
+                if idx == 0 {
+                    first_written = unique;
+                }
+            }
+            Ok(first_written)
+        }
+        Err(render_err) => {
+            if render_err.code.is_password_error() {
+                return Err(render_err);
+            }
+            let embedded =
+                pdf::extract_embedded_images_with_password(bytes, password, &CancelToken::none())?;
+            if embedded.is_empty() {
+                return Err(render_err);
+            }
+            let mut first_written =
+                parent.join(format!("{} p0001.{}", stem, embedded[0].extension));
+            for (idx, img) in embedded.iter().enumerate() {
+                let out_path = parent.join(format!("{} p{:04}.{}", stem, img.page, img.extension));
+                let unique = uniquify_path(&out_path);
+                std::fs::write(&unique, &img.bytes).map_err(to_refract_err)?;
+                if idx == 0 {
+                    first_written = unique;
+                }
+            }
+            Ok(first_written)
+        }
+    }
+}
+
+fn process_job(job: &JobRecord) -> Result<PathBuf, RefractError> {
+    let destination = job.request.destination();
+    match job.request.options() {
+        DesktopToolOptions::ConvertImage { target, quality } => {
             let bytes = std::fs::read(&job.input_path).map_err(to_refract_err)?;
-            let target_format = map_format_str(&opts.opt_combo_1);
-            let quality = if target_format == Format::Jpeg {
-                opts.opt_int_1.clamp(1, 100) as u8
-            } else {
-                90
-            };
-            let out_bytes = image::convert_image(&bytes, target_format, Some(quality))?;
+            let out_bytes = image::convert_image(&bytes, *target, Some(*quality))?;
             let out_path = determine_output_path(
                 job,
-                opts.output_next_to_source,
-                output_folder,
+                destination,
                 "converted",
-                format_primary_extension(target_format),
+                format_primary_extension(*target),
             );
             std::fs::write(&out_path, out_bytes).map_err(to_refract_err)?;
             Ok(out_path)
         }
-        "compress-image" => {
+        DesktopToolOptions::CompressImage { target_kb } => {
             let bytes = std::fs::read(&job.input_path).map_err(to_refract_err)?;
-            let target_kb = opts.opt_int_1.max(1);
-            let out_bytes = image::compress_image(&bytes, target_kb)?;
-            let out_path = determine_output_path(
-                job,
-                opts.output_next_to_source,
-                output_folder,
-                "compressed",
-                "jpg",
-            );
+            let out_bytes = image::compress_image(&bytes, *target_kb)?;
+            let out_path = determine_output_path(job, destination, "compressed", "jpg");
             std::fs::write(&out_path, out_bytes).map_err(to_refract_err)?;
             Ok(out_path)
         }
-        "resize-image" => {
+        opts @ DesktopToolOptions::ResizeImage { .. } => {
+            let engine_opts = opts.as_engine_resize_options().ok_or_else(|| {
+                RefractError::new(ErrorCode::InvalidOption, "Invalid resize options.")
+            })?;
             let bytes = std::fs::read(&job.input_path).map_err(to_refract_err)?;
-            let (out_bytes, out_fmt) =
-                image::resize_image_with_format(&bytes, opts.opt_int_1, opts.opt_int_2, None)?;
+            let (out_bytes, out_fmt) = image::resize_image_with_options(&bytes, &engine_opts)?;
             let out_path = determine_output_path(
                 job,
-                opts.output_next_to_source,
-                output_folder,
+                destination,
                 "resized",
                 format_primary_extension(out_fmt),
             );
             std::fs::write(&out_path, out_bytes).map_err(to_refract_err)?;
             Ok(out_path)
         }
-        "images-to-pdf" => {
-            let bytes = std::fs::read(&job.input_path).map_err(to_refract_err)?;
-            let dpi = if opts.opt_int_2 >= 72 {
-                opts.opt_int_2 as f64
-            } else if opts.opt_float_1 > 0.0 {
-                opts.opt_float_1
-            } else {
-                150.0
-            };
-            let quality = opts.opt_int_1.clamp(10, 100) as u8;
-            let out_bytes = pdf::images_to_pdf(&[bytes], dpi, quality)?;
-            let out_path = determine_output_path(
-                job,
-                opts.output_next_to_source,
-                output_folder,
-                "images-to-pdf",
-                "pdf",
-            );
-            std::fs::write(&out_path, out_bytes).map_err(to_refract_err)?;
-            Ok(out_path)
+        DesktopToolOptions::ImagesToPdf { .. } => {
+            execute_batch_images_to_pdf(std::slice::from_ref(job), &job.request)
         }
-        "pdf-to-images" => {
+        DesktopToolOptions::PdfToImages { target, dpi } => {
             let bytes = std::fs::read(&job.input_path).map_err(to_refract_err)?;
-            let dpi = if opts.opt_int_1 >= 72 {
-                opts.opt_int_1.clamp(72, 600)
-            } else {
-                opts.opt_float_1.clamp(72.0, 600.0) as u32
-            };
-            let format = if opts.opt_combo_1 == "jpg" { "jpg" } else { "png" };
-            let parent = if opts.output_next_to_source {
-                job.input_path.parent().unwrap_or(Path::new("."))
-            } else {
-                output_folder.unwrap_or_else(|| Path::new("."))
-            };
-            let stem = job
-                .input_path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("file");
-
-            match render::render_pdf_to_images(&bytes, dpi, format) {
-                Ok(pages) => {
-                    let mut first_written = parent.join(format!("{} p0001.{}", stem, format));
-                    for (idx, (page_num, page_bytes, ext)) in pages.into_iter().enumerate() {
-                        let out_path = parent.join(format!("{} p{:04}.{}", stem, page_num, ext));
-                        let unique = uniquify_path(&out_path);
-                        std::fs::write(&unique, page_bytes).map_err(to_refract_err)?;
-                        if idx == 0 {
-                            first_written = unique;
-                        }
-                    }
-                    Ok(first_written)
-                }
-                Err(render_err) => {
-                    let embedded = pdf::extract_embedded_images(&bytes)?;
-                    if embedded.is_empty() {
-                        return Err(render_err);
-                    }
-                    let mut first_written =
-                        parent.join(format!("{} p0001.{}", stem, embedded[0].extension));
-                    for (idx, img) in embedded.iter().enumerate() {
-                        let out_path =
-                            parent.join(format!("{} p{:04}.{}", stem, img.page, img.extension));
-                        let unique = uniquify_path(&out_path);
-                        std::fs::write(&unique, &img.bytes).map_err(to_refract_err)?;
-                        if idx == 0 {
-                            first_written = unique;
-                        }
-                    }
-                    Ok(first_written)
-                }
-            }
+            render_or_extract_pdf_images(job, &bytes, *target, *dpi, None)
         }
-        "compress-pdf" => {
+        DesktopToolOptions::CompressPdf => {
             let bytes = std::fs::read(&job.input_path).map_err(to_refract_err)?;
             let out_bytes = pdf::compress_pdf(&bytes)?;
-            let out_path = determine_output_path(
-                job,
-                opts.output_next_to_source,
-                output_folder,
-                "compressed",
-                "pdf",
-            );
+            let out_path = determine_output_path(job, destination, "compressed", "pdf");
             std::fs::write(&out_path, out_bytes).map_err(to_refract_err)?;
             Ok(out_path)
         }
-        "split-pdf" => {
+        DesktopToolOptions::SplitPdf { ranges } => {
             let bytes = std::fs::read(&job.input_path).map_err(to_refract_err)?;
-            let ranges = opts.opt_string_1.trim();
-            if ranges.is_empty() {
-                return Err(refract_core::error::RefractError::new(
-                    refract_core::error::ErrorCode::DamagedFile,
-                    "Page ranges cannot be empty (e.g. 1-2, 3).",
-                ));
-            }
             let parts = pdf::split_pdf(&bytes, ranges)?;
-            let parent = if opts.output_next_to_source {
-                job.input_path.parent().unwrap_or(Path::new("."))
-            } else {
-                output_folder.unwrap_or_else(|| Path::new("."))
-            };
+            let parent = destination.resolve_parent(&job.input_path);
             let stem = job
                 .input_path
                 .file_stem()
@@ -1328,58 +1391,44 @@ fn process_job(
             }
             Ok(last_path)
         }
-        "reorder-pdf" => {
+        DesktopToolOptions::ReorderPdf { order } => {
             let bytes = std::fs::read(&job.input_path).map_err(to_refract_err)?;
-            let order = opts.opt_string_1.trim();
-            if order.is_empty() {
-                return Err(refract_core::error::RefractError::new(
-                    refract_core::error::ErrorCode::DamagedFile,
-                    "Page order cannot be empty (e.g. 3, 1, 2).",
-                ));
-            }
             let out_bytes = pdf::reorder_pdf(&bytes, order)?;
-            let out_path = determine_output_path(
-                job,
-                opts.output_next_to_source,
-                output_folder,
-                "reordered",
-                "pdf",
-            );
+            let out_path = determine_output_path(job, destination, "reordered", "pdf");
             std::fs::write(&out_path, out_bytes).map_err(to_refract_err)?;
             Ok(out_path)
         }
-        "merge-pdf" => Err(refract_core::error::RefractError::new(
-            refract_core::error::ErrorCode::EngineFailed,
-            "Merge PDF combines multiple files — use Process all.",
+        DesktopToolOptions::MergePdf => Err(RefractError::new(
+            ErrorCode::InvalidOption,
+            "Merge PDF needs at least 2 compatible PDF files with the same output destination.",
         )),
-        "convert-audio" => {
+        DesktopToolOptions::ConvertAudio {
+            target,
+            bitrate_kbps,
+        } => {
             if !audio::is_ffmpeg_available() {
-                return Err(refract_core::error::RefractError::new(
-                    refract_core::error::ErrorCode::EngineFailed,
+                return Err(RefractError::new(
+                    ErrorCode::MissingDependency,
                     "FFmpeg not found. Install FFmpeg and ensure it is on PATH to convert audio.",
                 ));
             }
-            let target_format = map_format_str(&opts.opt_combo_1);
-            let bitrate = opts
-                .opt_combo_2
-                .trim()
-                .parse::<u32>()
-                .unwrap_or(192)
-                .clamp(64, 320);
             let out_path = determine_output_path(
                 job,
-                opts.output_next_to_source,
-                output_folder,
+                destination,
                 "converted",
-                format_primary_extension(target_format),
+                format_primary_extension(*target),
             );
-            audio::convert_audio(&job.input_path, &out_path, target_format, Some(bitrate))?;
+            audio::convert_audio(&job.input_path, &out_path, *target, *bitrate_kbps)?;
             Ok(out_path)
         }
-        "trim-audio" => {
+        DesktopToolOptions::TrimAudio {
+            start_secs,
+            end,
+            bitrate_kbps,
+        } => {
             if !audio::is_ffmpeg_available() {
-                return Err(refract_core::error::RefractError::new(
-                    refract_core::error::ErrorCode::EngineFailed,
+                return Err(RefractError::new(
+                    ErrorCode::MissingDependency,
                     "FFmpeg not found. Install FFmpeg and ensure it is on PATH to trim audio.",
                 ));
             }
@@ -1388,81 +1437,70 @@ fn process_job(
                 .extension()
                 .and_then(|e| e.to_str())
                 .unwrap_or("mp3");
-            let out_path = determine_output_path(
-                job,
-                opts.output_next_to_source,
-                output_folder,
-                "trimmed",
-                ext,
-            );
-            let start = (!opts.opt_string_1.trim().is_empty()).then_some(opts.opt_string_1.as_str());
-            let end = (!opts.opt_string_2.trim().is_empty()).then_some(opts.opt_string_2.as_str());
-            audio::trim_audio(&job.input_path, &out_path, start, end)?;
+            let out_path = determine_output_path(job, destination, "trimmed", ext);
+            let start_arg = format!("{:.3}", start_secs);
+            let end_arg = end.to_engine_arg();
+            audio::trim_audio_cancellable(
+                &job.input_path,
+                &out_path,
+                Some(start_arg.as_str()),
+                end_arg.as_deref(),
+                Some(*bitrate_kbps),
+                &CancelToken::none(),
+            )?;
             Ok(out_path)
         }
-        _ => Err(refract_core::error::RefractError::new(
-            refract_core::error::ErrorCode::UnsupportedFormat,
-            format!("Unknown tool: {}", job.tool_id),
-        )),
     }
 }
 
-fn process_job_with_password(
-    job: &JobRecord,
-    password: &str,
-    output_next_to_source: bool,
-    output_folder: Option<&Path>,
-) -> Result<PathBuf, refract_core::error::RefractError> {
-    match job.tool_id.as_str() {
-        "compress-pdf" => {
+fn process_job_with_password(job: &JobRecord, password: &str) -> Result<PathBuf, RefractError> {
+    let destination = job.request.destination();
+    match job.request.options() {
+        DesktopToolOptions::CompressPdf => {
             let bytes = std::fs::read(&job.input_path).map_err(to_refract_err)?;
             let out_bytes = pdf::compress_pdf_with_password(&bytes, password)?;
-            let out_path = determine_output_path(
-                job,
-                output_next_to_source,
-                output_folder,
-                "compressed",
-                "pdf",
-            );
+            let out_path = determine_output_path(job, destination, "compressed", "pdf");
             std::fs::write(&out_path, out_bytes).map_err(to_refract_err)?;
             Ok(out_path)
         }
-        "pdf-to-images" => {
+        DesktopToolOptions::PdfToImages { target, dpi } => {
             let bytes = std::fs::read(&job.input_path).map_err(to_refract_err)?;
-            let mut doc = pdf::load_document(&bytes, Some(password))?;
-            let mut unlocked = Vec::new();
-            doc.save_to(&mut unlocked).map_err(|e| {
-                refract_core::error::RefractError::with_details(
-                    refract_core::error::ErrorCode::EngineFailed,
-                    "Failed to prepare unlocked PDF",
-                    e.to_string(),
-                )
-            })?;
-            let parent = if output_next_to_source {
-                job.input_path.parent().unwrap_or(Path::new("."))
-            } else {
-                output_folder.unwrap_or_else(|| Path::new("."))
-            };
+            render_or_extract_pdf_images(job, &bytes, *target, *dpi, Some(password))
+        }
+        DesktopToolOptions::SplitPdf { ranges } => {
+            let bytes = std::fs::read(&job.input_path).map_err(to_refract_err)?;
+            let parts =
+                pdf::split_pdf_with_password(&bytes, ranges, Some(password), &CancelToken::none())?;
+            let parent = destination.resolve_parent(&job.input_path);
             let stem = job
                 .input_path
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("file");
 
-            let pages = render::render_pdf_to_images(&unlocked, 150, "png")?;
-            let mut first_written = parent.join(format!("{} p0001.png", stem));
-            for (idx, (page_num, page_bytes, ext)) in pages.into_iter().enumerate() {
-                let out_path = parent.join(format!("{} p{:04}.{}", stem, page_num, ext));
+            let mut last_path = parent.to_path_buf();
+            for (label, part_bytes) in parts {
+                let out_path = parent.join(format!("{}-{}.pdf", stem, label));
                 let unique = uniquify_path(&out_path);
-                std::fs::write(&unique, page_bytes).map_err(to_refract_err)?;
-                if idx == 0 {
-                    first_written = unique;
-                }
+                std::fs::write(&unique, part_bytes).map_err(to_refract_err)?;
+                last_path = unique;
             }
-            Ok(first_written)
+            Ok(last_path)
         }
-        _ => Err(refract_core::error::RefractError::new(
-            refract_core::error::ErrorCode::UnsupportedFormat,
+        DesktopToolOptions::ReorderPdf { order } => {
+            let bytes = std::fs::read(&job.input_path).map_err(to_refract_err)?;
+            let out_bytes = pdf::reorder_pdf_with_password(
+                &bytes,
+                order,
+                Some(password),
+                &CancelToken::none(),
+            )?;
+            let out_path = determine_output_path(job, destination, "reordered", "pdf");
+            std::fs::write(&out_path, out_bytes).map_err(to_refract_err)?;
+            Ok(out_path)
+        }
+        _ => Err(RefractError::new(
+            ErrorCode::UnsupportedFormat,
             "Password not needed for this tool",
         )),
     }
@@ -1471,7 +1509,14 @@ fn process_job_with_password(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pipeline::options::parse_format_strict;
     use std::path::PathBuf;
+
+    fn fixture_path(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures")
+            .join(name)
+    }
 
     #[test]
     fn test_format_size() {
@@ -1484,12 +1529,16 @@ mod tests {
     }
 
     #[test]
-    fn test_map_format_str() {
-        assert_eq!(map_format_str("mp3"), Format::Mp3);
-        assert_eq!(map_format_str("wav"), Format::Wav);
-        assert_eq!(map_format_str("webp"), Format::Webp);
-        assert_eq!(map_format_str("png"), Format::Png);
-        assert_eq!(map_format_str("jpg"), Format::Jpeg);
+    fn test_parse_format_strict() {
+        assert_eq!(parse_format_strict("mp3").unwrap(), Format::Mp3);
+        assert_eq!(parse_format_strict("wav").unwrap(), Format::Wav);
+        assert_eq!(parse_format_strict("webp").unwrap(), Format::Webp);
+        assert_eq!(parse_format_strict("png").unwrap(), Format::Png);
+        assert_eq!(parse_format_strict("jpg").unwrap(), Format::Jpeg);
+        assert_eq!(
+            parse_format_strict("unknown").unwrap_err().code,
+            ErrorCode::InvalidOption
+        );
     }
 
     #[test]
@@ -1511,19 +1560,588 @@ mod tests {
 
     #[test]
     fn test_determine_output_path() {
+        let req = JobRequest::new(
+            ToolId::ConvertImage,
+            DesktopToolOptions::ConvertImage {
+                target: Format::Png,
+                quality: 90,
+            },
+            OutputDestination::NextToSource,
+        )
+        .unwrap();
         let job = JobRecord {
             id: 1,
             input_path: PathBuf::from("/home/user/photo.jpg"),
             name: "photo.jpg".into(),
             size_bytes: 1000,
-            tool_id: "convert-image".into(),
             tool_label: "Convert image".into(),
+            request: req,
+            last_batch_member_ids: Vec::new(),
             status: JobStatus::Waiting,
             error: String::new(),
             output_path: PathBuf::new(),
             progress: 0.0,
         };
-        let path = determine_output_path(&job, true, None, "converted", "png");
+        let path = determine_output_path(&job, job.request.destination(), "converted", "png");
         assert_eq!(path.file_name().unwrap(), "photo converted.png");
+    }
+
+    #[test]
+    fn enqueue_captures_immutable_request_unaffected_by_later_ui_changes() {
+        let out_dir_a = tempfile::tempdir().unwrap();
+        let out_dir_b = tempfile::tempdir().unwrap();
+        let mut store = Vec::new();
+        let mut next_id = 1;
+
+        // Enqueue PNG->WebP into out_dir_a
+        let req_a = JobRequest::from_ui(
+            "convert-image",
+            &UiOptionInput {
+                combo_1: "webp",
+                int_1: 80,
+                ..Default::default()
+            },
+            false,
+            out_dir_a.path().to_str().unwrap(),
+        )
+        .unwrap();
+        enqueue_files(
+            &mut store,
+            &mut next_id,
+            vec![fixture_path("plain.png")],
+            &req_a,
+        );
+
+        // Simulate user changing UI to JPEG + out_dir_b and enqueuing another file
+        let req_b = JobRequest::from_ui(
+            "convert-image",
+            &UiOptionInput {
+                combo_1: "jpg",
+                int_1: 60,
+                ..Default::default()
+            },
+            false,
+            out_dir_b.path().to_str().unwrap(),
+        )
+        .unwrap();
+        enqueue_files(
+            &mut store,
+            &mut next_id,
+            vec![fixture_path("plain.png")],
+            &req_b,
+        );
+
+        // First job still retains its original WebP + out_dir_a snapshot
+        assert_eq!(store[0].request, req_a);
+        let out_a = process_job(&store[0]).unwrap();
+        assert_eq!(out_a.parent(), Some(out_dir_a.path()));
+        assert_eq!(
+            refract_core::detect(&std::fs::read(&out_a).unwrap()),
+            Some(Format::Webp)
+        );
+
+        let out_b = process_job(&store[1]).unwrap();
+        assert_eq!(out_b.parent(), Some(out_dir_b.path()));
+        assert_eq!(
+            refract_core::detect(&std::fs::read(&out_b).unwrap()),
+            Some(Format::Jpeg)
+        );
+    }
+
+    #[test]
+    fn mixed_tool_queue_preserves_and_executes_distinct_requests() {
+        let out_dir = tempfile::tempdir().unwrap();
+        let mut store = Vec::new();
+        let mut next_id = 1;
+
+        // 1. resize-image with cm + 300 DPI + explicit WebP target
+        let resize_req = JobRequest::from_ui(
+            "resize-image",
+            &UiOptionInput {
+                int_1: 2,
+                int_2: 0,
+                resize_unit: Some("cm"),
+                resize_dpi: Some(254.0), // 2 cm @ 254 DPI = 200 px -> 200x150
+                resize_target: Some("webp"),
+                ..Default::default()
+            },
+            false,
+            out_dir.path().to_str().unwrap(),
+        )
+        .unwrap();
+        enqueue_files(
+            &mut store,
+            &mut next_id,
+            vec![fixture_path("plain.png")],
+            &resize_req,
+        );
+
+        // 2. split-pdf with canonical empty ranges "" (splits every page of 3-page plain.pdf)
+        let split_req = JobRequest::from_ui(
+            "split-pdf",
+            &UiOptionInput {
+                string_1: "",
+                ..Default::default()
+            },
+            false,
+            out_dir.path().to_str().unwrap(),
+        )
+        .unwrap();
+        enqueue_files(
+            &mut store,
+            &mut next_id,
+            vec![fixture_path("plain.pdf")],
+            &split_req,
+        );
+
+        // 3. reorder-pdf with explicit order
+        let reorder_req = JobRequest::from_ui(
+            "reorder-pdf",
+            &UiOptionInput {
+                string_1: "3, 1, 2",
+                ..Default::default()
+            },
+            false,
+            out_dir.path().to_str().unwrap(),
+        )
+        .unwrap();
+        enqueue_files(
+            &mut store,
+            &mut next_id,
+            vec![fixture_path("plain.pdf")],
+            &reorder_req,
+        );
+
+        let planned = plan_execution_units(store, |j| &j.request);
+        assert_eq!(planned.len(), 3);
+
+        let PlannedUnit::Single(resize_job) = &planned[0] else {
+            panic!("expected single resize job");
+        };
+        let resized_path = process_job(resize_job).unwrap();
+        let resized_bytes = std::fs::read(&resized_path).unwrap();
+        assert_eq!(refract_core::detect(&resized_bytes), Some(Format::Webp));
+        assert_eq!(image::probe_dimensions(&resized_bytes).unwrap(), (200, 150));
+
+        let PlannedUnit::Single(split_job) = &planned[1] else {
+            panic!("expected single split job");
+        };
+        let last_split = process_job(split_job).unwrap();
+        assert!(last_split.exists());
+        assert!(out_dir.path().join("plain-p1.pdf").exists());
+        assert!(out_dir.path().join("plain-p2.pdf").exists());
+        assert!(out_dir.path().join("plain-p3.pdf").exists());
+
+        let PlannedUnit::Single(reorder_job) = &planned[2] else {
+            panic!("expected single reorder job");
+        };
+        let reordered_path = process_job(reorder_job).unwrap();
+        assert_eq!(
+            pdf::probe_pdf(&std::fs::read(&reordered_path).unwrap())
+                .unwrap()
+                .page_count,
+            3
+        );
+    }
+
+    #[test]
+    fn retry_uses_original_request_for_single_and_batch_jobs() {
+        let out_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(Vec::new()));
+        let mut next_id = 1;
+
+        // 1. Single failed convert-image job targeting WebP in out_dir
+        let req_single = JobRequest::new(
+            ToolId::ConvertImage,
+            DesktopToolOptions::ConvertImage {
+                target: Format::Webp,
+                quality: 85,
+            },
+            OutputDestination::Directory(out_dir.path().to_path_buf()),
+        )
+        .unwrap();
+        {
+            let mut guard = store.lock().unwrap();
+            enqueue_files(
+                &mut guard,
+                &mut next_id,
+                vec![fixture_path("plain.png")],
+                &req_single,
+            );
+            guard[0].status = JobStatus::Failed;
+            guard[0].error = "simulated transient failure".into();
+        }
+
+        execute_retry_in_store(&store, 1, None);
+        {
+            let guard = store.lock().unwrap();
+            assert_eq!(guard[0].status, JobStatus::Done);
+            assert_eq!(guard[0].output_path.parent(), Some(out_dir.path()));
+            assert_eq!(
+                refract_core::detect(&std::fs::read(&guard[0].output_path).unwrap()),
+                Some(Format::Webp)
+            );
+        }
+
+        // 2. Failed merge-pdf batch (2 compatible files) retries the full compatible batch
+        let req_merge = JobRequest::new(
+            ToolId::MergePdf,
+            DesktopToolOptions::MergePdf,
+            OutputDestination::Directory(out_dir.path().to_path_buf()),
+        )
+        .unwrap();
+        {
+            let mut guard = store.lock().unwrap();
+            enqueue_files(
+                &mut guard,
+                &mut next_id,
+                vec![fixture_path("plain.pdf"), fixture_path("5pages.pdf")],
+                &req_merge,
+            );
+            guard[1].status = JobStatus::Failed;
+            guard[2].status = JobStatus::Failed;
+            guard[1].last_batch_member_ids = vec![2, 3];
+            guard[2].last_batch_member_ids = vec![2, 3];
+        }
+
+        execute_retry_in_store(&store, 2, None);
+        {
+            let guard = store.lock().unwrap();
+            assert_eq!(guard[1].status, JobStatus::Done);
+            assert_eq!(guard[2].status, JobStatus::Done);
+            assert_eq!(guard[1].output_path, guard[2].output_path);
+            let merged_bytes = std::fs::read(&guard[1].output_path).unwrap();
+            assert_eq!(pdf::probe_pdf(&merged_bytes).unwrap().page_count, 8);
+        }
+
+        // 3. Failed images-to-pdf batch retries all compatible members with original DPI/quality
+        let req_imgs = JobRequest::new(
+            ToolId::ImagesToPdf,
+            DesktopToolOptions::ImagesToPdf {
+                dpi: 200.0,
+                quality: 92,
+            },
+            OutputDestination::Directory(out_dir.path().to_path_buf()),
+        )
+        .unwrap();
+        {
+            let mut guard = store.lock().unwrap();
+            enqueue_files(
+                &mut guard,
+                &mut next_id,
+                vec![fixture_path("plain.png"), fixture_path("plain.jpg")],
+                &req_imgs,
+            );
+            guard[3].status = JobStatus::Failed;
+            guard[4].status = JobStatus::Failed;
+            guard[3].last_batch_member_ids = vec![4, 5];
+            guard[4].last_batch_member_ids = vec![4, 5];
+        }
+
+        execute_retry_in_store(&store, 4, None);
+        {
+            let guard = store.lock().unwrap();
+            assert_eq!(guard[3].status, JobStatus::Done);
+            assert_eq!(guard[4].status, JobStatus::Done);
+            assert_eq!(guard[3].output_path, guard[4].output_path);
+            let pdf_bytes = std::fs::read(&guard[3].output_path).unwrap();
+            assert_eq!(pdf::probe_pdf(&pdf_bytes).unwrap().page_count, 2);
+        }
+    }
+
+    #[test]
+    fn password_unlock_preserves_original_request_for_compress_split_reorder_and_pdf_to_images() {
+        let out_dir = tempfile::tempdir().unwrap();
+        let locked_pdf = fixture_path("locked.pdf");
+
+        // 1. compress-pdf unlock honors custom output directory from original request
+        let compress_req = JobRequest::new(
+            ToolId::CompressPdf,
+            DesktopToolOptions::CompressPdf,
+            OutputDestination::Directory(out_dir.path().to_path_buf()),
+        )
+        .unwrap();
+        let mut store = Vec::new();
+        let mut next_id = 1;
+        enqueue_files(
+            &mut store,
+            &mut next_id,
+            vec![locked_pdf.clone()],
+            &compress_req,
+        );
+
+        assert_eq!(
+            process_job(&store[0]).unwrap_err().code,
+            ErrorCode::NeedsPassword
+        );
+        assert_eq!(
+            process_job_with_password(&store[0], "wrong-pw")
+                .unwrap_err()
+                .code,
+            ErrorCode::WrongPassword
+        );
+        let compressed_out = process_job_with_password(&store[0], "user-pw-123").unwrap();
+        assert_eq!(compressed_out.parent(), Some(out_dir.path()));
+        assert_eq!(
+            refract_core::detect(&std::fs::read(&compressed_out).unwrap()),
+            Some(Format::Pdf)
+        );
+
+        // 2. split-pdf unlock preserves requested ranges and destination
+        let split_req = JobRequest::new(
+            ToolId::SplitPdf,
+            DesktopToolOptions::SplitPdf {
+                ranges: "1-2, 3".into(),
+            },
+            OutputDestination::Directory(out_dir.path().to_path_buf()),
+        )
+        .unwrap();
+        enqueue_files(
+            &mut store,
+            &mut next_id,
+            vec![locked_pdf.clone()],
+            &split_req,
+        );
+        let split_out = process_job_with_password(&store[1], "user-pw-123").unwrap();
+        assert_eq!(split_out.parent(), Some(out_dir.path()));
+        assert!(out_dir.path().join("locked-p1-2.pdf").exists());
+        assert!(out_dir.path().join("locked-p3.pdf").exists());
+
+        // 3. reorder-pdf unlock preserves requested page order and destination
+        let reorder_req = JobRequest::new(
+            ToolId::ReorderPdf,
+            DesktopToolOptions::ReorderPdf {
+                order: "3, 1, 2".into(),
+            },
+            OutputDestination::Directory(out_dir.path().to_path_buf()),
+        )
+        .unwrap();
+        enqueue_files(
+            &mut store,
+            &mut next_id,
+            vec![locked_pdf.clone()],
+            &reorder_req,
+        );
+        let reorder_out = process_job_with_password(&store[2], "user-pw-123").unwrap();
+        assert_eq!(reorder_out.parent(), Some(out_dir.path()));
+        assert_eq!(
+            pdf::probe_pdf(&std::fs::read(&reorder_out).unwrap())
+                .unwrap()
+                .page_count,
+            3
+        );
+
+        // 4. pdf-to-images unlock preserves non-default target format (JPEG) and DPI (240)
+        //    rather than hardcoding 150 DPI / PNG; verify unlock + WrongPassword behavior even
+        //    on hosts without an external PDF rasterizer.
+        let render_req = JobRequest::new(
+            ToolId::PdfToImages,
+            DesktopToolOptions::PdfToImages {
+                target: Format::Jpeg,
+                dpi: 240,
+            },
+            OutputDestination::Directory(out_dir.path().to_path_buf()),
+        )
+        .unwrap();
+        enqueue_files(&mut store, &mut next_id, vec![locked_pdf], &render_req);
+        assert_eq!(
+            store[3].request.options(),
+            &DesktopToolOptions::PdfToImages {
+                target: Format::Jpeg,
+                dpi: 240,
+            }
+        );
+        assert_eq!(
+            process_job_with_password(&store[3], "wrong-pw")
+                .unwrap_err()
+                .code,
+            ErrorCode::WrongPassword
+        );
+        match process_job_with_password(&store[3], "user-pw-123") {
+            Ok(first_page) => {
+                assert_eq!(first_page.parent(), Some(out_dir.path()));
+                assert_eq!(first_page.extension().and_then(|e| e.to_str()), Some("jpg"));
+            }
+            Err(err) => {
+                // On hosts without a PDF rasterizer (`mutool`/`pdftoppm`/`pdftocairo`/`gs`),
+                // `locked.pdf` has no embedded raster images so MissingDependency is expected —
+                // never WrongPassword or NeedsPassword.
+                assert_eq!(err.code, ErrorCode::MissingDependency);
+            }
+        }
+    }
+
+    #[test]
+    fn batch_execution_rejects_incompatible_requests_and_separates_them_deterministically() {
+        let dir_a = tempfile::tempdir().unwrap();
+        let dir_b = tempfile::tempdir().unwrap();
+        let mut store = Vec::new();
+        let mut next_id = 1;
+
+        // Incompatible merge-pdf jobs (different destinations) must NOT be combined
+        let merge_a = JobRequest::new(
+            ToolId::MergePdf,
+            DesktopToolOptions::MergePdf,
+            OutputDestination::Directory(dir_a.path().to_path_buf()),
+        )
+        .unwrap();
+        let merge_b = JobRequest::new(
+            ToolId::MergePdf,
+            DesktopToolOptions::MergePdf,
+            OutputDestination::Directory(dir_b.path().to_path_buf()),
+        )
+        .unwrap();
+        enqueue_files(
+            &mut store,
+            &mut next_id,
+            vec![fixture_path("plain.pdf")],
+            &merge_a,
+        );
+        enqueue_files(
+            &mut store,
+            &mut next_id,
+            vec![fixture_path("5pages.pdf")],
+            &merge_b,
+        );
+
+        // Direct batch execution rejects mixed requests
+        assert_eq!(
+            execute_batch_merge_pdf(&store, &merge_a).unwrap_err().code,
+            ErrorCode::InvalidOption
+        );
+
+        // Planner separates them into 2 single-file merge units, each rejected cleanly (< 2 files)
+        let planned = plan_execution_units(store, |j| &j.request);
+        assert_eq!(planned.len(), 2);
+        for unit in planned {
+            let PlannedUnit::Batch { request, items, .. } = unit else {
+                panic!("expected batch unit");
+            };
+            assert_eq!(items.len(), 1);
+            assert_eq!(
+                execute_batch_merge_pdf(&items, &request).unwrap_err().code,
+                ErrorCode::InvalidOption
+            );
+        }
+
+        // Incompatible images-to-pdf jobs (different DPI / quality) execute separately into their own folders
+        let mut img_store = Vec::new();
+        let img_a = JobRequest::new(
+            ToolId::ImagesToPdf,
+            DesktopToolOptions::ImagesToPdf {
+                dpi: 150.0,
+                quality: 80,
+            },
+            OutputDestination::Directory(dir_a.path().to_path_buf()),
+        )
+        .unwrap();
+        let img_b = JobRequest::new(
+            ToolId::ImagesToPdf,
+            DesktopToolOptions::ImagesToPdf {
+                dpi: 300.0,
+                quality: 95,
+            },
+            OutputDestination::Directory(dir_b.path().to_path_buf()),
+        )
+        .unwrap();
+        enqueue_files(
+            &mut img_store,
+            &mut next_id,
+            vec![fixture_path("plain.png")],
+            &img_a,
+        );
+        enqueue_files(
+            &mut img_store,
+            &mut next_id,
+            vec![fixture_path("plain.jpg")],
+            &img_b,
+        );
+        enqueue_files(
+            &mut img_store,
+            &mut next_id,
+            vec![fixture_path("plain.webp")],
+            &img_a,
+        );
+
+        // Direct call rejects mixed batch
+        assert_eq!(
+            execute_batch_images_to_pdf(&img_store, &img_a)
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidOption
+        );
+
+        let img_units = plan_execution_units(img_store, |j| &j.request);
+        assert_eq!(img_units.len(), 2);
+        let PlannedUnit::Batch {
+            request: req0,
+            items: items0,
+            ..
+        } = &img_units[0]
+        else {
+            panic!("expected first batch");
+        };
+        assert_eq!(items0.len(), 2); // plain.png + plain.webp in original order
+        let pdf_a = execute_batch_images_to_pdf(items0, req0).unwrap();
+        assert_eq!(pdf_a.parent(), Some(dir_a.path()));
+        assert_eq!(
+            pdf::probe_pdf(&std::fs::read(&pdf_a).unwrap())
+                .unwrap()
+                .page_count,
+            2
+        );
+
+        let PlannedUnit::Batch {
+            request: req1,
+            items: items1,
+            ..
+        } = &img_units[1]
+        else {
+            panic!("expected second batch");
+        };
+        assert_eq!(items1.len(), 1); // plain.jpg alone at 300 DPI / q95
+        let pdf_b = execute_batch_images_to_pdf(items1, req1).unwrap();
+        assert_eq!(pdf_b.parent(), Some(dir_b.path()));
+        assert_eq!(
+            pdf::probe_pdf(&std::fs::read(&pdf_b).unwrap())
+                .unwrap()
+                .page_count,
+            1
+        );
+    }
+
+    #[test]
+    fn password_unlock_claim_prevents_concurrent_unlock_races() {
+        let store = Arc::new(Mutex::new(Vec::new()));
+        let is_busy = AtomicBool::new(false);
+        let req = JobRequest::new(
+            ToolId::CompressPdf,
+            DesktopToolOptions::CompressPdf,
+            OutputDestination::NextToSource,
+        )
+        .unwrap();
+        let mut next_id = 1;
+        {
+            let mut guard = store.lock().unwrap();
+            enqueue_files(
+                &mut guard,
+                &mut next_id,
+                vec![fixture_path("locked.pdf")],
+                &req,
+            );
+            guard[0].status = JobStatus::NeedsPassword;
+        }
+
+        // Unknown job releases busy flag cleanly
+        assert!(try_claim_password_unlock(&store, &is_busy, 999, None).is_none());
+        assert!(!is_busy.load(Ordering::SeqCst));
+
+        // First unlock claims busy flag and preserves immutable request
+        let claimed = try_claim_password_unlock(&store, &is_busy, 1, None).unwrap();
+        assert_eq!(claimed.request, req);
+        assert!(is_busy.load(Ordering::SeqCst));
+
+        // Second concurrent unlock attempt is rejected without racing
+        assert!(try_claim_password_unlock(&store, &is_busy, 1, None).is_none());
     }
 }
