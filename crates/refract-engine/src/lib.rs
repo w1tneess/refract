@@ -33,7 +33,8 @@ mod tests {
     #[test]
     fn test_image_convert_png_to_jpeg() {
         let plain_png = std::fs::read(fixture_path("plain.png")).expect("Read plain.png");
-        let jpg_bytes = image::convert_image(&plain_png, Format::Jpeg, Some(80)).expect("Convert to JPEG");
+        let jpg_bytes =
+            image::convert_image(&plain_png, Format::Jpeg, Some(80)).expect("Convert to JPEG");
         assert_eq!(&jpg_bytes[0..3], &[0xFF, 0xD8, 0xFF]);
         let (w, h) = image::probe_dimensions(&jpg_bytes).expect("Probe converted jpg");
         assert_eq!((w, h), (400, 300));
@@ -60,9 +61,16 @@ mod tests {
     fn test_image_rotated_jpeg_bakes_orientation() {
         let rotated_jpg = std::fs::read(fixture_path("rotated.jpg")).expect("Read rotated.jpg");
         // Displayed dimensions respect EXIF orientation 6 (400x300 stored -> 300x400 displayed)
-        assert_eq!(image::probe_dimensions(&rotated_jpg).expect("Probe rotated"), (300, 400));
-        let converted = image::convert_image(&rotated_jpg, Format::Png, None).expect("Convert rotated JPEG to PNG");
-        assert_eq!(image::probe_dimensions(&converted).expect("Probe converted PNG"), (300, 400));
+        assert_eq!(
+            image::probe_dimensions(&rotated_jpg).expect("Probe rotated"),
+            (300, 400)
+        );
+        let converted = image::convert_image(&rotated_jpg, Format::Png, None)
+            .expect("Convert rotated JPEG to PNG");
+        assert_eq!(
+            image::probe_dimensions(&converted).expect("Probe converted PNG"),
+            (300, 400)
+        );
     }
 
     #[test]
@@ -71,7 +79,10 @@ mod tests {
         let rgba = ::image::RgbaImage::from_pixel(32, 32, ::image::Rgba([255, 0, 0, 128]));
         let mut png_buf = Vec::new();
         ::image::DynamicImage::ImageRgba8(rgba)
-            .write_to(&mut std::io::Cursor::new(&mut png_buf), ::image::ImageFormat::Png)
+            .write_to(
+                &mut std::io::Cursor::new(&mut png_buf),
+                ::image::ImageFormat::Png,
+            )
             .expect("Write RGBA PNG");
         let jpg = image::convert_image(&png_buf, Format::Jpeg, Some(85)).expect("RGBA PNG -> JPEG");
         assert_eq!(refract_core::detect(&jpg), Some(Format::Jpeg));
