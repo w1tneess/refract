@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { TOOLS, type ToolId } from '@refract/core';
 import { POPULAR_PRESETS, type Preset } from './config/presets.ts';
+import { useFocusTrap } from './hooks/useFocusTrap.ts';
 
 type Item =
   | { type: 'tool'; id: ToolId; label: string; blurb: string; accepts: string }
@@ -25,7 +26,13 @@ export function CommandPalette({
 }) {
   const [query, setQuery] = useState('');
   const [activeIndex, setActiveIndex] = useState(0);
+  const dialogRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const resultsRef = useRef<HTMLDivElement>(null);
+  const baseId = useId();
+  const listboxId = `${baseId}-listbox`;
+
+  useFocusTrap(isOpen, dialogRef, inputRef);
 
   const allItems: Item[] = [
     ...POPULAR_PRESETS.map((p): Item => ({ type: 'preset', preset: p })),
@@ -63,13 +70,18 @@ export function CommandPalette({
     if (isOpen) {
       setQuery('');
       setActiveIndex(0);
-      setTimeout(() => inputRef.current?.focus(), 50);
     }
   }, [isOpen]);
 
   useEffect(() => {
     setActiveIndex(0);
   }, [query]);
+
+  useEffect(() => {
+    if (!isOpen || !resultsRef.current) return;
+    const selected = resultsRef.current.querySelector<HTMLElement>('.palette-item.is-selected');
+    selected?.scrollIntoView({ block: 'nearest' });
+  }, [activeIndex, isOpen]);
 
   const selectItem = (item: Item) => {
     if (item.type === 'tool') {
@@ -100,25 +112,29 @@ export function CommandPalette({
 
   if (!isOpen) return null;
 
+  const activeOptionId = filtered[activeIndex] ? `${baseId}-opt-${activeIndex}` : undefined;
+
   return (
     <div className="palette-backdrop" onClick={onClose} role="presentation">
       <div
+        ref={dialogRef}
         className="palette-dialog"
         role="dialog"
         aria-modal="true"
-        aria-label="Command Palette"
+        aria-label="Command palette"
+        tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
         onKeyDown={onKeyDown}
       >
         <div className="palette-search-wrap">
           <svg
             className="palette-search-icon"
-            width="18"
-            height="18"
+            width="17"
+            height="17"
             viewBox="0 0 24 24"
             fill="none"
             stroke="currentColor"
-            strokeWidth="1.5"
+            strokeWidth="1.6"
             strokeLinecap="round"
             strokeLinejoin="round"
             aria-hidden="true"
@@ -129,24 +145,47 @@ export function CommandPalette({
           <input
             ref={inputRef}
             type="text"
+            name="command-search"
+            role="combobox"
+            aria-label="Search tools and presets"
+            aria-expanded="true"
+            aria-autocomplete="list"
+            aria-controls={listboxId}
+            aria-activedescendant={activeOptionId}
+            autoComplete="off"
+            spellCheck={false}
             className="palette-input"
-            placeholder="Search tools"
+            placeholder="Search tools or presets, e.g. HEIC, merge…"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
           <kbd className="palette-kbd">Esc</kbd>
         </div>
 
-        <div className="palette-results" role="listbox">
+        <div ref={resultsRef} id={listboxId} className="palette-results" role="listbox" aria-label="Tools and presets">
           {filtered.length === 0 ? (
-            <div className="palette-empty">No tools or presets match &ldquo;{query}&rdquo;</div>
+            <div className="palette-empty" role="status">
+              <p>No tools or presets match “{query}”.</p>
+              <button
+                type="button"
+                className="button"
+                onClick={() => {
+                  setQuery('');
+                  inputRef.current?.focus();
+                }}
+              >
+                Clear search
+              </button>
+            </div>
           ) : (
             filtered.map((item, idx) => {
               const isSelected = idx === activeIndex;
+              const optionId = `${baseId}-opt-${idx}`;
               if (item.type === 'preset') {
                 return (
                   <div
                     key={`preset-${item.preset.id}`}
+                    id={optionId}
                     role="option"
                     aria-selected={isSelected}
                     className={`palette-item preset-item${isSelected ? ' is-selected' : ''}`}
@@ -166,6 +205,7 @@ export function CommandPalette({
               return (
                 <div
                   key={`tool-${item.id}`}
+                  id={optionId}
                   role="option"
                   aria-selected={isSelected}
                   className={`palette-item tool-item${isSelected ? ' is-selected' : ''}`}
@@ -185,9 +225,9 @@ export function CommandPalette({
         </div>
 
         <div className="palette-footer">
-          <span>Navigate with <kbd>↑</kbd> <kbd>↓</kbd></span>
-          <span>Select with <kbd>Enter</kbd></span>
-          <span>Close with <kbd>Esc</kbd></span>
+          <span>Navigate <kbd>↑</kbd> <kbd>↓</kbd></span>
+          <span>Select <kbd>Enter</kbd></span>
+          <span>Close <kbd>Esc</kbd></span>
         </div>
       </div>
     </div>

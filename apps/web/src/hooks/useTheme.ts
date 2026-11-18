@@ -1,6 +1,11 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 export type ThemeMode = 'system' | 'light' | 'dark';
+
+function syncThemeColor(isDark: boolean) {
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.setAttribute('content', isDark ? '#000000' : '#f5f5f7');
+}
 
 export function useTheme() {
   const [theme, setTheme] = useState<ThemeMode>(() => {
@@ -10,31 +15,48 @@ export function useTheme() {
       return 'system';
     }
   });
+  const isFirstRender = useRef(true);
 
   useEffect(() => {
     try {
       localStorage.setItem('refract.theme', theme);
     } catch {}
 
-    const apply = () => {
+    const apply = (suppressTransitions: boolean) => {
+      const root = document.documentElement;
       const isDark =
         theme === 'dark' ||
         (theme === 'system' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+
+      if (suppressTransitions) {
+        root.classList.add('theme-switching');
+      }
+
       if (isDark) {
-        document.documentElement.setAttribute('data-theme', 'dark');
-        document.documentElement.classList.add('dark');
+        root.setAttribute('data-theme', 'dark');
+        root.classList.add('dark');
       } else {
-        document.documentElement.setAttribute('data-theme', 'light');
-        document.documentElement.classList.remove('dark');
+        root.setAttribute('data-theme', 'light');
+        root.classList.remove('dark');
+      }
+      syncThemeColor(isDark);
+
+      if (suppressTransitions) {
+        void root.offsetHeight;
+        requestAnimationFrame(() => {
+          root.classList.remove('theme-switching');
+        });
       }
     };
 
-    apply();
+    apply(!isFirstRender.current);
+    isFirstRender.current = false;
 
     if (theme === 'system') {
       const media = window.matchMedia('(prefers-color-scheme: dark)');
-      media.addEventListener('change', apply);
-      return () => media.removeEventListener('change', apply);
+      const onMediaChange = () => apply(true);
+      media.addEventListener('change', onMediaChange);
+      return () => media.removeEventListener('change', onMediaChange);
     }
   }, [theme]);
 

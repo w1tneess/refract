@@ -1,12 +1,11 @@
 import { useId, useState } from 'react';
 import { TOOLS, type ToolId } from '@refract/core';
-import { DOMAINS } from '../config/domains.ts';
+import { ALL_TOOLS, DOMAINS } from '../config/domains.ts';
 import { POPULAR_PRESETS, type Preset } from '../config/presets.ts';
 import { TOOLS_METADATA } from '../config/toolPresentation.ts';
 import { DomainIcon } from '../components/layout/DomainIcon.tsx';
 
 interface HomePageProps {
-  defaultTool: ToolId;
   jobCount: number;
   onOpenQueue: () => void;
   onSelectTool: (tool: ToolId) => void;
@@ -32,7 +31,6 @@ function matchesTool(id: ToolId, query: string): boolean {
 }
 
 export function HomePage({
-  defaultTool,
   jobCount,
   onOpenQueue,
   onSelectTool,
@@ -61,10 +59,6 @@ export function HomePage({
 
   return (
     <div className="home-page">
-      <h1 id="tool-title" className="visually-hidden">
-        {TOOLS[defaultTool]?.label ?? 'Refract'}
-      </h1>
-
       {activePresetNotice && (
         <div className="notice-bar" role="status">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -82,9 +76,7 @@ export function HomePage({
       {jobCount > 0 && (
         <div className="queue-strip">
           <span className="queue-strip-dot" aria-hidden="true" />
-          <span>
-            {jobCount} {jobCount === 1 ? 'file is' : 'files are'} still in the queue.
-          </span>
+          <span>{jobCount === 1 ? '1 file in the queue.' : `${jobCount} files in the queue.`}</span>
           <button type="button" className="link queue-strip-link" onClick={onOpenQueue}>
             Return to queue
           </button>
@@ -93,7 +85,7 @@ export function HomePage({
 
       <header className="home-hero">
         <span className="home-eyebrow">Images · PDF · Audio</span>
-        <h2 className="home-title">Drop a file, get it done</h2>
+        <h1 className="home-title">Drop a file, get it done</h1>
         <p className="home-sub">
           Refract picks the right tool for what you drop, then converts it in your browser. No uploads, no accounts, no
           waiting on a server.
@@ -120,9 +112,9 @@ export function HomePage({
               <line x1="12" y1="3" x2="12" y2="15" />
             </svg>
           </span>
-          <span className="dropzone-title">Drop files here, or click to browse</span>
+          <span className="dropzone-title">Drop files here, or browse</span>
           <span className="dropzone-sub">
-            Images, PDF documents and audio · paste a screenshot with <kbd>Ctrl V</kbd>
+            Images, PDF documents, and audio · paste a screenshot with <kbd>Ctrl&nbsp;V</kbd>
           </span>
           <span className="dropzone-formats">HEIC · JPG · PNG · WebP · PDF · MP3 · WAV · M4A · OGG</span>
         </span>
@@ -152,7 +144,7 @@ export function HomePage({
           {POPULAR_PRESETS.map((preset) => (
             <button key={preset.id} type="button" className="preset-chip" onClick={() => onApplyPreset(preset)}>
               <span className="preset-chip-icon" aria-hidden="true">
-                <DomainIcon domain={preset.domain} size={15} />
+                <DomainIcon domain={preset.domain} size={16} />
               </span>
               <span className="preset-chip-body">
                 <strong>{preset.title}</strong>
@@ -168,7 +160,9 @@ export function HomePage({
           <h2 id="tools-heading" className="home-section-title">
             All tools
           </h2>
-          <span className="home-section-note">11 tools across three kinds of files</span>
+          <span className="home-section-note">
+            {ALL_TOOLS.length} tools across {DOMAINS.length} categories
+          </span>
         </div>
 
         <div className="home-search">
@@ -178,9 +172,12 @@ export function HomePage({
           </svg>
           <input
             type="search"
+            name="tool-search"
+            autoComplete="off"
+            spellCheck={false}
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search tools"
+            placeholder="Search tools, e.g. HEIC, merge, MP3…"
             className="home-search-input"
             aria-label="Filter tools"
           />
@@ -197,7 +194,7 @@ export function HomePage({
             <div className="domain-block" key={domain.id}>
               <div className="domain-head">
                 <span className="domain-head-icon" aria-hidden="true">
-                  <DomainIcon domain={domain.id} size={14} />
+                  <DomainIcon domain={domain.id} size={15} />
                 </span>
                 <h3>{domain.label}</h3>
                 <span className="domain-count">
@@ -222,12 +219,14 @@ export function HomePage({
         })}
 
         {!hasMatches && (
-          <p className="home-empty">
-            No tools match “{searchQuery}”. Try HEIC, PDF, merge, compress or trim.
-          </p>
+          <div className="home-empty" role="status">
+            <p>No tools match “{searchQuery}”. Try HEIC, PDF, merge, compress, or trim.</p>
+            <button type="button" className="button" onClick={() => setSearchQuery('')}>
+              Clear search
+            </button>
+          </div>
         )}
       </section>
     </div>
   );
 }
-

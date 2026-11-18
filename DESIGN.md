@@ -23,13 +23,15 @@ Refract uses an absolute **Graphite** neutral base with a singular, high-contras
 |---|---|---|
 | Page Canvas | `#f5f5f7` | Main backdrop |
 | Card Surface | `#ffffff` | Panel containers |
-| Raised Surface | `#f2f2f7` | Inputs, secondary buttons, controls |
-| Hairline | `#c6c6c8` | Dividers, input borders |
+| Raised Surface | `#f0f0f5` | Inputs, secondary buttons, controls |
+| Hairline | `#d2d2d7` | Dividers, panel borders |
+| Control Border | `#86868b` | Interactive input & button boundaries (≥ 3:1 WCAG 1.4.11) |
 | Text Primary | `#1d1d1f` | High legibility |
-| Text Secondary | `#86868b` | Labels, captions |
-| Text Muted | `#aeaeb2` | Metadata, icons |
-| **Accent (Apple Blue)** | `#0071e3` | Primary actions, selection indicators |
-| Accent Foreground | `#ffffff` | Text on blue |
+| Text Secondary | `#58585d` | Labels, captions (≥ 4.5:1 WCAG 1.4.3) |
+| Text Muted | `#66666b` | Metadata, icons (≥ 4.5:1 WCAG 1.4.3) |
+| **Accent (Apple Blue)** | `#0066cc` | Primary actions, selection indicators |
+| Accent Foreground | `#ffffff` | Text on solid blue |
+| Accent Ink | `#0055b3` | Text on `--accent-soft` tints (≥ 4.5:1) |
 
 ### Dark Mode
 
@@ -38,20 +40,22 @@ Refract uses an absolute **Graphite** neutral base with a singular, high-contras
 | Page Canvas | `#000000` | Main backdrop |
 | Card Surface | `#1c1c1e` | Panel containers |
 | Raised Surface | `#2c2c2e` | Inputs, secondary buttons, controls |
-| Hairline | `#38383a` | Dividers, input borders |
+| Hairline | `#38383a` | Dividers, panel borders |
+| Control Border | `#76767b` | Interactive input & button boundaries (≥ 3:1 WCAG 1.4.11) |
 | Text Primary | `#f5f5f7` | Off-white reading ink |
-| Text Secondary | `#86868b` | Secondary text |
-| Text Muted | `#6e6e73` | Metadata, icons |
+| Text Secondary | `#a1a1a6` | Secondary text (≥ 4.5:1 WCAG 1.4.3) |
+| Text Muted | `#98989d` | Metadata, icons (≥ 4.5:1 WCAG 1.4.3) |
 | **Accent (Apple Blue)** | `#0a84ff` | Primary actions, selection indicators |
-| Accent Foreground | `#000000` | Dark ink on light accent |
+| Accent Foreground | `#000000` | Dark ink on solid blue |
+| Accent Ink | `#70b8ff` | Text on `--accent-soft` tints (≥ 4.5:1) |
 
 ### Semantic Tokens
 
 | Token | Light | Dark | Usage |
 |---|---|---|---|
-| Success / Saved | `#32d74b` | `#32d74b` | Completed jobs, savings |
-| Error / Failed | `#ff453a` | `#ff453a` | Failed jobs, errors |
-| Warning / Notice | `#ffcc00` | `#ffcc00` | Amber — live job indicator |
+| Success / Saved | `#167231` | `#32d74b` | Completed jobs, savings |
+| Error / Failed | `#c92a2a` | `#ff6961` | Failed jobs, errors |
+| Warning / Notice | `#8a5300` | `#ffd60a` | Amber — notices & size increases |
 
 ---
 

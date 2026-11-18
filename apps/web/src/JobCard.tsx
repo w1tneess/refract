@@ -1,7 +1,8 @@
-import { useEffect, useId, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { describeError, FORMATS, isTerminal, TOOLS, type ToolId } from '@refract/core';
 import type { JobView } from './useJobs.ts';
 import { OpticalLoupeModal } from './OpticalLoupeModal.tsx';
+import { useFocusTrap } from './hooks/useFocusTrap.ts';
 
 export const size = (n?: number) => {
   if (n === undefined) return '—';
@@ -16,7 +17,7 @@ const STATE_LABEL: Record<JobView['state'], string> = {
   Running: 'Working',
   Verifying: 'Checking result',
   Saved: 'Done',
-  Rejected: "Can't do this",
+  Rejected: 'Can’t do this',
   Failed: 'Failed',
   Canceled: 'Canceled',
 };
@@ -56,6 +57,7 @@ function PasswordForm({ job, onAnswer }: { job: JobView; onAnswer: (pw: string |
   const [pw, setPw] = useState('');
   const [all, setAll] = useState(false);
   const [show, setShow] = useState(false);
+  const errId = job.password!.wrong ? `${id}-err` : undefined;
 
   return (
     <form
@@ -72,18 +74,24 @@ function PasswordForm({ job, onAnswer }: { job: JobView; onAnswer: (pw: string |
         </svg>
         <span>
           <strong>{job.password!.file}</strong> is password-protected
-          {job.password!.wrong ? ' · that password is wrong; try again' : ''}
+          {job.password!.wrong && (
+            <span id={errId} className="password-error-inline" role="alert">
+              {' '}· that password is wrong; check it and try again
+            </span>
+          )}
         </span>
       </label>
       <div className="password-input-row">
         <input
           id={`${id}-pw`}
+          name="pdf-password"
           type={show ? 'text' : 'password'}
           autoComplete="current-password"
           value={pw}
-          placeholder="Password"
+          placeholder="Enter PDF password…"
           onChange={(e) => setPw(e.target.value)}
           aria-invalid={job.password!.wrong || undefined}
+          aria-describedby={errId}
         />
         <button type="button" className="button subtle-btn" onClick={() => setShow(!show)} aria-label={show ? 'Hide password' : 'Show password'}>
           {show ? 'Hide' : 'Show'}
@@ -122,6 +130,10 @@ export function JobCard({
 }) {
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [loupeOpen, setLoupeOpen] = useState(false);
+  const lightboxRef = useRef<HTMLDivElement>(null);
+  const lightboxCloseRef = useRef<HTMLButtonElement>(null);
+
+  useFocusTrap(lightboxOpen, lightboxRef, lightboxCloseRef);
 
   useEffect(() => {
     if (!lightboxOpen) return;
@@ -195,7 +207,7 @@ export function JobCard({
           {sizeDeltaBadge}
         </span>
         {job.state === 'Saved' && (
-          <span className="job-out">
+          <span className="job-out" title={job.outputName}>
             {job.outputName}
             {job.multi ? ` · ${job.outputs?.length} files` : ''}
           </span>
@@ -204,14 +216,19 @@ export function JobCard({
 
       {isImageOut && (
         <div className="job-preview-row">
-          <button type="button" className="job-thumb-btn" onClick={() => setLightboxOpen(true)} title="Click to preview full-size image">
-            <img src={job.url} alt={`Output thumbnail for ${job.outputName}`} className="job-thumb-img" />
-            <span className="job-thumb-overlay">Preview</span>
+          <button
+            type="button"
+            className="job-thumb-btn"
+            onClick={() => setLightboxOpen(true)}
+            aria-label={`Preview ${job.outputName}`}
+          >
+            <img src={job.url} alt="" width={96} height={64} className="job-thumb-img" />
+            <span className="job-thumb-overlay" aria-hidden="true">Preview</span>
           </button>
 
           {job.originalUrl && (
             <button type="button" className="job-loupe-btn" onClick={() => setLoupeOpen(true)} title="Compare before and after">
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                 <circle cx="12" cy="12" r="3" />
                 <path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7z" />
               </svg>
@@ -234,15 +251,23 @@ export function JobCard({
       {lightboxOpen && job.url && (
         <div className="lightbox-backdrop" onClick={() => setLightboxOpen(false)} role="presentation">
           <div
+            ref={lightboxRef}
             className="lightbox-modal"
             role="dialog"
             aria-modal="true"
             aria-label={`Image preview: ${job.outputName}`}
+            tabIndex={-1}
             onClick={(e) => e.stopPropagation()}
           >
             <div className="lightbox-header">
               <span className="lightbox-title">{job.outputName}</span>
-              <button type="button" className="job-dismiss-btn" onClick={() => setLightboxOpen(false)} aria-label="Close image preview">
+              <button
+                ref={lightboxCloseRef}
+                type="button"
+                className="job-dismiss-btn"
+                onClick={() => setLightboxOpen(false)}
+                aria-label="Close image preview"
+              >
                 ×
               </button>
             </div>
@@ -256,7 +281,7 @@ export function JobCard({
       {job.state === 'NeedsPassword' && job.password && <PasswordForm job={job} onAnswer={onPassword} />}
 
       {job.error && (
-        <div className="job-error">
+        <div className="job-error" role="alert">
           <p>{describeError(job.inputNames.length > 1 ? 'these files' : job.inputName, job.error)}</p>
           <details>
             <summary>Details</summary>
@@ -285,33 +310,38 @@ export function JobCard({
             <button type="button" className="button" onClick={() => onUseInTool(compatibleTools[0]!, job)}>
               Use in another tool
             </button>
-            <select
-              aria-label="Choose another tool"
-              defaultValue=""
-              onChange={(e) => {
-                if (e.target.value) onUseInTool(e.target.value as ToolId, job);
-                e.target.value = '';
-              }}
-            >
-              <option value="" disabled>
-                Choose tool…
-              </option>
-              {compatibleTools.map((id) => (
-                <option key={id} value={id}>
-                  {TOOLS[id].label}
+            <div className="select-wrap use-in-tool-select">
+              <select
+                aria-label="Choose another tool"
+                defaultValue=""
+                onChange={(e) => {
+                  if (e.target.value) onUseInTool(e.target.value as ToolId, job);
+                  e.target.value = '';
+                }}
+              >
+                <option value="" disabled>
+                  Choose tool…
                 </option>
-              ))}
-            </select>
+                {compatibleTools.map((id) => (
+                  <option key={id} value={id}>
+                    {TOOLS[id].label}
+                  </option>
+                ))}
+              </select>
+              <svg className="select-chevron" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <polyline points="6 9 12 15 18 9" />
+              </svg>
+            </div>
           </div>
         )}
         {job.url && (
-          <a className="button primary download-btn" href={job.url} download={job.outputName}>
+          <a className="button primary download-btn" href={job.url} download={job.outputName} title={`Download ${job.outputName}`}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
               <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
               <polyline points="7 10 12 15 17 10" />
               <line x1="12" y1="15" x2="12" y2="3" />
             </svg>
-            Download {job.outputName}
+            <span className="download-btn-label">Download {job.outputName}</span>
           </a>
         )}
       </div>

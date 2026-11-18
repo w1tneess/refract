@@ -59,6 +59,10 @@ export function App() {
   const t = TOOLS[tool];
   const runningCount = jobs.filter((j) => j.state === 'Running' || j.state === 'Probing' || j.state === 'Verifying').length;
 
+  useEffect(() => {
+    document.title = isHome ? 'Refract — Local-First File Converter' : `${TOOLS[tool].label} — Refract`;
+  }, [isHome, tool]);
+
   const setHashProgrammatically = (hash: string) => {
     if (location.hash !== hash) {
       skipNextHash.current = hash;
@@ -270,6 +274,10 @@ export function App() {
 
   return (
     <div className="app-shell">
+      <a href="#main-content" className="skip-link">
+        Skip to main content
+      </a>
+
       {isDraggingViewport && (
         <div className="drag-overlay" aria-hidden="true">
           <div className="drag-overlay-box">
@@ -303,12 +311,12 @@ export function App() {
           onOpenSearch={() => setPaletteOpen(true)}
           onOpenShortcuts={() => setShortcutsOpen(true)}
           onSelectHome={selectHome}
+          onSelectTool={selectTool}
         />
 
-        <main className="shell">
+        <main id="main-content" className="shell" tabIndex={-1}>
           {isHome ? (
             <HomePage
-              defaultTool={tool}
               jobCount={jobs.length}
               onOpenQueue={() => selectTool(jobs[jobs.length - 1]?.tool ?? tool)}
               onSelectTool={selectTool}
@@ -360,7 +368,7 @@ export function App() {
             />
           )}
 
-          <div role="status" aria-live="polite" className="toast">
+          <div role="status" aria-live="polite" aria-atomic="true" className="toast">
             {toast}
           </div>
         </main>

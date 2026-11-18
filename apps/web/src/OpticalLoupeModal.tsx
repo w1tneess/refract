@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState, type PointerEvent } from 'react';
+import { useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent } from 'react';
 import type { JobView } from './useJobs.ts';
 import { size } from './JobCard.tsx';
+import { useFocusTrap } from './hooks/useFocusTrap.ts';
 
 interface OpticalLoupeModalProps {
   job: JobView;
@@ -8,9 +9,12 @@ interface OpticalLoupeModalProps {
 }
 
 export function OpticalLoupeModal({ job, onClose }: OpticalLoupeModalProps) {
-  const [sliderPos, setSliderPos] = useState(50); // percentage 0 - 100 for zoom origin
+  const [sliderPos, setSliderPos] = useState(50);
   const [zoom, setZoom] = useState<1 | 2 | 4>(1);
+  const titleId = useId();
 
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const closeRef = useRef<HTMLButtonElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const zoomCanvasRef = useRef<HTMLDivElement>(null);
   const clipLayerRef = useRef<HTMLDivElement>(null);
@@ -20,6 +24,8 @@ export function OpticalLoupeModal({ job, onClose }: OpticalLoupeModalProps) {
   const isDraggingRef = useRef(false);
   const currentPctRef = useRef(50);
   const rafIdRef = useRef<number | null>(null);
+
+  useFocusTrap(true, dialogRef, closeRef);
 
   const applyPosition = (pct: number) => {
     const clamped = Math.max(0, Math.min(100, pct));
@@ -33,7 +39,7 @@ export function OpticalLoupeModal({ job, onClose }: OpticalLoupeModalProps) {
         zoomCanvasRef.current.style.transformOrigin = `${p}% 50%`;
       }
       if (clipLayerRef.current) {
-        clipLayerRef.current.style.clipPath = `polygon(0 0, ${p}% 0, ${p}% 100%, 0 100%)`;
+        clipLayerRef.current.style.clipPath = `inset(0 ${100 - p}% 0 0)`;
       }
       if (dividerRef.current) {
         dividerRef.current.style.left = `${p}%`;
@@ -44,28 +50,16 @@ export function OpticalLoupeModal({ job, onClose }: OpticalLoupeModalProps) {
     });
   };
 
-  // Close on Escape key; allow ArrowLeft / ArrowRight to scrub the divider
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         onClose();
-      } else if (e.key === 'ArrowLeft') {
-        e.preventDefault();
-        const next = Math.max(0, Math.round(currentPctRef.current) - 5);
-        applyPosition(next);
-        setSliderPos(next);
-      } else if (e.key === 'ArrowRight') {
-        e.preventDefault();
-        const next = Math.min(100, Math.round(currentPctRef.current) + 5);
-        applyPosition(next);
-        setSliderPos(next);
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [onClose]);
 
-  // Cleanup pending RAF on unmount
   useEffect(() => {
     return () => {
       if (rafIdRef.current !== null) {
@@ -74,8 +68,22 @@ export function OpticalLoupeModal({ job, onClose }: OpticalLoupeModalProps) {
     };
   }, []);
 
+  const handleSliderKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+    let next: number | null = null;
+    if (e.key === 'ArrowLeft') next = Math.max(0, Math.round(currentPctRef.current) - 5);
+    else if (e.key === 'ArrowRight') next = Math.min(100, Math.round(currentPctRef.current) + 5);
+    else if (e.key === 'Home') next = 0;
+    else if (e.key === 'End') next = 100;
+
+    if (next !== null) {
+      e.preventDefault();
+      applyPosition(next);
+      setSliderPos(next);
+    }
+  };
+
   const handlePointerDown = (e: PointerEvent<HTMLDivElement>) => {
-    if (!containerRef.current) return;
+    if (!containerRef.current || isDraggingRef.current) return;
     isDraggingRef.current = true;
     e.currentTarget.setPointerCapture(e.pointerId);
 
@@ -112,21 +120,22 @@ export function OpticalLoupeModal({ job, onClose }: OpticalLoupeModalProps) {
       : null;
 
   return (
-    <div
-      className="loupe-backdrop"
-      onClick={onClose}
-      role="dialog"
-      aria-modal="true"
-      aria-label="Before and after optical loupe"
-    >
-      <div className="loupe-modal" onClick={(e) => e.stopPropagation()}>
-        {/* Header bar */}
+    <div className="loupe-backdrop" onClick={onClose} role="presentation">
+      <div
+        ref={dialogRef}
+        className="loupe-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="loupe-header">
           <div className="loupe-title-wrap">
-            <span className="loupe-badge">Optical loupe</span>
-            <h3 className="loupe-title">
+            <span className="loupe-badge">Compare</span>
+            <h2 id={titleId} className="loupe-title">
               {job.inputName} <span className="loupe-arrow" aria-hidden="true">→</span> {job.outputName}
-            </h3>
+            </h2>
           </div>
 
           <div className="loupe-controls">
@@ -135,19 +144,21 @@ export function OpticalLoupeModal({ job, onClose }: OpticalLoupeModalProps) {
                 <button
                   key={z}
                   type="button"
+                  aria-pressed={zoom === z}
                   className={`loupe-zoom-btn${zoom === z ? ' is-active' : ''}`}
                   onClick={() => setZoom(z)}
                 >
-                  {z}x
+                  {z}×
                 </button>
               ))}
             </div>
 
             <button
+              ref={closeRef}
               type="button"
               className="loupe-close-btn"
               onClick={onClose}
-              aria-label="Close optical loupe"
+              aria-label="Close comparison"
               title="Close (Esc)"
             >
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -158,7 +169,6 @@ export function OpticalLoupeModal({ job, onClose }: OpticalLoupeModalProps) {
           </div>
         </div>
 
-        {/* Comparison Stage */}
         <div
           ref={containerRef}
           className="loupe-stage"
@@ -168,7 +178,6 @@ export function OpticalLoupeModal({ job, onClose }: OpticalLoupeModalProps) {
           onPointerCancel={handlePointerUp}
           style={{ touchAction: 'none' }}
         >
-          {/* Zoom Wrapper (Hardware-accelerated scale transform) */}
           <div
             ref={zoomCanvasRef}
             className="loupe-zoom-canvas"
@@ -177,7 +186,6 @@ export function OpticalLoupeModal({ job, onClose }: OpticalLoupeModalProps) {
               transformOrigin: `${sliderPos}% 50%`,
             }}
           >
-            {/* Output image (base layer) */}
             {outputSrc && (
               <img
                 src={outputSrc}
@@ -187,12 +195,11 @@ export function OpticalLoupeModal({ job, onClose }: OpticalLoupeModalProps) {
               />
             )}
 
-            {/* Original image (clipped top layer with direct DOM update) */}
             {originalSrc && (
               <div
                 ref={clipLayerRef}
                 className="loupe-clip-layer"
-                style={{ clipPath: `polygon(0 0, ${sliderPos}% 0, ${sliderPos}% 100%, 0 100%)` }}
+                style={{ clipPath: `inset(0 ${100 - sliderPos}% 0 0)` }}
               >
                 <img
                   src={originalSrc}
@@ -204,20 +211,28 @@ export function OpticalLoupeModal({ job, onClose }: OpticalLoupeModalProps) {
             )}
           </div>
 
-          {/* Scrubber Divider Line (Hardware-accelerated) */}
           <div
             ref={dividerRef}
             className="loupe-divider"
             style={{ left: `${sliderPos}%` }}
           >
-            <div className="loupe-handle" aria-hidden="true">
-              <span className="loupe-handle-arrow">‹</span>
-              <span className="loupe-handle-diamond">◈</span>
-              <span className="loupe-handle-arrow">›</span>
+            <div
+              className="loupe-handle"
+              role="slider"
+              tabIndex={0}
+              aria-label="Before and after split position"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={sliderPos}
+              aria-valuetext={`${sliderPos}% original, ${100 - sliderPos}% converted`}
+              onKeyDown={handleSliderKeyDown}
+            >
+              <span className="loupe-handle-arrow" aria-hidden="true">‹</span>
+              <span className="loupe-handle-diamond" aria-hidden="true">◈</span>
+              <span className="loupe-handle-arrow" aria-hidden="true">›</span>
             </div>
           </div>
 
-          {/* Floating Pill Labels */}
           <div className="loupe-pill loupe-pill-left">
             <span className="loupe-pill-tag">Before</span>
             <span className="loupe-pill-size">{size(job.inputSize)}</span>
@@ -234,10 +249,9 @@ export function OpticalLoupeModal({ job, onClose }: OpticalLoupeModalProps) {
           </div>
         </div>
 
-        {/* Footer Info */}
         <div className="loupe-footer">
           <span className="loupe-hint">
-            Drag divider horizontally to inspect compression artifacts and high-frequency edge detail
+            Drag divider or use arrow keys to compare detail
           </span>
           <span ref={posTextRef} className="loupe-pos-indicator">
             {sliderPos}% split

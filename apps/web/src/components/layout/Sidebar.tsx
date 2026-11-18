@@ -30,8 +30,8 @@ export function Sidebar({ currentTool, isHome, jobCount, onSelectTool, onSelectH
             </svg>
           </span>
           <span className="brand-text">
-            <span className="brand-name">refract</span>
-            <span className="brand-tag">local file tools</span>
+            <span className="brand-name" translate="no">refract</span>
+            <span className="brand-tag">Local file tools</span>
           </span>
         </a>
 

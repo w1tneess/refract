@@ -83,8 +83,6 @@ export function ToolWorkspacePage({
   activePresetNotice,
   onDismissNotice,
   onApplyPreset,
-  onSelectTool,
-  onNavigateHome,
 }: ToolWorkspacePageProps) {
   const [isDropOver, setIsDropOver] = useState(false);
   const [sampleLoading, setSampleLoading] = useState(false);
@@ -135,24 +133,6 @@ export function ToolWorkspacePage({
 
   return (
     <div className="workspace-page">
-      <nav aria-label="Breadcrumb" className="workspace-breadcrumb">
-        <a
-          href="#home"
-          onClick={(e) => {
-            e.preventDefault();
-            onNavigateHome();
-          }}
-        >
-          All tools
-        </a>
-        <span aria-hidden="true">/</span>
-        <button type="button" className="breadcrumb-domain" onClick={() => onSelectTool(domain.tools[0]!)}>
-          {domain.shortLabel}
-        </button>
-        <span aria-hidden="true">/</span>
-        <span aria-current="page">{t.label}</span>
-      </nav>
-
       <header className="workspace-head">
         <div className="workspace-title-row">
           <span className="workspace-domain">
@@ -169,7 +149,7 @@ export function ToolWorkspacePage({
           <span className="meta-chip">Accepts {meta?.inputFormats.join(', ') ?? t.accepts}</span>
           <span className="meta-chip">{t.inputs === 'many' ? 'Files combine into one job' : 'One file per job'}</span>
           <span className="meta-chip meta-chip-quiet">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
               <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
               <path d="M7 11V7a5 5 0 0 1 10 0v4" />
             </svg>
@@ -195,8 +175,7 @@ export function ToolWorkspacePage({
       <div className="workspace-grid">
         <div className="workspace-main">
           <section className={`panel drop-panel${jobs.length ? ' is-compact' : ''}`} aria-labelledby="drop-heading">
-            <label
-              htmlFor={inputId}
+            <div
               className={`dropzone workspace-dropzone${isDropOver ? ' over' : ''}`}
               data-testid="dropzone"
               onDragOver={(e) => {
@@ -207,7 +186,7 @@ export function ToolWorkspacePage({
               onDragLeave={() => setIsDropOver(false)}
               onDrop={handleDrop}
             >
-              <span className="dropzone-inner">
+              <label htmlFor={inputId} className="dropzone-trigger">
                 <span className="dropzone-icon" aria-hidden="true">
                   <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
@@ -220,7 +199,7 @@ export function ToolWorkspacePage({
                     {jobs.length ? `Add more ${KIND_PLURAL[t.accepts]}` : `Drop ${KIND_PLURAL[t.accepts]} here`}
                   </strong>
                   <span className="dropzone-sub">
-                    or click to browse · paste with <kbd>Ctrl V</kbd>
+                    or browse · paste with <kbd>Ctrl&nbsp;V</kbd>
                   </span>
                 </span>
                 {!jobs.length && (
@@ -232,35 +211,32 @@ export function ToolWorkspacePage({
                     ))}
                   </span>
                 )}
-                <span className="dropzone-sample">
-                  <button
-                    type="button"
-                    className="link"
-                    disabled={sampleLoading}
-                    onClick={(e) => {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      void handleLoadSample();
-                    }}
-                  >
-                    {sampleLoading ? 'Preparing sample…' : 'Try a sample file'}
-                  </button>
-                </span>
-              </span>
-              <input
-                id={inputId}
-                className="visually-hidden"
-                type="file"
-                multiple
-                accept={ACCEPT[t.accepts]}
-                onChange={(e) => {
-                  if (e.target.files?.length) {
-                    onAddFiles([...e.target.files]);
-                    e.target.value = '';
-                  }
-                }}
-              />
-            </label>
+                <input
+                  id={inputId}
+                  className="visually-hidden"
+                  type="file"
+                  multiple
+                  accept={ACCEPT[t.accepts]}
+                  onChange={(e) => {
+                    if (e.target.files?.length) {
+                      onAddFiles([...e.target.files]);
+                      e.target.value = '';
+                    }
+                  }}
+                />
+              </label>
+
+              <div className="dropzone-sample">
+                <button
+                  type="button"
+                  className="link"
+                  disabled={sampleLoading}
+                  onClick={() => void handleLoadSample()}
+                >
+                  {sampleLoading ? 'Preparing sample…' : 'Try a sample file'}
+                </button>
+              </div>
+            </div>
           </section>
 
           {jobs.length > 0 && (
@@ -379,16 +355,17 @@ export function ToolWorkspacePage({
                 )
               ) : savedCount === 1 && savedJobs[0]?.url ? (
                 <a
-                  className="button primary export-button"
+                  className="button export-button"
                   href={savedJobs[0].url}
                   download={savedJobs[0].outputName}
+                  title={`Download ${savedJobs[0].outputName}`}
                 >
                   <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                     <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
                     <polyline points="7 10 12 15 17 10" />
                     <line x1="12" y1="15" x2="12" y2="3" />
                   </svg>
-                  Download {savedJobs[0].outputName}
+                  <span className="export-button-label">Download {savedJobs[0].outputName}</span>
                 </a>
               ) : (
                 <p className="export-empty">

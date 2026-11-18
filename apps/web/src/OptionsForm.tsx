@@ -25,7 +25,7 @@ export function OptionsForm({
       <legend className="visually-hidden">Settings</legend>
 
       <div className="options-header">
-        <span className="options-hint">Changes apply to new files</span>
+        <span className="options-hint">Applies to new files</span>
         <button type="button" className="link reset-btn" onClick={onReset} title="Restore default settings">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
             <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
@@ -44,7 +44,7 @@ export function OptionsForm({
             return (
               <div className="option" key={spec.key}>
                 <label htmlFor={fieldId} className="option-label">
-                  {spec.label}
+                  <span>{spec.label}</span>
                   {spec.type === 'number' && spec.unit && <span className="option-unit">{spec.unit}</span>}
                 </label>
                 <div className="option-control">
@@ -52,6 +52,7 @@ export function OptionsForm({
                     <div className="select-wrap">
                       <select
                         id={fieldId}
+                        name={spec.key}
                         value={String(values[spec.key])}
                         aria-describedby={helpId}
                         onChange={(e) => set(spec.key, e.target.value)}
@@ -69,7 +70,10 @@ export function OptionsForm({
                   ) : spec.type === 'number' ? (
                     <input
                       id={fieldId}
+                      name={spec.key}
                       type="number"
+                      inputMode={spec.step && spec.step < 1 ? 'decimal' : 'numeric'}
+                      autoComplete="off"
                       min={spec.min}
                       max={spec.max}
                       step={spec.step ?? 1}
@@ -80,7 +84,10 @@ export function OptionsForm({
                   ) : (
                     <input
                       id={fieldId}
+                      name={spec.key}
                       type="text"
+                      autoComplete="off"
+                      spellCheck={false}
                       value={String(values[spec.key])}
                       placeholder={spec.placeholder}
                       aria-describedby={helpId}

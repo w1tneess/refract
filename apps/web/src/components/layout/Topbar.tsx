@@ -12,6 +12,7 @@ interface TopbarProps {
   onOpenSearch: () => void;
   onOpenShortcuts: () => void;
   onSelectHome: () => void;
+  onSelectTool: (tool: ToolId) => void;
 }
 
 function ThemeIcon({ theme }: { theme: ThemeMode }) {
@@ -56,34 +57,50 @@ export function Topbar({
   onOpenSearch,
   onOpenShortcuts,
   onSelectHome,
+  onSelectTool,
 }: TopbarProps) {
   const domain = domainOfTool(tool);
 
   return (
     <header className="topbar">
       <div className="topbar-inner">
-        <div className="topbar-left">
-          <button type="button" className="topbar-home-btn" onClick={onSelectHome} aria-label="All tools" title="All tools">
+        <nav className="topbar-left" aria-label="Breadcrumb">
+          <a
+            href="#home"
+            className="topbar-home-btn"
+            onClick={(e) => {
+              e.preventDefault();
+              onSelectHome();
+            }}
+            aria-label="All tools"
+            title="All tools"
+          >
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
               <path d="M3 10.5 12 3l9 7.5" />
               <path d="M5 9.5V21h14V9.5" />
             </svg>
-          </button>
+          </a>
           <span className="topbar-sep" aria-hidden="true">/</span>
           {isHome ? (
-            <span className="topbar-title">All tools</span>
+            <span className="topbar-title" aria-current="page">All tools</span>
           ) : (
             <>
-              <span className="topbar-domain">{domain.shortLabel}</span>
+              <button
+                type="button"
+                className="topbar-domain"
+                onClick={() => onSelectTool(domain.tools[0]!)}
+              >
+                {domain.shortLabel}
+              </button>
               <span className="topbar-sep" aria-hidden="true">/</span>
-              <span className="topbar-title">{TOOLS[tool].label}</span>
+              <span className="topbar-title" aria-current="page">{TOOLS[tool].label}</span>
             </>
           )}
-        </div>
+        </nav>
 
         <div className="topbar-right">
           {jobCount > 0 && (
-            <span className="topbar-jobs" title={`${jobCount} files in the queue`}>
+            <span className="topbar-jobs" title={`${jobCount} ${jobCount === 1 ? 'file' : 'files'} in the queue`}>
               <span className={`topbar-jobs-dot${runningCount > 0 ? ' is-busy' : ''}`} aria-hidden="true" />
               {runningCount > 0 ? `${runningCount} running` : `${jobCount} in queue`}
             </span>
@@ -101,7 +118,7 @@ export function Topbar({
               <line x1="20.5" y1="20.5" x2="16.2" y2="16.2" />
             </svg>
             <span className="topbar-search-text">Search</span>
-            <kbd>Ctrl K</kbd>
+            <kbd>Ctrl&nbsp;K</kbd>
           </button>
 
           <button type="button" className="icon-btn" onClick={onOpenShortcuts} aria-label="Keyboard shortcuts" title="Keyboard shortcuts (?)">
@@ -116,7 +133,7 @@ export function Topbar({
             type="button"
             className="icon-btn"
             onClick={onToggleTheme}
-            aria-label={`Theme: ${theme}. Click to change.`}
+            aria-label={`Switch theme (current: ${theme})`}
             title={`Theme: ${theme}`}
           >
             <ThemeIcon theme={theme} />
