@@ -2,12 +2,14 @@ pub mod audio;
 pub mod image;
 pub mod native;
 pub mod pdf;
+pub mod process;
 pub mod render;
 
 pub use audio::*;
 pub use image::*;
 pub use native::*;
 pub use pdf::*;
+pub use process::*;
 pub use render::*;
 
 #[cfg(test)]
