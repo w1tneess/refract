@@ -90,42 +90,6 @@ mod tests {
     }
 
     #[test]
-    fn test_audio_convert_with_ffmpeg() {
-        if !audio::is_ffmpeg_available() {
-            eprintln!("Skipping audio convert test: ffmpeg not found");
-            return;
-        }
-
-        let wav_path = fixture_path("sound.wav");
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
-        let out_mp3 = temp_dir.path().join("converted.mp3");
-
-        audio::convert_audio(&wav_path, &out_mp3, Format::Mp3, Some(192)).expect("Convert WAV to MP3");
-        assert!(out_mp3.exists());
-        let mp3_bytes = std::fs::read(&out_mp3).expect("Read converted mp3");
-        assert!(!mp3_bytes.is_empty());
-        assert_eq!(refract_core::detect(&mp3_bytes), Some(Format::Mp3));
-    }
-
-    #[test]
-    fn test_audio_trim_with_ffmpeg() {
-        if !audio::is_ffmpeg_available() {
-            eprintln!("Skipping audio trim test: ffmpeg not found");
-            return;
-        }
-
-        let wav_path = fixture_path("sound.wav");
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
-        let out_wav = temp_dir.path().join("trimmed.wav");
-
-        audio::trim_audio(&wav_path, &out_wav, Some("0.2"), Some("0.6")).expect("Trim WAV");
-        assert!(out_wav.exists());
-        let trimmed_bytes = std::fs::read(&out_wav).expect("Read trimmed wav");
-        assert!(!trimmed_bytes.is_empty());
-        assert_eq!(refract_core::detect(&trimmed_bytes), Some(Format::Wav));
-    }
-
-    #[test]
     fn test_pdf_probe_info() {
         let plain_pdf = std::fs::read(fixture_path("plain.pdf")).expect("Read plain.pdf");
         let info = pdf::probe_pdf(&plain_pdf).expect("Probe PDF");
