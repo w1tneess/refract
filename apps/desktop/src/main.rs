@@ -3,8 +3,8 @@ slint::include_modules!();
 mod pipeline;
 
 use pipeline::{
-    plan_execution_units, select_batch_retry_indices, DesktopToolOptions, JobRequest,
-    OutputDestination, PlannedUnit, TrimEnd, UiOptionInput,
+    plan_execution_units, resolve_recorded_batch_indices, select_batch_retry_indices,
+    DesktopToolOptions, JobRequest, OutputDestination, PlannedUnit, TrimEnd, UiOptionInput,
 };
 use refract_core::cancel::CancelToken;
 use refract_core::error::{ErrorCode, RefractError};
@@ -641,36 +641,164 @@ fn setup_tool_changed(window: &MainWindow, tool_specs: &[slint_generatedMainWind
     });
 }
 
+enum PasswordUnlockClaim {
+    Single(JobRecord),
+    MergeBatch {
+        request: JobRequest,
+        members: Vec<JobRecord>,
+    },
+}
+
+fn mark_jobs_failed_with_error(
+    store: &mut [JobRecord],
+    target_id: i32,
+    recorded_ids: &[i32],
+    target_req: &JobRequest,
+    err: &RefractError,
+) {
+    for j in store.iter_mut() {
+        let is_affected = j.id == target_id
+            || (recorded_ids.contains(&j.id) && j.request.is_batch_compatible_with(target_req));
+        if is_affected {
+            j.status = JobStatus::Failed;
+            j.error = err.to_string();
+            j.progress = -1.0;
+        }
+    }
+}
+
 fn try_claim_password_unlock(
     jobs_store: &Arc<Mutex<Vec<JobRecord>>>,
     is_busy: &AtomicBool,
     job_id: i32,
     ui_tx: Option<&mpsc::Sender<UiEvent>>,
-) -> Option<JobRecord> {
+) -> Option<Result<PasswordUnlockClaim, RefractError>> {
     if is_busy.swap(true, Ordering::SeqCst) {
         return None;
     }
 
-    let job_opt = {
+    let outcome = {
         let mut store = jobs_store.lock().unwrap();
-        let job = store.iter_mut().find(|j| j.id == job_id).map(|j| {
-            j.status = JobStatus::Working;
-            j.progress = 0.0;
-            j.error.clear();
-            j.clone()
-        });
-        if job.is_some() {
+        let Some(target_idx) = store.iter().position(|j| j.id == job_id) else {
+            is_busy.store(false, Ordering::SeqCst);
+            return None;
+        };
+        let target = store[target_idx].clone();
+
+        if target.request.tool() == ToolId::MergePdf {
+            match resolve_recorded_batch_indices(
+                &store,
+                job_id,
+                &target.last_batch_member_ids,
+                |j| j.id,
+                |j| &j.request,
+                |j| {
+                    matches!(
+                        j.status,
+                        JobStatus::NeedsPassword | JobStatus::Failed | JobStatus::Waiting
+                    )
+                },
+            ) {
+                Ok(indices) => {
+                    let mut members = Vec::with_capacity(indices.len());
+                    for idx in indices {
+                        store[idx].status = JobStatus::Working;
+                        store[idx].progress = 0.0;
+                        store[idx].error.clear();
+                        members.push(store[idx].clone());
+                    }
+                    if let Some(tx) = ui_tx {
+                        push_ui_event(tx, UiEvent::JobsUpdated(store.clone()));
+                    }
+                    Ok(PasswordUnlockClaim::MergeBatch {
+                        request: target.request,
+                        members,
+                    })
+                }
+                Err(err) => {
+                    mark_jobs_failed_with_error(
+                        &mut store,
+                        job_id,
+                        &target.last_batch_member_ids,
+                        &target.request,
+                        &err,
+                    );
+                    if let Some(tx) = ui_tx {
+                        push_ui_event(tx, UiEvent::JobsUpdated(store.clone()));
+                    }
+                    is_busy.store(false, Ordering::SeqCst);
+                    Err(err)
+                }
+            }
+        } else {
+            store[target_idx].status = JobStatus::Working;
+            store[target_idx].progress = 0.0;
+            store[target_idx].error.clear();
+            let claimed = store[target_idx].clone();
             if let Some(tx) = ui_tx {
                 push_ui_event(tx, UiEvent::JobsUpdated(store.clone()));
             }
+            Ok(PasswordUnlockClaim::Single(claimed))
         }
-        job
     };
 
-    if job_opt.is_none() {
-        is_busy.store(false, Ordering::SeqCst);
+    Some(outcome)
+}
+
+fn complete_password_unlock_claim(
+    jobs_store: &Arc<Mutex<Vec<JobRecord>>>,
+    claim: PasswordUnlockClaim,
+    password: &str,
+    ui_tx: Option<&mpsc::Sender<UiEvent>>,
+) -> Result<PathBuf, RefractError> {
+    let (ids, result) = match claim {
+        PasswordUnlockClaim::MergeBatch { request, members } => {
+            let ids: Vec<i32> = members.iter().map(|j| j.id).collect();
+            let res = execute_batch_merge_pdf_with_password(&members, &request, Some(password));
+            (ids, res)
+        }
+        PasswordUnlockClaim::Single(job) => {
+            let id = job.id;
+            let res = process_job_with_password(&job, password);
+            (vec![id], res)
+        }
+    };
+
+    let mut store = jobs_store.lock().unwrap();
+    for j in store.iter_mut().filter(|j| ids.contains(&j.id)) {
+        match &result {
+            Ok(out_path) => {
+                j.status = JobStatus::Done;
+                j.output_path = out_path.clone();
+                j.error.clear();
+            }
+            Err(RefractError {
+                code: ErrorCode::WrongPassword,
+                ..
+            }) => {
+                j.status = JobStatus::NeedsPassword;
+                j.error = "Wrong password — check it and try again.".to_string();
+            }
+            Err(RefractError {
+                code: ErrorCode::NeedsPassword,
+                message,
+                ..
+            }) => {
+                j.status = JobStatus::NeedsPassword;
+                j.error = message.clone();
+            }
+            Err(e) => {
+                j.status = JobStatus::Failed;
+                j.error = e.to_string();
+            }
+        }
+        j.progress = -1.0;
     }
-    job_opt
+
+    if let Some(tx) = ui_tx {
+        push_ui_event(tx, UiEvent::JobsUpdated(store.clone()));
+    }
+    result
 }
 
 fn setup_password_handlers(
@@ -699,9 +827,13 @@ fn setup_password_handlers(
             return;
         };
 
-        let Some(job) = try_claim_password_unlock(&jobs_store, &is_busy, job_id, Some(&ui_tx))
-        else {
-            return;
+        let claim = match try_claim_password_unlock(&jobs_store, &is_busy, job_id, Some(&ui_tx)) {
+            Some(Ok(claim)) => claim,
+            Some(Err(err)) => {
+                push_ui_event(&ui_tx, UiEvent::StatusUpdate(err.to_string(), -1.0));
+                return;
+            }
+            None => return,
         };
 
         window.set_is_running(true);
@@ -716,33 +848,11 @@ fn setup_password_handlers(
                 UiEvent::StatusUpdate("Unlocking PDF…".into(), 0.0),
             );
 
-            // Uses the job's original immutable `JobRequest` — never recaptures UI options.
-            let result = process_job_with_password(&job, &password);
+            // Uses the job's original immutable `JobRequest` (and recorded batch members for
+            // `merge-pdf`) — never recaptures UI options.
+            let _ =
+                complete_password_unlock_claim(&worker_jobs, claim, &password, Some(&worker_ui_tx));
 
-            let mut store = worker_jobs.lock().unwrap();
-            if let Some(j) = store.iter_mut().find(|j| j.id == job_id) {
-                match result {
-                    Ok(out_path) => {
-                        j.status = JobStatus::Done;
-                        j.output_path = out_path;
-                        j.error.clear();
-                    }
-                    Err(RefractError {
-                        code: ErrorCode::WrongPassword,
-                        ..
-                    }) => {
-                        j.status = JobStatus::NeedsPassword;
-                        j.error = "Wrong password — check it and try again.".to_string();
-                    }
-                    Err(e) => {
-                        j.status = JobStatus::Failed;
-                        j.error = e.to_string();
-                    }
-                }
-                j.progress = -1.0;
-            }
-
-            push_ui_event(&worker_ui_tx, UiEvent::JobsUpdated(store.clone()));
             worker_busy.store(false, Ordering::SeqCst);
             push_ui_event(&worker_ui_tx, UiEvent::StatusUpdate("Ready".into(), -1.0));
             let _ = slint::invoke_from_event_loop({
@@ -1012,21 +1122,34 @@ fn execute_retry_in_store(
     ui_tx: Option<&mpsc::Sender<UiEvent>>,
 ) {
     let members: Vec<JobRecord> = {
-        let store = jobs_store.lock().unwrap();
-        let recorded_ids = store
-            .iter()
-            .find(|j| j.id == job_id)
-            .map(|j| j.last_batch_member_ids.clone())
-            .unwrap_or_default();
-        let indices = select_batch_retry_indices(
+        let mut store = jobs_store.lock().unwrap();
+        let Some(target) = store.iter().find(|j| j.id == job_id).cloned() else {
+            return;
+        };
+        let recorded_ids = target.last_batch_member_ids.clone();
+        match select_batch_retry_indices(
             &store,
             job_id,
             &recorded_ids,
             |j| j.id,
             |j| &j.request,
             |j| matches!(j.status, JobStatus::Failed | JobStatus::Waiting),
-        );
-        indices.into_iter().map(|i| store[i].clone()).collect()
+        ) {
+            Ok(indices) => indices.into_iter().map(|i| store[i].clone()).collect(),
+            Err(err) => {
+                mark_jobs_failed_with_error(
+                    &mut store,
+                    job_id,
+                    &recorded_ids,
+                    &target.request,
+                    &err,
+                );
+                if let Some(tx) = ui_tx {
+                    push_ui_event(tx, UiEvent::JobsUpdated(store.clone()));
+                }
+                return;
+            }
+        }
     };
 
     let Some(primary) = members.first().cloned() else {
@@ -1220,9 +1343,10 @@ fn ensure_batch_compatible(jobs: &[JobRecord], request: &JobRequest) -> Result<(
     Ok(())
 }
 
-fn execute_batch_merge_pdf(
+fn execute_batch_merge_pdf_with_password(
     jobs: &[JobRecord],
     request: &JobRequest,
+    password: Option<&str>,
 ) -> Result<PathBuf, RefractError> {
     ensure_batch_compatible(jobs, request)?;
     if jobs.len() < 2 {
@@ -1236,10 +1360,20 @@ fn execute_batch_merge_pdf(
         .map(|j| std::fs::read(&j.input_path).map_err(to_refract_err))
         .collect::<Result<_, _>>()?;
     let slices: Vec<&[u8]> = buffers.iter().map(|b| b.as_slice()).collect();
-    let out_bytes = pdf::merge_pdfs(&slices)?;
+    let out_bytes = match password {
+        Some(pw) => pdf::merge_pdfs_with_password(&slices, pw)?,
+        None => pdf::merge_pdfs(&slices)?,
+    };
     let out_path = determine_output_path(&jobs[0], request.destination(), "merged", "pdf");
     std::fs::write(&out_path, out_bytes).map_err(to_refract_err)?;
     Ok(out_path)
+}
+
+fn execute_batch_merge_pdf(
+    jobs: &[JobRecord],
+    request: &JobRequest,
+) -> Result<PathBuf, RefractError> {
+    execute_batch_merge_pdf_with_password(jobs, request, None)
 }
 
 fn execute_batch_images_to_pdf(
@@ -1499,6 +1633,10 @@ fn process_job_with_password(job: &JobRecord, password: &str) -> Result<PathBuf,
             std::fs::write(&out_path, out_bytes).map_err(to_refract_err)?;
             Ok(out_path)
         }
+        DesktopToolOptions::MergePdf => Err(RefractError::new(
+            ErrorCode::InvalidOption,
+            "Merge PDF unlock requires the complete recorded batch.",
+        )),
         _ => Err(RefractError::new(
             ErrorCode::UnsupportedFormat,
             "Password not needed for this tool",
@@ -2110,6 +2248,27 @@ mod tests {
         );
     }
 
+    fn write_marker_pdf(dir: &Path, name: &str, width: u32, height: u32) -> PathBuf {
+        let plain_png = std::fs::read(fixture_path("plain.png")).unwrap();
+        let resized = image::resize_image(&plain_png, width, height).unwrap();
+        let pdf_bytes = pdf::images_to_pdf(&[resized], 150.0, 90).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, pdf_bytes).unwrap();
+        path
+    }
+
+    fn page_embedded_image_dims(pdf_bytes: &[u8], page: u32) -> (u32, u32) {
+        let parts = pdf::split_pdf(pdf_bytes, &page.to_string()).unwrap();
+        assert_eq!(parts.len(), 1);
+        let embedded = pdf::extract_embedded_images(&parts[0].1).unwrap();
+        assert!(
+            !embedded.is_empty(),
+            "expected embedded marker image on page {}",
+            page
+        );
+        image::probe_dimensions(&embedded[0].bytes).unwrap()
+    }
+
     #[test]
     fn password_unlock_claim_prevents_concurrent_unlock_races() {
         let store = Arc::new(Mutex::new(Vec::new()));
@@ -2137,11 +2296,348 @@ mod tests {
         assert!(!is_busy.load(Ordering::SeqCst));
 
         // First unlock claims busy flag and preserves immutable request
-        let claimed = try_claim_password_unlock(&store, &is_busy, 1, None).unwrap();
-        assert_eq!(claimed.request, req);
+        let claimed = try_claim_password_unlock(&store, &is_busy, 1, None)
+            .unwrap()
+            .unwrap();
+        match claimed {
+            PasswordUnlockClaim::Single(job) => assert_eq!(job.request, req),
+            PasswordUnlockClaim::MergeBatch { .. } => panic!("expected Single claim"),
+        }
         assert!(is_busy.load(Ordering::SeqCst));
 
         // Second concurrent unlock attempt is rejected without racing
         assert!(try_claim_password_unlock(&store, &is_busy, 1, None).is_none());
+    }
+
+    #[test]
+    fn retry_merge_pdf_batch_preserves_recorded_input_order_after_ui_reorder() {
+        let work_dir = tempfile::tempdir().unwrap();
+        let out_dir = tempfile::tempdir().unwrap();
+        let pdf_1 = write_marker_pdf(work_dir.path(), "first.pdf", 64, 48);
+        let pdf_2 = write_marker_pdf(work_dir.path(), "second.pdf", 96, 48);
+        let pdf_3 = write_marker_pdf(work_dir.path(), "third.pdf", 128, 48);
+
+        let merge_req = JobRequest::new(
+            ToolId::MergePdf,
+            DesktopToolOptions::MergePdf,
+            OutputDestination::Directory(out_dir.path().to_path_buf()),
+        )
+        .unwrap();
+
+        let store = Arc::new(Mutex::new(Vec::new()));
+        let mut next_id = 1;
+        {
+            let mut guard = store.lock().unwrap();
+            enqueue_files(
+                &mut guard,
+                &mut next_id,
+                vec![pdf_1, pdf_2, pdf_3],
+                &merge_req,
+            );
+            // Record original batch order [1, 2, 3] and simulate failed batch
+            for j in guard.iter_mut() {
+                j.status = JobStatus::Failed;
+                j.last_batch_member_ids = vec![1, 2, 3];
+            }
+            // Reorder the job store in UI to [3, 1, 2]
+            guard.rotate_right(1);
+            assert_eq!(
+                guard.iter().map(|j| j.id).collect::<Vec<_>>(),
+                vec![3, 1, 2]
+            );
+        }
+
+        // Retry via job 2 (now last in UI order)
+        execute_retry_in_store(&store, 2, None);
+
+        let guard = store.lock().unwrap();
+        assert!(guard.iter().all(|j| j.status == JobStatus::Done));
+        let out_path = guard[0].output_path.clone();
+        assert!(guard.iter().all(|j| j.output_path == out_path));
+        assert_eq!(out_path.parent(), Some(out_dir.path()));
+        // Output name comes from recorded first input (`first.pdf`), not reordered `third.pdf`
+        assert_eq!(out_path.file_name().unwrap(), "first merged.pdf");
+
+        let merged_bytes = std::fs::read(&out_path).unwrap();
+        assert_eq!(pdf::probe_pdf(&merged_bytes).unwrap().page_count, 3);
+        assert_eq!(page_embedded_image_dims(&merged_bytes, 1), (64, 48));
+        assert_eq!(page_embedded_image_dims(&merged_bytes, 2), (96, 48));
+        assert_eq!(page_embedded_image_dims(&merged_bytes, 3), (128, 48));
+    }
+
+    #[test]
+    fn retry_merge_pdf_batch_fails_explicitly_when_recorded_member_is_missing() {
+        let out_dir = tempfile::tempdir().unwrap();
+        let merge_req = JobRequest::new(
+            ToolId::MergePdf,
+            DesktopToolOptions::MergePdf,
+            OutputDestination::Directory(out_dir.path().to_path_buf()),
+        )
+        .unwrap();
+
+        let store = Arc::new(Mutex::new(Vec::new()));
+        let mut next_id = 1;
+        {
+            let mut guard = store.lock().unwrap();
+            enqueue_files(
+                &mut guard,
+                &mut next_id,
+                vec![
+                    fixture_path("plain.pdf"),
+                    fixture_path("5pages.pdf"),
+                    fixture_path("plain.pdf"),
+                ],
+                &merge_req,
+            );
+            for j in guard.iter_mut() {
+                j.status = JobStatus::Failed;
+                j.last_batch_member_ids = vec![1, 2, 3];
+            }
+            // Delete member 2 before retrying
+            guard.retain(|j| j.id != 2);
+        }
+
+        execute_retry_in_store(&store, 1, None);
+
+        let guard = store.lock().unwrap();
+        assert_eq!(guard.len(), 2);
+        for j in guard.iter() {
+            assert_eq!(j.status, JobStatus::Failed);
+            assert!(
+                j.error.contains("missing") || j.error.contains("removed"),
+                "unexpected error: {}",
+                j.error
+            );
+            assert!(j.output_path.as_os_str().is_empty());
+        }
+        assert!(std::fs::read_dir(out_dir.path()).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn password_unlock_merge_pdf_batch_handles_same_password_wrong_password_destination_and_order()
+    {
+        let work_dir = tempfile::tempdir().unwrap();
+        let out_dir = tempfile::tempdir().unwrap();
+        let locked_bytes = std::fs::read(fixture_path("locked.pdf")).unwrap();
+        let enc_1 = work_dir.path().join("enc_first.pdf");
+        let enc_2 = work_dir.path().join("enc_second.pdf");
+        std::fs::write(&enc_1, &locked_bytes).unwrap();
+        std::fs::write(&enc_2, &locked_bytes).unwrap();
+
+        let merge_req = JobRequest::new(
+            ToolId::MergePdf,
+            DesktopToolOptions::MergePdf,
+            OutputDestination::Directory(out_dir.path().to_path_buf()),
+        )
+        .unwrap();
+
+        let store = Arc::new(Mutex::new(Vec::new()));
+        let is_busy = AtomicBool::new(false);
+        let mut next_id = 1;
+        {
+            let mut guard = store.lock().unwrap();
+            enqueue_files(&mut guard, &mut next_id, vec![enc_1, enc_2], &merge_req);
+            for j in guard.iter_mut() {
+                j.last_batch_member_ids = vec![1, 2];
+            }
+        }
+
+        // Initial unauthenticated merge returns NeedsPassword
+        {
+            let snapshot = store.lock().unwrap().clone();
+            let err = execute_batch_merge_pdf(&snapshot, &merge_req).unwrap_err();
+            assert_eq!(err.code, ErrorCode::NeedsPassword);
+            let mut guard = store.lock().unwrap();
+            for j in guard.iter_mut() {
+                j.status = JobStatus::NeedsPassword;
+                j.error = err.message.clone();
+            }
+            // Reorder the UI store to [2, 1] before unlocking
+            guard.swap(0, 1);
+            assert_eq!(guard.iter().map(|j| j.id).collect::<Vec<_>>(), vec![2, 1]);
+        }
+
+        // 1. Incorrect password keeps all members in NeedsPassword and releases busy flag
+        let wrong_claim = try_claim_password_unlock(&store, &is_busy, 2, None)
+            .unwrap()
+            .unwrap();
+        let wrong_res = complete_password_unlock_claim(&store, wrong_claim, "wrong-pw", None);
+        is_busy.store(false, Ordering::SeqCst);
+        assert_eq!(wrong_res.unwrap_err().code, ErrorCode::WrongPassword);
+        {
+            let guard = store.lock().unwrap();
+            for j in guard.iter() {
+                assert_eq!(j.status, JobStatus::NeedsPassword);
+                assert!(j.error.contains("Wrong password"));
+                assert!(j.output_path.as_os_str().is_empty());
+            }
+        }
+        assert!(std::fs::read_dir(out_dir.path()).unwrap().next().is_none());
+
+        // 2. Correct password unlocks full batch in recorded order [1, 2] into original destination
+        let right_claim = try_claim_password_unlock(&store, &is_busy, 2, None)
+            .unwrap()
+            .unwrap();
+        let out_path =
+            complete_password_unlock_claim(&store, right_claim, "user-pw-123", None).unwrap();
+        is_busy.store(false, Ordering::SeqCst);
+
+        assert_eq!(out_path.parent(), Some(out_dir.path()));
+        // Derived from recorded first member `enc_first.pdf`, NOT reordered `enc_second.pdf`
+        assert_eq!(out_path.file_name().unwrap(), "enc_first merged.pdf");
+        let merged_bytes = std::fs::read(&out_path).unwrap();
+        assert_eq!(pdf::probe_pdf(&merged_bytes).unwrap().page_count, 6);
+
+        let guard = store.lock().unwrap();
+        for j in guard.iter() {
+            assert_eq!(j.status, JobStatus::Done);
+            assert_eq!(j.output_path, out_path);
+            assert!(j.error.is_empty());
+        }
+    }
+
+    #[test]
+    fn password_unlock_merge_pdf_batch_preserves_exact_page_order_after_ui_reorder() {
+        let work_dir = tempfile::tempdir().unwrap();
+        let out_dir = tempfile::tempdir().unwrap();
+        let locked_bytes = std::fs::read(fixture_path("locked.pdf")).unwrap();
+        let enc_1 = work_dir.path().join("enc_a.pdf");
+        let enc_2 = work_dir.path().join("enc_b.pdf");
+        std::fs::write(&enc_1, &locked_bytes).unwrap();
+        std::fs::write(&enc_2, &locked_bytes).unwrap();
+        let marker_a = write_marker_pdf(work_dir.path(), "marker_a.pdf", 64, 48);
+        let marker_b = write_marker_pdf(work_dir.path(), "marker_b.pdf", 128, 48);
+
+        let merge_req = JobRequest::new(
+            ToolId::MergePdf,
+            DesktopToolOptions::MergePdf,
+            OutputDestination::Directory(out_dir.path().to_path_buf()),
+        )
+        .unwrap();
+
+        let store = Arc::new(Mutex::new(Vec::new()));
+        let is_busy = AtomicBool::new(false);
+        let mut next_id = 1;
+        {
+            let mut guard = store.lock().unwrap();
+            // Original recorded order: [enc_a (3p), marker_a (1p, 64x48), enc_b (3p), marker_b (1p, 128x48)]
+            enqueue_files(
+                &mut guard,
+                &mut next_id,
+                vec![enc_1, marker_a, enc_2, marker_b],
+                &merge_req,
+            );
+            for j in guard.iter_mut() {
+                j.status = JobStatus::NeedsPassword;
+                j.last_batch_member_ids = vec![1, 2, 3, 4];
+            }
+            // Reverse UI store to [4, 3, 2, 1]
+            guard.reverse();
+        }
+
+        let claim = try_claim_password_unlock(&store, &is_busy, 3, None)
+            .unwrap()
+            .unwrap();
+        let out_path = complete_password_unlock_claim(&store, claim, "user-pw-123", None).unwrap();
+        is_busy.store(false, Ordering::SeqCst);
+
+        let merged_bytes = std::fs::read(&out_path).unwrap();
+        assert_eq!(pdf::probe_pdf(&merged_bytes).unwrap().page_count, 8);
+        // Page 4 must be marker_a (64x48) and page 8 must be marker_b (128x48)
+        assert_eq!(page_embedded_image_dims(&merged_bytes, 4), (64, 48));
+        assert_eq!(page_embedded_image_dims(&merged_bytes, 8), (128, 48));
+
+        let guard = store.lock().unwrap();
+        assert!(guard.iter().all(|j| j.status == JobStatus::Done));
+        assert!(guard.iter().all(|j| j.output_path == out_path));
+    }
+
+    #[test]
+    fn password_unlock_merge_pdf_batch_rejects_incompatible_and_missing_members() {
+        let dir_a = tempfile::tempdir().unwrap();
+        let dir_b = tempfile::tempdir().unwrap();
+        let req_a = JobRequest::new(
+            ToolId::MergePdf,
+            DesktopToolOptions::MergePdf,
+            OutputDestination::Directory(dir_a.path().to_path_buf()),
+        )
+        .unwrap();
+        let req_b = JobRequest::new(
+            ToolId::MergePdf,
+            DesktopToolOptions::MergePdf,
+            OutputDestination::Directory(dir_b.path().to_path_buf()),
+        )
+        .unwrap();
+
+        // 1. Incompatible batch member request fails cleanly and releases busy flag
+        let store_incompat = Arc::new(Mutex::new(Vec::new()));
+        let is_busy = AtomicBool::new(false);
+        let mut next_id = 1;
+        {
+            let mut guard = store_incompat.lock().unwrap();
+            enqueue_files(
+                &mut guard,
+                &mut next_id,
+                vec![fixture_path("locked.pdf")],
+                &req_a,
+            );
+            enqueue_files(
+                &mut guard,
+                &mut next_id,
+                vec![fixture_path("locked.pdf")],
+                &req_b,
+            );
+            for j in guard.iter_mut() {
+                j.status = JobStatus::NeedsPassword;
+                j.last_batch_member_ids = vec![1, 2];
+            }
+        }
+
+        let err = try_claim_password_unlock(&store_incompat, &is_busy, 1, None)
+            .unwrap()
+            .err()
+            .expect("expected incompatible batch error");
+        assert_eq!(err.code, ErrorCode::InvalidOption);
+        assert!(!is_busy.load(Ordering::SeqCst));
+        {
+            let guard = store_incompat.lock().unwrap();
+            assert_eq!(guard[0].status, JobStatus::Failed);
+            assert!(guard[0].error.contains("incompatible"));
+        }
+
+        // 2. Missing batch member fails cleanly, updates remaining member, and writes no file
+        let store_missing = Arc::new(Mutex::new(Vec::new()));
+        let mut next_id_2 = 1;
+        {
+            let mut guard = store_missing.lock().unwrap();
+            enqueue_files(
+                &mut guard,
+                &mut next_id_2,
+                vec![fixture_path("locked.pdf"), fixture_path("locked.pdf")],
+                &req_a,
+            );
+            for j in guard.iter_mut() {
+                j.status = JobStatus::NeedsPassword;
+                j.last_batch_member_ids = vec![1, 2];
+            }
+            guard.retain(|j| j.id != 2);
+        }
+
+        let missing_err = try_claim_password_unlock(&store_missing, &is_busy, 1, None)
+            .unwrap()
+            .err()
+            .expect("expected missing member error");
+        assert_eq!(missing_err.code, ErrorCode::InvalidOption);
+        assert!(!is_busy.load(Ordering::SeqCst));
+        {
+            let guard = store_missing.lock().unwrap();
+            assert_eq!(guard[0].status, JobStatus::Failed);
+            assert!(
+                guard[0].error.contains("missing") || guard[0].error.contains("removed"),
+                "unexpected error: {}",
+                guard[0].error
+            );
+        }
+        assert!(std::fs::read_dir(dir_a.path()).unwrap().next().is_none());
     }
 }

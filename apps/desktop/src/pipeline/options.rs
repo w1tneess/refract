@@ -836,9 +836,111 @@ where
     units
 }
 
-/// Select the deterministic ordered indices of jobs to run when retrying a batch job
-/// (`merge-pdf` or `images-to-pdf`). Uses recorded `member_ids` if present and compatible,
-/// otherwise falls back to compatible eligible peers in queue order.
+/// Resolve a batch strictly from its recorded member IDs in their exact recorded order.
+///
+/// Fails explicitly if `recorded_member_ids` is empty, does not contain `target_id`,
+/// contains duplicate IDs, references a missing/deleted member, or contains a member with an
+/// incompatible [`JobRequest`] or ineligible state.
+pub fn resolve_recorded_batch_indices<T, FId, FReq, FEligible>(
+    all_jobs: &[T],
+    target_id: i32,
+    recorded_member_ids: &[i32],
+    id_of: FId,
+    request_of: FReq,
+    is_eligible: FEligible,
+) -> Result<Vec<usize>, RefractError>
+where
+    FId: Fn(&T) -> i32,
+    FReq: Fn(&T) -> &JobRequest,
+    FEligible: Fn(&T) -> bool,
+{
+    let target_idx = all_jobs
+        .iter()
+        .position(|j| id_of(j) == target_id)
+        .ok_or_else(|| {
+            RefractError::new(
+                ErrorCode::InvalidOption,
+                format!("Job {} was not found in the queue.", target_id),
+            )
+        })?;
+    let target_req = request_of(&all_jobs[target_idx]);
+
+    if !target_req.tool().spec().batch {
+        return Err(RefractError::new(
+            ErrorCode::InvalidOption,
+            format!("Tool '{}' is not a batch tool.", target_req.tool().id_str()),
+        ));
+    }
+
+    if recorded_member_ids.is_empty() {
+        return Err(RefractError::new(
+            ErrorCode::InvalidOption,
+            "Batch cannot run because its original member list was not recorded.",
+        ));
+    }
+
+    if !recorded_member_ids.contains(&target_id) {
+        return Err(RefractError::new(
+            ErrorCode::InvalidOption,
+            format!("Job {} does not belong to its recorded batch.", target_id),
+        ));
+    }
+
+    let mut seen = HashSet::with_capacity(recorded_member_ids.len());
+    let mut indices = Vec::with_capacity(recorded_member_ids.len());
+
+    // Iterate in the exact order recorded when the batch originally ran, never current UI order.
+    for &member_id in recorded_member_ids {
+        if !seen.insert(member_id) {
+            return Err(RefractError::new(
+                ErrorCode::InvalidOption,
+                format!("Recorded batch contains duplicate job {}.", member_id),
+            ));
+        }
+        let idx = all_jobs
+            .iter()
+            .position(|j| id_of(j) == member_id)
+            .ok_or_else(|| {
+                RefractError::new(
+                    ErrorCode::InvalidOption,
+                    format!(
+                        "Cannot run batch: original member job {} is missing or was removed.",
+                        member_id
+                    ),
+                )
+            })?;
+        if !request_of(&all_jobs[idx]).is_batch_compatible_with(target_req) {
+            return Err(RefractError::new(
+                ErrorCode::InvalidOption,
+                format!(
+                    "Cannot run batch: member job {} has an incompatible request.",
+                    member_id
+                ),
+            ));
+        }
+        if idx != target_idx && !is_eligible(&all_jobs[idx]) {
+            return Err(RefractError::new(
+                ErrorCode::InvalidOption,
+                format!(
+                    "Cannot run batch: member job {} is not in a retryable state.",
+                    member_id
+                ),
+            ));
+        }
+        indices.push(idx);
+    }
+
+    Ok(indices)
+}
+
+/// Select the deterministic ordered indices of jobs to run when retrying a job.
+///
+/// For batch tools (`merge-pdf`, `images-to-pdf`):
+/// - When `recorded_member_ids` is non-empty, resolves members in the **exact recorded order**
+///   via [`resolve_recorded_batch_indices`], failing explicitly on missing, incompatible,
+///   ineligible, or mismatched members instead of silently substituting UI order or a subset.
+/// - When `recorded_member_ids` is empty (batch has never run yet), falls back to compatible
+///   eligible peers in queue order.
 pub fn select_batch_retry_indices<T, FId, FReq, FEligible>(
     all_jobs: &[T],
     target_id: i32,
@@ -846,38 +948,39 @@ pub fn select_batch_retry_indices<T, FId, FReq, FEligible>(
     id_of: FId,
     request_of: FReq,
     is_eligible: FEligible,
-) -> Vec<usize>
+) -> Result<Vec<usize>, RefractError>
 where
     FId: Fn(&T) -> i32,
     FReq: Fn(&T) -> &JobRequest,
     FEligible: Fn(&T) -> bool,
 {
-    let Some(target_idx) = all_jobs.iter().position(|j| id_of(j) == target_id) else {
-        return Vec::new();
-    };
+    let target_idx = all_jobs
+        .iter()
+        .position(|j| id_of(j) == target_id)
+        .ok_or_else(|| {
+            RefractError::new(
+                ErrorCode::InvalidOption,
+                format!("Job {} was not found in the queue.", target_id),
+            )
+        })?;
     let target_req = request_of(&all_jobs[target_idx]);
 
     if !target_req.tool().spec().batch {
-        return vec![target_idx];
+        return Ok(vec![target_idx]);
     }
 
     if !recorded_member_ids.is_empty() {
-        let recorded: Vec<usize> = all_jobs
-            .iter()
-            .enumerate()
-            .filter(|(_, job)| {
-                let id = id_of(job);
-                recorded_member_ids.contains(&id)
-                    && request_of(job).is_batch_compatible_with(target_req)
-            })
-            .map(|(idx, _)| idx)
-            .collect();
-        if !recorded.is_empty() {
-            return recorded;
-        }
+        return resolve_recorded_batch_indices(
+            all_jobs,
+            target_id,
+            recorded_member_ids,
+            id_of,
+            request_of,
+            is_eligible,
+        );
     }
 
-    all_jobs
+    Ok(all_jobs
         .iter()
         .enumerate()
         .filter(|(idx, job)| {
@@ -885,7 +988,7 @@ where
                 && request_of(job).is_batch_compatible_with(target_req)
         })
         .map(|(idx, _)| idx)
-        .collect()
+        .collect())
 }
 
 #[cfg(test)]
@@ -1361,5 +1464,123 @@ mod tests {
             }
             other => panic!("expected batch, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn recorded_batch_resolution_preserves_original_order_and_rejects_invalid_states() {
+        #[derive(Clone, Debug)]
+        struct StubJob {
+            id: i32,
+            req: JobRequest,
+            eligible: bool,
+        }
+
+        let merge_a = JobRequest::new(
+            ToolId::MergePdf,
+            DesktopToolOptions::MergePdf,
+            OutputDestination::Directory(PathBuf::from("/out-a")),
+        )
+        .unwrap();
+        let merge_b = JobRequest::new(
+            ToolId::MergePdf,
+            DesktopToolOptions::MergePdf,
+            OutputDestination::Directory(PathBuf::from("/out-b")),
+        )
+        .unwrap();
+
+        // Store has been reordered in UI to [3, 1, 2], while recorded order was [1, 2, 3].
+        let reordered = vec![
+            StubJob {
+                id: 3,
+                req: merge_a.clone(),
+                eligible: true,
+            },
+            StubJob {
+                id: 1,
+                req: merge_a.clone(),
+                eligible: true,
+            },
+            StubJob {
+                id: 2,
+                req: merge_a.clone(),
+                eligible: true,
+            },
+        ];
+
+        let indices = select_batch_retry_indices(
+            &reordered,
+            2,
+            &[1, 2, 3],
+            |j| j.id,
+            |j| &j.req,
+            |j| j.eligible,
+        )
+        .unwrap();
+        let resolved_ids: Vec<i32> = indices.iter().map(|&i| reordered[i].id).collect();
+        assert_eq!(resolved_ids, vec![1, 2, 3]);
+
+        // Target not in recorded batch is rejected
+        assert_eq!(
+            select_batch_retry_indices(
+                &reordered,
+                3,
+                &[1, 2],
+                |j| j.id,
+                |j| &j.req,
+                |j| j.eligible,
+            )
+            .unwrap_err()
+            .code,
+            ErrorCode::InvalidOption
+        );
+
+        // Missing member ID is rejected explicitly (never silently dropped)
+        assert_eq!(
+            select_batch_retry_indices(
+                &reordered,
+                1,
+                &[1, 2, 99],
+                |j| j.id,
+                |j| &j.req,
+                |j| j.eligible,
+            )
+            .unwrap_err()
+            .code,
+            ErrorCode::InvalidOption
+        );
+
+        // Incompatible member request is rejected explicitly
+        let mut with_incompat = reordered.clone();
+        with_incompat[2].req = merge_b;
+        assert_eq!(
+            select_batch_retry_indices(
+                &with_incompat,
+                1,
+                &[1, 2, 3],
+                |j| j.id,
+                |j| &j.req,
+                |j| j.eligible,
+            )
+            .unwrap_err()
+            .code,
+            ErrorCode::InvalidOption
+        );
+
+        // Ineligible peer member is rejected explicitly
+        let mut with_ineligible = reordered;
+        with_ineligible[0].eligible = false; // job 3
+        assert_eq!(
+            select_batch_retry_indices(
+                &with_ineligible,
+                1,
+                &[1, 2, 3],
+                |j| j.id,
+                |j| &j.req,
+                |j| j.eligible,
+            )
+            .unwrap_err()
+            .code,
+            ErrorCode::InvalidOption
+        );
     }
 }
