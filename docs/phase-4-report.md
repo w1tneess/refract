@@ -6,8 +6,8 @@ November 2026 · branch `phase-4-desktop-rust`
 
 Phase 4 delivers the native desktop application for Refract. While originally scoped as a Tauri 2 webview wrapper, Phase 4 was transitioned into a **Pure Native Rust Application** with **Slint UI** and a modular native Rust workspace (`crates/refract-core`, `crates/refract-engine`, `apps/desktop`).
 
-- **Status**: Complete. All 9 desktop tools across Images, PDF, and Audio are implemented and wired to the Slint GUI.
-- **Binary Footprint**: Standalone single executable is **17.3 MB** uncompressed (**~6.5 MB** zipped) with zero runtime dependencies.
+- **Status**: Complete. Originally shipped 9 desktop tools on `phase-4-desktop-rust`; Desktop v1.1 expanded coverage to all **11 canonical tools** (adding `images-to-pdf` and `pdf-to-images`). See [docs/platform-matrix.md](platform-matrix.md) for current generated platform support.
+- **Binary Footprint**: Standalone single executable is **17.3 MB** uncompressed (**~6.5 MB** zipped) with no webview or runtime framework dependencies. Optional external binaries on `PATH` are required for audio (`ffmpeg` + `ffprobe`) and full-page PDF rasterization (`mutool`, `pdftoppm`, `pdftocairo`, or `gs`, with built-in embedded-image extraction fallback).
 - **Cold Boot Time**: < 20 ms.
 - **Test Suite**: Full Rust unit test suite (`refract-core` + `refract-engine`), along with full Web v1 unit and E2E test suites passing in CI.
 

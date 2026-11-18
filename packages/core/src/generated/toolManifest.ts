@@ -1,0 +1,1706 @@
+// GENERATED FILE — DO NOT EDIT BY HAND.
+// Source: specs/tool-manifest.json
+// Regenerate with: pnpm manifest:generate
+
+export const MANIFEST_VERSION = 1 as const;
+
+export type Format = 'heic' | 'jpeg' | 'png' | 'webp' | 'pdf' | 'mp3' | 'wav' | 'm4a' | 'ogg';
+export type Kind = 'image' | 'pdf' | 'audio';
+export type Platform = 'web' | 'desktop';
+export type ToolId = 'convert-image' | 'compress-image' | 'resize-image' | 'merge-pdf' | 'split-pdf' | 'reorder-pdf' | 'images-to-pdf' | 'pdf-to-images' | 'compress-pdf' | 'convert-audio' | 'trim-audio';
+export type LimitKey = 'image.convert' | 'pdf' | 'audio';
+export type PlatformAvailabilityStatus = 'available' | 'requires-dependency' | 'unsupported';
+export type DesktopEngineKind = 'builtin' | 'ffmpeg' | 'pdf-renderer';
+export type OutputExtRule = 'fromOptionTo' | 'sameOrJpeg' | 'sameAudioOrMp3' | 'fixed';
+
+export type FormatPlatformSupport = {
+  decode: boolean;
+  encode: boolean;
+  note?: string;
+};
+
+export type ManifestFormatSpec = {
+  id: Format;
+  label: string;
+  displayName: string;
+  kind: Kind;
+  extensions: readonly string[];
+  mime: string;
+  platforms: Record<Platform, FormatPlatformSupport>;
+};
+
+export type Limits = { maxMB: number; maxFiles: number; maxPages?: number; maxPixels?: number };
+
+export type ManifestOptionChoice = {
+  value: string;
+  label: string;
+  platforms?: readonly Platform[];
+};
+
+type ManifestOptionBase = {
+  key: string;
+  label: string;
+  platforms: readonly Platform[];
+  help?: string;
+  showIf?: { key: string; is: readonly (string | number)[] };
+};
+
+export type ManifestOptionSpec =
+  | (ManifestOptionBase & { type: 'number'; min: number; max: number; step?: number; unit?: string; default: number })
+  | (ManifestOptionBase & { type: 'select'; choices: readonly ManifestOptionChoice[]; default: string })
+  | (ManifestOptionBase & { type: 'text'; placeholder?: string; default: string });
+
+export type ManifestToolSpec = {
+  id: ToolId;
+  domain: Kind;
+  acceptsKind: Kind;
+  label: string;
+  blurb: string;
+  tagline: string;
+  description: string;
+  outputCapability: string;
+  searchKeywords: readonly string[];
+  popular: boolean;
+  inputs: { mode: 'one' | 'many'; min: number; max: number | null };
+  acceptedFormats: Record<Platform, readonly Format[]>;
+  outputFormats: Record<Platform, readonly Format[]>;
+  options: readonly ManifestOptionSpec[];
+  outputNaming: {
+    template: string;
+    multi: boolean;
+    extRule: OutputExtRule;
+    fixedExt?: string;
+    entryTemplate?: string;
+  };
+  limitsKey: LimitKey;
+  capabilities: {
+    batch: boolean;
+    preview: boolean;
+    loupe: boolean;
+    passwordUnlock: Record<Platform, boolean>;
+    chainOutput: boolean;
+  };
+  platformSupport: {
+    web: { status: PlatformAvailabilityStatus; engine: string; lazyLoaded?: boolean; note?: string };
+    desktop: {
+      status: PlatformAvailabilityStatus;
+      engine: DesktopEngineKind;
+      engineLabel: string;
+      externalDependencies: readonly string[];
+      fallback?: string;
+      note?: string;
+    };
+  };
+};
+
+export const TOOL_IDS: readonly ToolId[] = [
+  "convert-image",
+  "compress-image",
+  "resize-image",
+  "merge-pdf",
+  "split-pdf",
+  "reorder-pdf",
+  "images-to-pdf",
+  "pdf-to-images",
+  "compress-pdf",
+  "convert-audio",
+  "trim-audio"
+] as const;
+
+export const MANIFEST_FORMATS: Record<Format, ManifestFormatSpec> = {
+  "heic": {
+    "id": "heic",
+    "label": "HEIC",
+    "displayName": "HEIC",
+    "kind": "image",
+    "extensions": [
+      "heic",
+      "heif"
+    ],
+    "mime": "image/heic",
+    "platforms": {
+      "web": {
+        "decode": true,
+        "encode": false,
+        "note": "Decoded via libheif-js WASM; outputs convert to JPG, PNG, or WebP."
+      },
+      "desktop": {
+        "decode": false,
+        "encode": false,
+        "note": "Unsupported in native desktop builds; use Refract Web for HEIC inputs."
+      }
+    }
+  },
+  "jpeg": {
+    "id": "jpeg",
+    "label": "JPG",
+    "displayName": "JPEG",
+    "kind": "image",
+    "extensions": [
+      "jpg",
+      "jpeg",
+      "jfif"
+    ],
+    "mime": "image/jpeg",
+    "platforms": {
+      "web": {
+        "decode": true,
+        "encode": true
+      },
+      "desktop": {
+        "decode": true,
+        "encode": true
+      }
+    }
+  },
+  "png": {
+    "id": "png",
+    "label": "PNG",
+    "displayName": "PNG",
+    "kind": "image",
+    "extensions": [
+      "png"
+    ],
+    "mime": "image/png",
+    "platforms": {
+      "web": {
+        "decode": true,
+        "encode": true
+      },
+      "desktop": {
+        "decode": true,
+        "encode": true
+      }
+    }
+  },
+  "webp": {
+    "id": "webp",
+    "label": "WebP",
+    "displayName": "WebP",
+    "kind": "image",
+    "extensions": [
+      "webp"
+    ],
+    "mime": "image/webp",
+    "platforms": {
+      "web": {
+        "decode": true,
+        "encode": true
+      },
+      "desktop": {
+        "decode": true,
+        "encode": true
+      }
+    }
+  },
+  "pdf": {
+    "id": "pdf",
+    "label": "PDF",
+    "displayName": "PDF",
+    "kind": "pdf",
+    "extensions": [
+      "pdf"
+    ],
+    "mime": "application/pdf",
+    "platforms": {
+      "web": {
+        "decode": true,
+        "encode": true
+      },
+      "desktop": {
+        "decode": true,
+        "encode": true
+      }
+    }
+  },
+  "mp3": {
+    "id": "mp3",
+    "label": "MP3",
+    "displayName": "MP3",
+    "kind": "audio",
+    "extensions": [
+      "mp3"
+    ],
+    "mime": "audio/mpeg",
+    "platforms": {
+      "web": {
+        "decode": true,
+        "encode": true
+      },
+      "desktop": {
+        "decode": true,
+        "encode": true,
+        "note": "Requires ffmpeg and ffprobe on PATH."
+      }
+    }
+  },
+  "wav": {
+    "id": "wav",
+    "label": "WAV",
+    "displayName": "WAV",
+    "kind": "audio",
+    "extensions": [
+      "wav"
+    ],
+    "mime": "audio/wav",
+    "platforms": {
+      "web": {
+        "decode": true,
+        "encode": true
+      },
+      "desktop": {
+        "decode": true,
+        "encode": true,
+        "note": "Requires ffmpeg and ffprobe on PATH."
+      }
+    }
+  },
+  "m4a": {
+    "id": "m4a",
+    "label": "M4A",
+    "displayName": "M4A",
+    "kind": "audio",
+    "extensions": [
+      "m4a",
+      "aac",
+      "mp4"
+    ],
+    "mime": "audio/mp4",
+    "platforms": {
+      "web": {
+        "decode": true,
+        "encode": true
+      },
+      "desktop": {
+        "decode": true,
+        "encode": true,
+        "note": "Requires ffmpeg and ffprobe on PATH."
+      }
+    }
+  },
+  "ogg": {
+    "id": "ogg",
+    "label": "OGG",
+    "displayName": "OGG",
+    "kind": "audio",
+    "extensions": [
+      "ogg",
+      "oga"
+    ],
+    "mime": "audio/ogg",
+    "platforms": {
+      "web": {
+        "decode": true,
+        "encode": true
+      },
+      "desktop": {
+        "decode": true,
+        "encode": true,
+        "note": "Requires ffmpeg and ffprobe on PATH."
+      }
+    }
+  }
+};
+
+export const FORMATS: Record<Format, { label: string; ext: string[]; mime: string; kind: Kind }> = {
+  "heic": {
+    "label": "HEIC",
+    "ext": [
+      "heic",
+      "heif"
+    ],
+    "mime": "image/heic",
+    "kind": "image"
+  },
+  "jpeg": {
+    "label": "JPG",
+    "ext": [
+      "jpg",
+      "jpeg",
+      "jfif"
+    ],
+    "mime": "image/jpeg",
+    "kind": "image"
+  },
+  "png": {
+    "label": "PNG",
+    "ext": [
+      "png"
+    ],
+    "mime": "image/png",
+    "kind": "image"
+  },
+  "webp": {
+    "label": "WebP",
+    "ext": [
+      "webp"
+    ],
+    "mime": "image/webp",
+    "kind": "image"
+  },
+  "pdf": {
+    "label": "PDF",
+    "ext": [
+      "pdf"
+    ],
+    "mime": "application/pdf",
+    "kind": "pdf"
+  },
+  "mp3": {
+    "label": "MP3",
+    "ext": [
+      "mp3"
+    ],
+    "mime": "audio/mpeg",
+    "kind": "audio"
+  },
+  "wav": {
+    "label": "WAV",
+    "ext": [
+      "wav"
+    ],
+    "mime": "audio/wav",
+    "kind": "audio"
+  },
+  "m4a": {
+    "label": "M4A",
+    "ext": [
+      "m4a",
+      "aac",
+      "mp4"
+    ],
+    "mime": "audio/mp4",
+    "kind": "audio"
+  },
+  "ogg": {
+    "label": "OGG",
+    "ext": [
+      "ogg",
+      "oga"
+    ],
+    "mime": "audio/ogg",
+    "kind": "audio"
+  }
+};
+
+export const LIMITS: Record<string, Record<Platform, Limits>> = {
+  "image.convert": {
+    "web": {
+      "maxMB": 200,
+      "maxFiles": 200,
+      "maxPixels": 100000000
+    },
+    "desktop": {
+      "maxMB": 2048,
+      "maxFiles": 10000,
+      "maxPixels": 1000000000
+    }
+  },
+  "pdf": {
+    "web": {
+      "maxMB": 200,
+      "maxFiles": 50,
+      "maxPages": 2000
+    },
+    "desktop": {
+      "maxMB": 4096,
+      "maxFiles": 1000,
+      "maxPages": 20000
+    }
+  },
+  "audio": {
+    "web": {
+      "maxMB": 200,
+      "maxFiles": 50
+    },
+    "desktop": {
+      "maxMB": 4096,
+      "maxFiles": 1000
+    }
+  }
+};
+
+const MiB = 1024 * 1024;
+export const MEMORY_BUDGET_BYTES: Record<Platform, number> = { web: 1024 * MiB, desktop: 8192 * MiB };
+
+export const TOOL_MANIFEST: Record<ToolId, ManifestToolSpec> = {
+  "convert-image": {
+    "id": "convert-image",
+    "domain": "image",
+    "acceptsKind": "image",
+    "label": "Convert image",
+    "blurb": "HEIC, WebP, PNG and JPG to each other.",
+    "tagline": "Transcode between modern and standard image formats",
+    "description": "Convert between HEIC (Web), JPEG, PNG, and WebP with EXIF orientation baking, RGBA-to-white flattening for JPEG, and metadata stripping.",
+    "outputCapability": "JPEG, PNG, or WebP (EXIF baked upright, metadata stripped)",
+    "searchKeywords": [
+      "heic",
+      "jpg",
+      "jpeg",
+      "png",
+      "webp",
+      "iphone",
+      "live photo",
+      "convert photo",
+      "heic to jpg",
+      "apple photo"
+    ],
+    "popular": true,
+    "inputs": {
+      "mode": "one",
+      "min": 1,
+      "max": null
+    },
+    "acceptedFormats": {
+      "web": [
+        "heic",
+        "jpeg",
+        "png",
+        "webp"
+      ],
+      "desktop": [
+        "jpeg",
+        "png",
+        "webp"
+      ]
+    },
+    "outputFormats": {
+      "web": [
+        "jpeg",
+        "png",
+        "webp"
+      ],
+      "desktop": [
+        "jpeg",
+        "png",
+        "webp"
+      ]
+    },
+    "options": [
+      {
+        "key": "to",
+        "label": "Convert to",
+        "type": "select",
+        "platforms": [
+          "web",
+          "desktop"
+        ],
+        "default": "jpeg",
+        "choices": [
+          {
+            "value": "jpeg",
+            "label": "JPG"
+          },
+          {
+            "value": "png",
+            "label": "PNG"
+          },
+          {
+            "value": "webp",
+            "label": "WebP"
+          }
+        ]
+      },
+      {
+        "key": "quality",
+        "label": "Quality",
+        "type": "number",
+        "platforms": [
+          "web",
+          "desktop"
+        ],
+        "min": 10,
+        "max": 100,
+        "default": 90,
+        "unit": "%",
+        "showIf": {
+          "key": "to",
+          "is": [
+            "jpeg",
+            "webp"
+          ]
+        }
+      }
+    ],
+    "outputNaming": {
+      "template": "{name} (converted)",
+      "multi": false,
+      "extRule": "fromOptionTo"
+    },
+    "limitsKey": "image.convert",
+    "capabilities": {
+      "batch": false,
+      "preview": true,
+      "loupe": true,
+      "passwordUnlock": {
+        "web": false,
+        "desktop": false
+      },
+      "chainOutput": true
+    },
+    "platformSupport": {
+      "web": {
+        "status": "available",
+        "engine": "libheif / @jsquash WASM"
+      },
+      "desktop": {
+        "status": "available",
+        "engine": "builtin",
+        "engineLabel": "Rust image crate",
+        "externalDependencies": [],
+        "note": "Supports JPEG, PNG, and WebP. HEIC inputs are handled in Refract Web."
+      }
+    }
+  },
+  "compress-image": {
+    "id": "compress-image",
+    "domain": "image",
+    "acceptsKind": "image",
+    "label": "Compress image",
+    "blurb": "Shrink a photo to a target size in KB.",
+    "tagline": "Target-size compression using binary quality search",
+    "description": "Shrink images to an exact target file size in kilobytes using binary quality search with automatic scale-down fallback.",
+    "outputCapability": "Optimized JPEG or WebP (Web) / JPEG (Desktop) under target size",
+    "searchKeywords": [
+      "compress",
+      "shrink",
+      "make image smaller",
+      "reduce size",
+      "target size",
+      "kb",
+      "mb",
+      "email attachment",
+      "discord"
+    ],
+    "popular": true,
+    "inputs": {
+      "mode": "one",
+      "min": 1,
+      "max": null
+    },
+    "acceptedFormats": {
+      "web": [
+        "heic",
+        "jpeg",
+        "png",
+        "webp"
+      ],
+      "desktop": [
+        "jpeg",
+        "png",
+        "webp"
+      ]
+    },
+    "outputFormats": {
+      "web": [
+        "jpeg",
+        "webp"
+      ],
+      "desktop": [
+        "jpeg"
+      ]
+    },
+    "options": [
+      {
+        "key": "to",
+        "label": "Save as",
+        "type": "select",
+        "platforms": [
+          "web"
+        ],
+        "default": "jpeg",
+        "choices": [
+          {
+            "value": "jpeg",
+            "label": "JPG"
+          },
+          {
+            "value": "webp",
+            "label": "WebP"
+          }
+        ]
+      },
+      {
+        "key": "targetKB",
+        "label": "Target size",
+        "type": "number",
+        "platforms": [
+          "web",
+          "desktop"
+        ],
+        "min": 5,
+        "max": 20000,
+        "default": 200,
+        "unit": "KB"
+      }
+    ],
+    "outputNaming": {
+      "template": "{name}_compressed",
+      "multi": false,
+      "extRule": "fromOptionTo"
+    },
+    "limitsKey": "image.convert",
+    "capabilities": {
+      "batch": false,
+      "preview": true,
+      "loupe": true,
+      "passwordUnlock": {
+        "web": false,
+        "desktop": false
+      },
+      "chainOutput": true
+    },
+    "platformSupport": {
+      "web": {
+        "status": "available",
+        "engine": "@jsquash encoders WASM"
+      },
+      "desktop": {
+        "status": "available",
+        "engine": "builtin",
+        "engineLabel": "Rust image crate",
+        "externalDependencies": [],
+        "note": "Currently outputs JPEG on Desktop; WebP target-size output is planned in Phase 2."
+      }
+    }
+  },
+  "resize-image": {
+    "id": "resize-image",
+    "domain": "image",
+    "acceptsKind": "image",
+    "label": "Resize image",
+    "blurb": "Set the size in pixels or centimetres.",
+    "tagline": "High-fidelity Lanczos-3 resampling by pixels or physical units",
+    "description": "Scale photos by exact pixel dimensions or physical size (cm + DPI) while preserving aspect ratio.",
+    "outputCapability": "Rescaled JPEG, PNG, or WebP with Lanczos-3 resampling",
+    "searchKeywords": [
+      "resize",
+      "scale",
+      "dimensions",
+      "width",
+      "height",
+      "dpi",
+      "cm",
+      "print",
+      "aspect ratio",
+      "crop"
+    ],
+    "popular": false,
+    "inputs": {
+      "mode": "one",
+      "min": 1,
+      "max": null
+    },
+    "acceptedFormats": {
+      "web": [
+        "heic",
+        "jpeg",
+        "png",
+        "webp"
+      ],
+      "desktop": [
+        "jpeg",
+        "png",
+        "webp"
+      ]
+    },
+    "outputFormats": {
+      "web": [
+        "jpeg",
+        "png",
+        "webp"
+      ],
+      "desktop": [
+        "jpeg",
+        "png",
+        "webp"
+      ]
+    },
+    "options": [
+      {
+        "key": "unit",
+        "label": "Unit",
+        "type": "select",
+        "platforms": [
+          "web",
+          "desktop"
+        ],
+        "default": "px",
+        "choices": [
+          {
+            "value": "px",
+            "label": "Pixels"
+          },
+          {
+            "value": "cm",
+            "label": "Centimetres"
+          }
+        ]
+      },
+      {
+        "key": "width",
+        "label": "Width",
+        "type": "number",
+        "platforms": [
+          "web",
+          "desktop"
+        ],
+        "min": 0,
+        "max": 20000,
+        "step": 0.1,
+        "default": 1200,
+        "help": "0 keeps the aspect ratio"
+      },
+      {
+        "key": "height",
+        "label": "Height",
+        "type": "number",
+        "platforms": [
+          "web",
+          "desktop"
+        ],
+        "min": 0,
+        "max": 20000,
+        "step": 0.1,
+        "default": 0,
+        "help": "0 keeps the aspect ratio"
+      },
+      {
+        "key": "dpi",
+        "label": "Print resolution",
+        "type": "number",
+        "platforms": [
+          "web",
+          "desktop"
+        ],
+        "min": 72,
+        "max": 1200,
+        "default": 300,
+        "unit": "DPI",
+        "showIf": {
+          "key": "unit",
+          "is": [
+            "cm"
+          ]
+        }
+      },
+      {
+        "key": "to",
+        "label": "Save as",
+        "type": "select",
+        "platforms": [
+          "web",
+          "desktop"
+        ],
+        "default": "same",
+        "choices": [
+          {
+            "value": "same",
+            "label": "Same format"
+          },
+          {
+            "value": "jpeg",
+            "label": "JPG"
+          },
+          {
+            "value": "png",
+            "label": "PNG"
+          },
+          {
+            "value": "webp",
+            "label": "WebP"
+          }
+        ]
+      }
+    ],
+    "outputNaming": {
+      "template": "{name}_resized",
+      "multi": false,
+      "extRule": "sameOrJpeg"
+    },
+    "limitsKey": "image.convert",
+    "capabilities": {
+      "batch": false,
+      "preview": true,
+      "loupe": true,
+      "passwordUnlock": {
+        "web": false,
+        "desktop": false
+      },
+      "chainOutput": true
+    },
+    "platformSupport": {
+      "web": {
+        "status": "available",
+        "engine": "@jsquash/resize (Lanczos-3) WASM"
+      },
+      "desktop": {
+        "status": "available",
+        "engine": "builtin",
+        "engineLabel": "Rust image crate (Lanczos-3)",
+        "externalDependencies": [],
+        "note": "Engine supports pixel and cm+DPI resizing and format selection; Desktop UI wires cm/DPI and format selector in Phase 2/4."
+      }
+    }
+  },
+  "merge-pdf": {
+    "id": "merge-pdf",
+    "domain": "pdf",
+    "acceptsKind": "pdf",
+    "label": "Merge PDFs",
+    "blurb": "Join several PDFs into one, in the order added.",
+    "tagline": "Combine multiple PDF documents in custom drop sequence",
+    "description": "Combine multiple PDF scans and documents into a single document in queue order with page attribute preservation.",
+    "outputCapability": "Single unified multi-page PDF document",
+    "searchKeywords": [
+      "merge",
+      "combine",
+      "join",
+      "append",
+      "collate",
+      "combine pdfs",
+      "bundle pdf"
+    ],
+    "popular": true,
+    "inputs": {
+      "mode": "many",
+      "min": 2,
+      "max": null
+    },
+    "acceptedFormats": {
+      "web": [
+        "pdf"
+      ],
+      "desktop": [
+        "pdf"
+      ]
+    },
+    "outputFormats": {
+      "web": [
+        "pdf"
+      ],
+      "desktop": [
+        "pdf"
+      ]
+    },
+    "options": [],
+    "outputNaming": {
+      "template": "{name}_merged",
+      "multi": false,
+      "extRule": "fixed",
+      "fixedExt": "pdf"
+    },
+    "limitsKey": "pdf",
+    "capabilities": {
+      "batch": true,
+      "preview": false,
+      "loupe": false,
+      "passwordUnlock": {
+        "web": true,
+        "desktop": false
+      },
+      "chainOutput": true
+    },
+    "platformSupport": {
+      "web": {
+        "status": "available",
+        "engine": "pdf-lib"
+      },
+      "desktop": {
+        "status": "available",
+        "engine": "builtin",
+        "engineLabel": "Rust lopdf",
+        "externalDependencies": [],
+        "note": "Password-protected merge unlock is wired in Phase 2."
+      }
+    }
+  },
+  "split-pdf": {
+    "id": "split-pdf",
+    "domain": "pdf",
+    "acceptsKind": "pdf",
+    "label": "Split PDF",
+    "blurb": "One file per page, or per range like 1-3, 5, 8-.",
+    "tagline": "Extract page ranges into separate documents",
+    "description": "Extract specific pages or page intervals (e.g. 1-3, 5, 8-end) into separate PDFs (bundled as a ZIP on Web, individual files on Desktop).",
+    "outputCapability": "ZIP archive (Web) or individual PDFs (Desktop) per page range",
+    "searchKeywords": [
+      "split",
+      "extract pages",
+      "separate",
+      "page range",
+      "cut pdf",
+      "split pdf"
+    ],
+    "popular": false,
+    "inputs": {
+      "mode": "one",
+      "min": 1,
+      "max": null
+    },
+    "acceptedFormats": {
+      "web": [
+        "pdf"
+      ],
+      "desktop": [
+        "pdf"
+      ]
+    },
+    "outputFormats": {
+      "web": [
+        "pdf"
+      ],
+      "desktop": [
+        "pdf"
+      ]
+    },
+    "options": [
+      {
+        "key": "ranges",
+        "label": "Page ranges",
+        "type": "text",
+        "platforms": [
+          "web",
+          "desktop"
+        ],
+        "default": "",
+        "placeholder": "Every page",
+        "help": "e.g. 1-3, 5, 8-"
+      }
+    ],
+    "outputNaming": {
+      "template": "{name}_split",
+      "multi": true,
+      "extRule": "fixed",
+      "fixedExt": "zip",
+      "entryTemplate": "{name}-p{range}.pdf"
+    },
+    "limitsKey": "pdf",
+    "capabilities": {
+      "batch": false,
+      "preview": false,
+      "loupe": false,
+      "passwordUnlock": {
+        "web": true,
+        "desktop": false
+      },
+      "chainOutput": true
+    },
+    "platformSupport": {
+      "web": {
+        "status": "available",
+        "engine": "pdf-lib"
+      },
+      "desktop": {
+        "status": "available",
+        "engine": "builtin",
+        "engineLabel": "Rust lopdf",
+        "externalDependencies": [],
+        "note": "Password-protected split unlock and empty-range default convergence land in Phase 2."
+      }
+    }
+  },
+  "reorder-pdf": {
+    "id": "reorder-pdf",
+    "domain": "pdf",
+    "acceptsKind": "pdf",
+    "label": "Reorder pages",
+    "blurb": "Put the pages of a PDF in a new order.",
+    "tagline": "Rearrange document pages with strict sequence validation",
+    "description": "Reorder pages based on a custom sequence (e.g. 3, 1, 2) with strict 1-to-1 page validation.",
+    "outputCapability": "Re-sequenced PDF document",
+    "searchKeywords": [
+      "reorder",
+      "rearrange",
+      "sort pages",
+      "shuffle",
+      "organize pdf"
+    ],
+    "popular": false,
+    "inputs": {
+      "mode": "one",
+      "min": 1,
+      "max": null
+    },
+    "acceptedFormats": {
+      "web": [
+        "pdf"
+      ],
+      "desktop": [
+        "pdf"
+      ]
+    },
+    "outputFormats": {
+      "web": [
+        "pdf"
+      ],
+      "desktop": [
+        "pdf"
+      ]
+    },
+    "options": [
+      {
+        "key": "order",
+        "label": "New page order",
+        "type": "text",
+        "platforms": [
+          "web",
+          "desktop"
+        ],
+        "default": "",
+        "placeholder": "e.g. 3, 1, 2"
+      }
+    ],
+    "outputNaming": {
+      "template": "{name}_reordered",
+      "multi": false,
+      "extRule": "fixed",
+      "fixedExt": "pdf"
+    },
+    "limitsKey": "pdf",
+    "capabilities": {
+      "batch": false,
+      "preview": false,
+      "loupe": false,
+      "passwordUnlock": {
+        "web": true,
+        "desktop": false
+      },
+      "chainOutput": true
+    },
+    "platformSupport": {
+      "web": {
+        "status": "available",
+        "engine": "pdf-lib"
+      },
+      "desktop": {
+        "status": "available",
+        "engine": "builtin",
+        "engineLabel": "Rust lopdf",
+        "externalDependencies": [],
+        "note": "Password-protected reorder unlock lands in Phase 2."
+      }
+    }
+  },
+  "images-to-pdf": {
+    "id": "images-to-pdf",
+    "domain": "pdf",
+    "acceptsKind": "image",
+    "label": "Images to PDF",
+    "blurb": "One page per image, in the order added.",
+    "tagline": "Compile multiple image files into a single multi-page PDF",
+    "description": "Assemble images into a multi-page PDF document (A4, Letter, or original image size on Web; configurable DPI and JPEG quality on Desktop).",
+    "outputCapability": "Multi-page PDF document containing all input images",
+    "searchKeywords": [
+      "photos to pdf",
+      "images to pdf",
+      "jpg to pdf",
+      "png to pdf",
+      "scan to pdf",
+      "compile pdf"
+    ],
+    "popular": true,
+    "inputs": {
+      "mode": "many",
+      "min": 1,
+      "max": null
+    },
+    "acceptedFormats": {
+      "web": [
+        "heic",
+        "jpeg",
+        "png",
+        "webp"
+      ],
+      "desktop": [
+        "jpeg",
+        "png",
+        "webp"
+      ]
+    },
+    "outputFormats": {
+      "web": [
+        "pdf"
+      ],
+      "desktop": [
+        "pdf"
+      ]
+    },
+    "options": [
+      {
+        "key": "pageSize",
+        "label": "Page size",
+        "type": "select",
+        "platforms": [
+          "web"
+        ],
+        "default": "a4",
+        "choices": [
+          {
+            "value": "a4",
+            "label": "A4"
+          },
+          {
+            "value": "letter",
+            "label": "Letter"
+          },
+          {
+            "value": "fit",
+            "label": "Same as image"
+          }
+        ]
+      },
+      {
+        "key": "dpi",
+        "label": "Resolution",
+        "type": "number",
+        "platforms": [
+          "desktop"
+        ],
+        "min": 72,
+        "max": 600,
+        "default": 150,
+        "unit": "DPI",
+        "help": "Native desktop page sizing resolution for embedded images"
+      },
+      {
+        "key": "quality",
+        "label": "JPEG quality",
+        "type": "number",
+        "platforms": [
+          "desktop"
+        ],
+        "min": 10,
+        "max": 100,
+        "default": 85,
+        "unit": "%",
+        "help": "Compression quality when embedding images on desktop"
+      }
+    ],
+    "outputNaming": {
+      "template": "{name}",
+      "multi": false,
+      "extRule": "fixed",
+      "fixedExt": "pdf"
+    },
+    "limitsKey": "image.convert",
+    "capabilities": {
+      "batch": true,
+      "preview": false,
+      "loupe": false,
+      "passwordUnlock": {
+        "web": false,
+        "desktop": false
+      },
+      "chainOutput": true
+    },
+    "platformSupport": {
+      "web": {
+        "status": "available",
+        "engine": "pdf-lib"
+      },
+      "desktop": {
+        "status": "available",
+        "engine": "builtin",
+        "engineLabel": "Rust lopdf + image",
+        "externalDependencies": [],
+        "note": "Supports native DPI & JPEG quality controls; pageSize support aligns in Phase 2."
+      }
+    }
+  },
+  "pdf-to-images": {
+    "id": "pdf-to-images",
+    "domain": "pdf",
+    "acceptsKind": "pdf",
+    "label": "PDF to images",
+    "blurb": "Each page as a PNG or JPG, saved as a ZIP.",
+    "tagline": "Render document pages as full-resolution image files",
+    "description": "Rasterize PDF pages into PNG or JPEG images (ZIP archive on Web; individual page images on Desktop using a local rasterizer with embedded-image fallback).",
+    "outputCapability": "PNG or JPEG image per page (ZIP on Web, files on Desktop)",
+    "searchKeywords": [
+      "pdf to png",
+      "pdf to jpg",
+      "pdf to image",
+      "rasterize",
+      "export pages",
+      "extract images"
+    ],
+    "popular": true,
+    "inputs": {
+      "mode": "one",
+      "min": 1,
+      "max": null
+    },
+    "acceptedFormats": {
+      "web": [
+        "pdf"
+      ],
+      "desktop": [
+        "pdf"
+      ]
+    },
+    "outputFormats": {
+      "web": [
+        "png",
+        "jpeg"
+      ],
+      "desktop": [
+        "png",
+        "jpeg"
+      ]
+    },
+    "options": [
+      {
+        "key": "to",
+        "label": "Image format",
+        "type": "select",
+        "platforms": [
+          "web",
+          "desktop"
+        ],
+        "default": "png",
+        "choices": [
+          {
+            "value": "png",
+            "label": "PNG"
+          },
+          {
+            "value": "jpeg",
+            "label": "JPG"
+          }
+        ]
+      },
+      {
+        "key": "dpi",
+        "label": "Resolution",
+        "type": "number",
+        "platforms": [
+          "web",
+          "desktop"
+        ],
+        "min": 36,
+        "max": 300,
+        "default": 150,
+        "unit": "DPI"
+      }
+    ],
+    "outputNaming": {
+      "template": "{name}_pages",
+      "multi": true,
+      "extRule": "fixed",
+      "fixedExt": "zip",
+      "entryTemplate": "{name}-p{page}.{ext}"
+    },
+    "limitsKey": "pdf",
+    "capabilities": {
+      "batch": false,
+      "preview": false,
+      "loupe": false,
+      "passwordUnlock": {
+        "web": true,
+        "desktop": true
+      },
+      "chainOutput": true
+    },
+    "platformSupport": {
+      "web": {
+        "status": "available",
+        "engine": "pdfjs-dist + OffscreenCanvas"
+      },
+      "desktop": {
+        "status": "requires-dependency",
+        "engine": "pdf-renderer",
+        "engineLabel": "PDF renderer (mutool / pdftoppm / pdftocairo / gs)",
+        "externalDependencies": [
+          "mutool | pdftoppm | pdftocairo | gs"
+        ],
+        "fallback": "Extracts embedded JPEG/PNG XObject images when no rasterizer is installed on PATH."
+      }
+    }
+  },
+  "compress-pdf": {
+    "id": "compress-pdf",
+    "domain": "pdf",
+    "acceptsKind": "pdf",
+    "label": "Compress PDF",
+    "blurb": "Lossless: nothing in the document changes.",
+    "tagline": "Lossless stream and object compression",
+    "description": "Losslessly reduce PDF file sizes using Flate stream re-compression and object stream optimization.",
+    "outputCapability": "Losslessly compressed PDF document",
+    "searchKeywords": [
+      "compress pdf",
+      "shrink pdf",
+      "reduce pdf",
+      "qpdf",
+      "smaller pdf",
+      "email pdf"
+    ],
+    "popular": true,
+    "inputs": {
+      "mode": "one",
+      "min": 1,
+      "max": null
+    },
+    "acceptedFormats": {
+      "web": [
+        "pdf"
+      ],
+      "desktop": [
+        "pdf"
+      ]
+    },
+    "outputFormats": {
+      "web": [
+        "pdf"
+      ],
+      "desktop": [
+        "pdf"
+      ]
+    },
+    "options": [],
+    "outputNaming": {
+      "template": "{name}_compressed",
+      "multi": false,
+      "extRule": "fixed",
+      "fixedExt": "pdf"
+    },
+    "limitsKey": "pdf",
+    "capabilities": {
+      "batch": false,
+      "preview": false,
+      "loupe": false,
+      "passwordUnlock": {
+        "web": true,
+        "desktop": true
+      },
+      "chainOutput": true
+    },
+    "platformSupport": {
+      "web": {
+        "status": "available",
+        "engine": "@neslinesli93/qpdf-wasm"
+      },
+      "desktop": {
+        "status": "available",
+        "engine": "builtin",
+        "engineLabel": "Rust lopdf",
+        "externalDependencies": []
+      }
+    }
+  },
+  "convert-audio": {
+    "id": "convert-audio",
+    "domain": "audio",
+    "acceptsKind": "audio",
+    "label": "Convert audio",
+    "blurb": "MP3, WAV, M4A and OGG to each other.",
+    "tagline": "Transcode between audio codecs with custom bitrate",
+    "description": "Transcode sound files between MP3, WAV, M4A, and OGG with configurable bitrates.",
+    "outputCapability": "MP3, WAV, M4A, or OGG audio file",
+    "searchKeywords": [
+      "convert audio",
+      "mp3",
+      "wav",
+      "m4a",
+      "ogg",
+      "transcode",
+      "bitrate",
+      "audio convert",
+      "voice note"
+    ],
+    "popular": true,
+    "inputs": {
+      "mode": "one",
+      "min": 1,
+      "max": null
+    },
+    "acceptedFormats": {
+      "web": [
+        "mp3",
+        "wav",
+        "m4a",
+        "ogg"
+      ],
+      "desktop": [
+        "mp3",
+        "wav",
+        "m4a",
+        "ogg"
+      ]
+    },
+    "outputFormats": {
+      "web": [
+        "mp3",
+        "wav",
+        "m4a",
+        "ogg"
+      ],
+      "desktop": [
+        "mp3",
+        "wav",
+        "m4a",
+        "ogg"
+      ]
+    },
+    "options": [
+      {
+        "key": "to",
+        "label": "Convert to",
+        "type": "select",
+        "platforms": [
+          "web",
+          "desktop"
+        ],
+        "default": "mp3",
+        "choices": [
+          {
+            "value": "mp3",
+            "label": "MP3"
+          },
+          {
+            "value": "wav",
+            "label": "WAV"
+          },
+          {
+            "value": "m4a",
+            "label": "M4A"
+          },
+          {
+            "value": "ogg",
+            "label": "OGG"
+          }
+        ]
+      },
+      {
+        "key": "bitrate",
+        "label": "Bitrate",
+        "type": "select",
+        "platforms": [
+          "web",
+          "desktop"
+        ],
+        "default": "192k",
+        "choices": [
+          {
+            "value": "128k",
+            "label": "128 kbps"
+          },
+          {
+            "value": "192k",
+            "label": "192 kbps"
+          },
+          {
+            "value": "256k",
+            "label": "256 kbps"
+          },
+          {
+            "value": "320k",
+            "label": "320 kbps"
+          }
+        ],
+        "showIf": {
+          "key": "to",
+          "is": [
+            "mp3",
+            "m4a",
+            "ogg"
+          ]
+        }
+      }
+    ],
+    "outputNaming": {
+      "template": "{name} (converted)",
+      "multi": false,
+      "extRule": "fromOptionTo"
+    },
+    "limitsKey": "audio",
+    "capabilities": {
+      "batch": false,
+      "preview": false,
+      "loupe": false,
+      "passwordUnlock": {
+        "web": false,
+        "desktop": false
+      },
+      "chainOutput": true
+    },
+    "platformSupport": {
+      "web": {
+        "status": "available",
+        "engine": "FFmpeg WebAssembly (lazy-loaded)",
+        "lazyLoaded": true
+      },
+      "desktop": {
+        "status": "requires-dependency",
+        "engine": "ffmpeg",
+        "engineLabel": "System FFmpeg",
+        "externalDependencies": [
+          "ffmpeg",
+          "ffprobe"
+        ]
+      }
+    }
+  },
+  "trim-audio": {
+    "id": "trim-audio",
+    "domain": "audio",
+    "acceptsKind": "audio",
+    "label": "Trim audio",
+    "blurb": "Keep only the part between two times.",
+    "tagline": "Cut audio clips with exact start and end times",
+    "description": "Extract audio segments using exact start and end timestamps (seconds on Web; seconds or mm:ss/hh:mm:ss on Desktop).",
+    "outputCapability": "Trimmed audio segment in the input format",
+    "searchKeywords": [
+      "trim audio",
+      "cut audio",
+      "clip audio",
+      "ringtone",
+      "crop sound",
+      "audio editor",
+      "start end time"
+    ],
+    "popular": false,
+    "inputs": {
+      "mode": "one",
+      "min": 1,
+      "max": null
+    },
+    "acceptedFormats": {
+      "web": [
+        "mp3",
+        "wav",
+        "m4a",
+        "ogg"
+      ],
+      "desktop": [
+        "mp3",
+        "wav",
+        "m4a",
+        "ogg"
+      ]
+    },
+    "outputFormats": {
+      "web": [
+        "mp3",
+        "wav",
+        "m4a",
+        "ogg"
+      ],
+      "desktop": [
+        "mp3",
+        "wav",
+        "m4a",
+        "ogg"
+      ]
+    },
+    "options": [
+      {
+        "key": "start",
+        "label": "Start",
+        "type": "number",
+        "platforms": [
+          "web",
+          "desktop"
+        ],
+        "min": 0,
+        "max": 86400,
+        "step": 0.1,
+        "default": 0,
+        "unit": "s"
+      },
+      {
+        "key": "end",
+        "label": "End",
+        "type": "number",
+        "platforms": [
+          "web",
+          "desktop"
+        ],
+        "min": 0,
+        "max": 86400,
+        "step": 0.1,
+        "default": 0,
+        "unit": "s",
+        "help": "0 means the end of the file"
+      },
+      {
+        "key": "bitrate",
+        "label": "Bitrate",
+        "type": "select",
+        "platforms": [
+          "web",
+          "desktop"
+        ],
+        "default": "192k",
+        "choices": [
+          {
+            "value": "128k",
+            "label": "128 kbps"
+          },
+          {
+            "value": "192k",
+            "label": "192 kbps"
+          },
+          {
+            "value": "256k",
+            "label": "256 kbps"
+          },
+          {
+            "value": "320k",
+            "label": "320 kbps"
+          }
+        ],
+        "help": "Not used for WAV"
+      }
+    ],
+    "outputNaming": {
+      "template": "{name}_trimmed",
+      "multi": false,
+      "extRule": "sameAudioOrMp3"
+    },
+    "limitsKey": "audio",
+    "capabilities": {
+      "batch": false,
+      "preview": false,
+      "loupe": false,
+      "passwordUnlock": {
+        "web": false,
+        "desktop": false
+      },
+      "chainOutput": true
+    },
+    "platformSupport": {
+      "web": {
+        "status": "available",
+        "engine": "FFmpeg WebAssembly (lazy-loaded)",
+        "lazyLoaded": true
+      },
+      "desktop": {
+        "status": "requires-dependency",
+        "engine": "ffmpeg",
+        "engineLabel": "System FFmpeg",
+        "externalDependencies": [
+          "ffmpeg",
+          "ffprobe"
+        ]
+      }
+    }
+  }
+};
+
+export const TOOL_MANIFEST_LIST: readonly ManifestToolSpec[] = TOOL_IDS.map((id) => TOOL_MANIFEST[id]);
+
+/** Filter a tool's manifest options for a specific platform (`web` or `desktop`). */
+export function manifestOptionsForPlatform(id: ToolId, platform: Platform): ManifestOptionSpec[] {
+  return TOOL_MANIFEST[id].options
+    .filter((opt) => opt.platforms.includes(platform))
+    .map((opt) => {
+      if (opt.type === 'select') {
+        return {
+          ...opt,
+          choices: opt.choices.filter((c) => !c.platforms || c.platforms.includes(platform)),
+        };
+      }
+      return opt;
+    });
+}

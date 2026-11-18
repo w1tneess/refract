@@ -1,17 +1,6 @@
-export type Format = 'heic' | 'jpeg' | 'png' | 'webp' | 'pdf' | 'mp3' | 'wav' | 'm4a' | 'ogg';
-export type Kind = 'image' | 'pdf' | 'audio';
+import { FORMATS, type Format, type Kind } from '../generated/toolManifest.ts';
 
-export const FORMATS: Record<Format, { label: string; ext: string[]; mime: string; kind: Kind }> = {
-  heic: { label: 'HEIC', ext: ['heic', 'heif'], mime: 'image/heic', kind: 'image' },
-  jpeg: { label: 'JPG', ext: ['jpg', 'jpeg', 'jfif'], mime: 'image/jpeg', kind: 'image' },
-  png: { label: 'PNG', ext: ['png'], mime: 'image/png', kind: 'image' },
-  webp: { label: 'WebP', ext: ['webp'], mime: 'image/webp', kind: 'image' },
-  pdf: { label: 'PDF', ext: ['pdf'], mime: 'application/pdf', kind: 'pdf' },
-  mp3: { label: 'MP3', ext: ['mp3'], mime: 'audio/mpeg', kind: 'audio' },
-  wav: { label: 'WAV', ext: ['wav'], mime: 'audio/wav', kind: 'audio' },
-  m4a: { label: 'M4A', ext: ['m4a', 'aac', 'mp4'], mime: 'audio/mp4', kind: 'audio' },
-  ogg: { label: 'OGG', ext: ['ogg', 'oga'], mime: 'audio/ogg', kind: 'audio' },
-};
+export { FORMATS, type Format, type Kind };
 
 export const ext = (f: Format) => FORMATS[f].ext[0]!;
 export const formatsOfKind = (k: Kind) => (Object.keys(FORMATS) as Format[]).filter((f) => FORMATS[f].kind === k);

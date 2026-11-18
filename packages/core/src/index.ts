@@ -1,5 +1,22 @@
 export * from './errors.ts';
 export * from './engine.ts';
+export {
+  MANIFEST_VERSION,
+  MANIFEST_FORMATS,
+  TOOL_IDS,
+  TOOL_MANIFEST,
+  TOOL_MANIFEST_LIST,
+  manifestOptionsForPlatform,
+  type DesktopEngineKind,
+  type FormatPlatformSupport,
+  type LimitKey,
+  type ManifestFormatSpec,
+  type ManifestOptionChoice,
+  type ManifestOptionSpec,
+  type ManifestToolSpec,
+  type OutputExtRule,
+  type PlatformAvailabilityStatus,
+} from './generated/toolManifest.ts';
 export * from './detect/detect.ts';
 export * from './detect/heif.ts';
 export * from './detect/image.ts';

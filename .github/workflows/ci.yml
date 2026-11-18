@@ -16,6 +16,7 @@ jobs:
           node-version: 26.13.0
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - run: pnpm manifest:check
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm --filter @refract/web exec playwright install --with-deps chromium firefox

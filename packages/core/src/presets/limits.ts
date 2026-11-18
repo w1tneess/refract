@@ -1,28 +1,9 @@
 import { RefractError } from '../errors.ts';
+import { LIMITS, MEMORY_BUDGET_BYTES, type Limits, type Platform } from '../generated/toolManifest.ts';
 
-export type Limits = { maxMB: number; maxFiles: number; maxPages?: number; maxPixels?: number };
-export type Platform = 'web' | 'desktop';
+export { LIMITS, MEMORY_BUDGET_BYTES, type Limits, type Platform };
 
 const MiB = 1024 * 1024;
-
-/** Limits per operation, checked in Probe before any work starts. */
-export const LIMITS: Record<string, Record<Platform, Limits>> = {
-  'image.convert': {
-    web: { maxMB: 200, maxFiles: 200, maxPixels: 100_000_000 },
-    desktop: { maxMB: 2048, maxFiles: 10_000, maxPixels: 1_000_000_000 },
-  },
-  pdf: {
-    web: { maxMB: 200, maxFiles: 50, maxPages: 2000 },
-    desktop: { maxMB: 4096, maxFiles: 1000, maxPages: 20_000 },
-  },
-  audio: {
-    web: { maxMB: 200, maxFiles: 50 },
-    desktop: { maxMB: 4096, maxFiles: 1000 },
-  },
-};
-
-// shortcut: one fixed per-job budget. Upgrade to navigator.deviceMemory-based budgets once phones are tested.
-export const MEMORY_BUDGET_BYTES: Record<Platform, number> = { web: 1024 * MiB, desktop: 8192 * MiB };
 
 const mb = (bytes: number) => Math.ceil(bytes / MiB);
 

@@ -1,4 +1,4 @@
-import type { ToolId, Kind } from '@refract/core';
+import { MANIFEST_FORMATS, TOOL_IDS, TOOL_MANIFEST, type Kind, type ToolId } from '@refract/core';
 
 export interface ToolPresentation {
   id: ToolId;
@@ -13,137 +13,28 @@ export interface ToolPresentation {
   popular?: boolean;
 }
 
-export const TOOLS_METADATA: Record<ToolId, ToolPresentation> = {
-  'convert-image': {
-    id: 'convert-image',
-    domain: 'image',
-    title: 'Convert image',
-    tagline: 'Transcode between modern and standard image formats',
-    description: 'Convert between HEIC, JPEG, PNG, and WebP with EXIF orientation baking and color space preservation.',
-    inputFormats: ['HEIC', 'JPEG', 'PNG', 'WebP'],
-    outputCapability: 'JPEG, PNG, WebP (bakes EXIF rotation, strips metadata)',
-    engine: 'libheif / @jsquash WASM',
-    searchKeywords: ['heic', 'jpg', 'jpeg', 'png', 'webp', 'iphone', 'live photo', 'convert photo', 'heic to jpg', 'apple photo'],
-    popular: true,
-  },
-  'compress-image': {
-    id: 'compress-image',
-    domain: 'image',
-    title: 'Compress image',
-    tagline: 'Target-size compression using binary quality search',
-    description: 'Shrink HEIC, JPEG, PNG, and WebP files to an exact target file size in kilobytes with automated quality calibration.',
-    inputFormats: ['HEIC', 'JPEG', 'PNG', 'WebP'],
-    outputCapability: 'Optimized JPEG or WebP under target size',
-    engine: '@jsquash encoders WASM',
-    searchKeywords: ['compress', 'shrink', 'make image smaller', 'reduce size', 'target size', 'kb', 'mb', 'email attachment', 'discord'],
-    popular: true,
-  },
-  'resize-image': {
-    id: 'resize-image',
-    domain: 'image',
-    title: 'Resize image',
-    tagline: 'High-fidelity Lanczos-3 resampling by pixels or physical units',
-    description: 'Scale photos by exact pixel dimensions or physical size (cm + DPI) while preserving aspect ratio.',
-    inputFormats: ['HEIC', 'JPEG', 'PNG', 'WebP'],
-    outputCapability: 'Rescaled JPEG, PNG, or WebP with crisp edges',
-    engine: '@jsquash/resize (Lanczos-3) WASM',
-    searchKeywords: ['resize', 'scale', 'dimensions', 'width', 'height', 'dpi', 'cm', 'print', 'aspect ratio', 'crop'],
-    popular: false,
-  },
-  'merge-pdf': {
-    id: 'merge-pdf',
-    domain: 'pdf',
-    title: 'Merge PDF',
-    tagline: 'Combine multiple PDF documents in custom drop sequence',
-    description: 'Combine multiple PDF scans and documents into a single document in drop order with metadata cleanup.',
-    inputFormats: ['PDF'],
-    outputCapability: 'Single unified multi-page PDF document',
-    engine: 'pdf-lib',
-    searchKeywords: ['merge', 'combine', 'join', 'append', 'collate', 'combine pdfs', 'bundle pdf'],
-    popular: true,
-  },
-  'split-pdf': {
-    id: 'split-pdf',
-    domain: 'pdf',
-    title: 'Split PDF',
-    tagline: 'Extract page ranges into separate documents',
-    description: 'Extract specific pages or page intervals (e.g. 1-3, 5, 8-end) into a downloadable ZIP archive of separate PDFs.',
-    inputFormats: ['PDF'],
-    outputCapability: 'ZIP archive of extracted individual PDF documents',
-    engine: 'pdf-lib',
-    searchKeywords: ['split', 'extract pages', 'separate', 'page range', 'cut pdf', 'split pdf'],
-    popular: false,
-  },
-  'reorder-pdf': {
-    id: 'reorder-pdf',
-    domain: 'pdf',
-    title: 'Reorder PDF',
-    tagline: 'Rearrange document pages with strict sequence validation',
-    description: 'Reorder pages based on a custom sequence (e.g. 3, 1, 2) with 1-to-1 page validation guarantees.',
-    inputFormats: ['PDF'],
-    outputCapability: 'Re-sequenced PDF document',
-    engine: 'pdf-lib',
-    searchKeywords: ['reorder', 'rearrange', 'sort pages', 'shuffle', 'organize pdf'],
-    popular: false,
-  },
-  'images-to-pdf': {
-    id: 'images-to-pdf',
-    domain: 'pdf',
-    title: 'Images to PDF',
-    tagline: 'Compile multiple image files into a single multi-page PDF',
-    description: 'Assemble HEIC, JPEG, PNG, and WebP images into a cleanly formatted PDF document (A4, Letter, or original image size).',
-    inputFormats: ['HEIC', 'JPEG', 'PNG', 'WebP'],
-    outputCapability: 'Multi-page PDF document containing all input images',
-    engine: 'pdf-lib',
-    searchKeywords: ['photos to pdf', 'images to pdf', 'jpg to pdf', 'png to pdf', 'scan to pdf', 'compile pdf'],
-    popular: true,
-  },
-  'pdf-to-images': {
-    id: 'pdf-to-images',
-    domain: 'pdf',
-    title: 'PDF to images',
-    tagline: 'Render document pages as full-resolution image files',
-    description: 'Rasterize PDF pages into high-resolution PNG or JPEG images bundled into a downloadable ZIP archive.',
-    inputFormats: ['PDF'],
-    outputCapability: 'ZIP archive of PNG or JPEG images (one per page)',
-    engine: 'pdfjs-dist + OffscreenCanvas',
-    searchKeywords: ['pdf to png', 'pdf to jpg', 'pdf to image', 'rasterize', 'export pages', 'extract images'],
-    popular: true,
-  },
-  'compress-pdf': {
-    id: 'compress-pdf',
-    domain: 'pdf',
-    title: 'Compress PDF',
-    tagline: 'Lossless stream re-compression and object streams via QPDF',
-    description: 'Losslessly reduce PDF file sizes using Flate stream re-compression and compressed object streams.',
-    inputFormats: ['PDF (with user/owner password unlock)'],
-    outputCapability: 'Losslessly compressed PDF document',
-    engine: '@neslinesli93/qpdf-wasm',
-    searchKeywords: ['compress pdf', 'shrink pdf', 'reduce pdf', 'qpdf', 'smaller pdf', 'email pdf'],
-    popular: true,
-  },
-  'convert-audio': {
-    id: 'convert-audio',
-    domain: 'audio',
-    title: 'Convert audio',
-    tagline: 'Transcode between audio codecs with custom bitrate',
-    description: 'Transcode sound files between MP3, WAV, M4A, and OGG with configurable bitrates from 128 to 320 kbps.',
-    inputFormats: ['MP3', 'WAV', 'M4A', 'OGG'],
-    outputCapability: 'MP3, WAV, M4A, or OGG audio file',
-    engine: 'FFmpeg WebAssembly (lazy-loaded)',
-    searchKeywords: ['convert audio', 'mp3', 'wav', 'm4a', 'ogg', 'transcode', 'bitrate', 'audio convert', 'voice note'],
-    popular: true,
-  },
-  'trim-audio': {
-    id: 'trim-audio',
-    domain: 'audio',
-    title: 'Trim audio',
-    tagline: 'Cut audio clips with exact start and end times',
-    description: 'Extract audio segments using exact start and end timestamps in seconds.',
-    inputFormats: ['MP3', 'WAV', 'M4A', 'OGG'],
-    outputCapability: 'Trimmed audio segment in the input format',
-    engine: 'FFmpeg WebAssembly (lazy-loaded)',
-    searchKeywords: ['trim audio', 'cut audio', 'clip audio', 'ringtone', 'crop sound', 'audio editor', 'start end time'],
-    popular: false,
-  },
-};
+export const TOOLS_METADATA: Record<ToolId, ToolPresentation> = Object.fromEntries(
+  TOOL_IDS.map((id) => {
+    const spec = TOOL_MANIFEST[id];
+    const formats = spec.acceptedFormats.web.map((f) => MANIFEST_FORMATS[f].displayName);
+    const inputFormats =
+      id === 'compress-pdf' && spec.capabilities.passwordUnlock.web
+        ? ['PDF (with user/owner password unlock)']
+        : formats;
+    return [
+      id,
+      {
+        id,
+        domain: spec.domain,
+        title: spec.label,
+        tagline: spec.tagline,
+        description: spec.description,
+        inputFormats,
+        outputCapability: spec.outputCapability,
+        engine: spec.platformSupport.web.engine,
+        searchKeywords: [...spec.searchKeywords],
+        popular: spec.popular,
+      } satisfies ToolPresentation,
+    ];
+  }),
+) as Record<ToolId, ToolPresentation>;

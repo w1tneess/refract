@@ -1,4 +1,4 @@
-import type { Kind, ToolId } from '@refract/core';
+import { TOOL_MANIFEST_LIST, type Kind, type ToolId } from '@refract/core';
 
 export type DomainId = 'image' | 'pdf' | 'audio';
 
@@ -12,27 +12,30 @@ export interface DomainDefinition {
   tools: ToolId[];
 }
 
+const toolsForDomain = (domain: DomainId): ToolId[] =>
+  TOOL_MANIFEST_LIST.filter((t) => t.domain === domain).map((t) => t.id);
+
 export const DOMAINS: DomainDefinition[] = [
   {
     id: 'image',
     label: 'Images',
     shortLabel: 'Images',
     description: 'Convert, compress and resize photos.',
-    tools: ['convert-image', 'compress-image', 'resize-image'],
+    tools: toolsForDomain('image'),
   },
   {
     id: 'pdf',
     label: 'PDF documents',
     shortLabel: 'PDF',
     description: 'Merge, split, reorder, compress and convert PDFs.',
-    tools: ['merge-pdf', 'split-pdf', 'reorder-pdf', 'images-to-pdf', 'pdf-to-images', 'compress-pdf'],
+    tools: toolsForDomain('pdf'),
   },
   {
     id: 'audio',
     label: 'Audio',
     shortLabel: 'Audio',
     description: 'Convert and trim sound files.',
-    tools: ['convert-audio', 'trim-audio'],
+    tools: toolsForDomain('audio'),
   },
 ];
 

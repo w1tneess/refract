@@ -1,0 +1,305 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://refract.local/specs/tool-manifest.schema.json",
+  "title": "Refract Canonical Tool Manifest",
+  "description": "Single source of truth for Refract product contracts, formats, limits, tool options, output naming, and platform capabilities across Web (WASM) and Desktop (Native Rust).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "manifestVersion", "formats", "limits", "memoryBudgetMB", "tools"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "manifestVersion": { "type": "integer", "minimum": 1 },
+    "formats": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": { "$ref": "#/$defs/formatSpec" }
+    },
+    "limits": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["web", "desktop"],
+        "properties": {
+          "web": { "$ref": "#/$defs/platformLimits" },
+          "desktop": { "$ref": "#/$defs/platformLimits" }
+        }
+      }
+    },
+    "memoryBudgetMB": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["web", "desktop"],
+      "properties": {
+        "web": { "type": "integer", "minimum": 64 },
+        "desktop": { "type": "integer", "minimum": 256 }
+      }
+    },
+    "tools": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/toolSpec" }
+    }
+  },
+  "$defs": {
+    "kind": {
+      "type": "string",
+      "enum": ["image", "pdf", "audio"]
+    },
+    "platform": {
+      "type": "string",
+      "enum": ["web", "desktop"]
+    },
+    "formatId": {
+      "type": "string",
+      "enum": ["heic", "jpeg", "png", "webp", "pdf", "mp3", "wav", "m4a", "ogg"]
+    },
+    "formatPlatformSupport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["decode", "encode"],
+      "properties": {
+        "decode": { "type": "boolean" },
+        "encode": { "type": "boolean" },
+        "note": { "type": "string" }
+      }
+    },
+    "formatSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "label", "displayName", "kind", "extensions", "mime", "platforms"],
+      "properties": {
+        "id": { "$ref": "#/$defs/formatId" },
+        "label": { "type": "string", "minLength": 1 },
+        "displayName": { "type": "string", "minLength": 1 },
+        "kind": { "$ref": "#/$defs/kind" },
+        "extensions": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "pattern": "^[a-z0-9]+$" }
+        },
+        "mime": { "type": "string", "minLength": 3 },
+        "platforms": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["web", "desktop"],
+          "properties": {
+            "web": { "$ref": "#/$defs/formatPlatformSupport" },
+            "desktop": { "$ref": "#/$defs/formatPlatformSupport" }
+          }
+        }
+      }
+    },
+    "platformLimits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["maxMB", "maxFiles"],
+      "properties": {
+        "maxMB": { "type": "integer", "minimum": 1 },
+        "maxFiles": { "type": "integer", "minimum": 1 },
+        "maxPages": { "type": "integer", "minimum": 1 },
+        "maxPixels": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "optionShowIf": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "is"],
+      "properties": {
+        "key": { "type": "string", "minLength": 1 },
+        "is": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": ["string", "number"] }
+        }
+      }
+    },
+    "optionChoice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["value", "label"],
+      "properties": {
+        "value": { "type": "string", "minLength": 1 },
+        "label": { "type": "string", "minLength": 1 },
+        "platforms": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/platform" }
+        }
+      }
+    },
+    "optionSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "label", "type", "default", "platforms"],
+      "properties": {
+        "key": { "type": "string", "pattern": "^[a-zA-Z][a-zA-Z0-9_]*$" },
+        "label": { "type": "string", "minLength": 1 },
+        "type": { "type": "string", "enum": ["select", "number", "text"] },
+        "platforms": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/platform" }
+        },
+        "default": { "type": ["string", "number"] },
+        "min": { "type": "number" },
+        "max": { "type": "number" },
+        "step": { "type": "number", "exclusiveMinimum": 0 },
+        "unit": { "type": "string", "minLength": 1 },
+        "placeholder": { "type": "string" },
+        "help": { "type": "string", "minLength": 1 },
+        "choices": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/optionChoice" }
+        },
+        "showIf": { "$ref": "#/$defs/optionShowIf" }
+      }
+    },
+    "toolSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "domain",
+        "acceptsKind",
+        "label",
+        "blurb",
+        "tagline",
+        "description",
+        "outputCapability",
+        "searchKeywords",
+        "popular",
+        "inputs",
+        "acceptedFormats",
+        "outputFormats",
+        "options",
+        "outputNaming",
+        "limitsKey",
+        "capabilities",
+        "platformSupport"
+      ],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z]+(-[a-z]+)+$" },
+        "domain": { "$ref": "#/$defs/kind" },
+        "acceptsKind": { "$ref": "#/$defs/kind" },
+        "label": { "type": "string", "minLength": 1 },
+        "blurb": { "type": "string", "minLength": 1 },
+        "tagline": { "type": "string", "minLength": 1 },
+        "description": { "type": "string", "minLength": 1 },
+        "outputCapability": { "type": "string", "minLength": 1 },
+        "searchKeywords": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "popular": { "type": "boolean" },
+        "inputs": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "min", "max"],
+          "properties": {
+            "mode": { "type": "string", "enum": ["one", "many"] },
+            "min": { "type": "integer", "minimum": 1 },
+            "max": { "type": ["integer", "null"], "minimum": 1 }
+          }
+        },
+        "acceptedFormats": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["web", "desktop"],
+          "properties": {
+            "web": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/formatId" } },
+            "desktop": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/formatId" } }
+          }
+        },
+        "outputFormats": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["web", "desktop"],
+          "properties": {
+            "web": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/formatId" } },
+            "desktop": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/formatId" } }
+          }
+        },
+        "options": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/optionSpec" }
+        },
+        "outputNaming": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["template", "multi", "extRule"],
+          "properties": {
+            "template": { "type": "string", "minLength": 1 },
+            "multi": { "type": "boolean" },
+            "extRule": {
+              "type": "string",
+              "enum": ["fromOptionTo", "sameOrJpeg", "sameAudioOrMp3", "fixed"]
+            },
+            "fixedExt": { "type": "string", "pattern": "^[a-z0-9]+$" },
+            "entryTemplate": { "type": "string", "minLength": 1 }
+          }
+        },
+        "limitsKey": { "type": "string", "enum": ["image.convert", "pdf", "audio"] },
+        "capabilities": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["batch", "preview", "loupe", "passwordUnlock", "chainOutput"],
+          "properties": {
+            "batch": { "type": "boolean" },
+            "preview": { "type": "boolean" },
+            "loupe": { "type": "boolean" },
+            "passwordUnlock": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["web", "desktop"],
+              "properties": {
+                "web": { "type": "boolean" },
+                "desktop": { "type": "boolean" }
+              }
+            },
+            "chainOutput": { "type": "boolean" }
+          }
+        },
+        "platformSupport": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["web", "desktop"],
+          "properties": {
+            "web": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["status", "engine"],
+              "properties": {
+                "status": { "type": "string", "enum": ["available", "requires-dependency", "unsupported"] },
+                "engine": { "type": "string", "minLength": 1 },
+                "lazyLoaded": { "type": "boolean" },
+                "note": { "type": "string" }
+              }
+            },
+            "desktop": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["status", "engine", "engineLabel", "externalDependencies"],
+              "properties": {
+                "status": { "type": "string", "enum": ["available", "requires-dependency", "unsupported"] },
+                "engine": { "type": "string", "enum": ["builtin", "ffmpeg", "pdf-renderer"] },
+                "engineLabel": { "type": "string", "minLength": 1 },
+                "externalDependencies": {
+                  "type": "array",
+                  "items": { "type": "string", "minLength": 1 }
+                },
+                "fallback": { "type": "string" },
+                "note": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

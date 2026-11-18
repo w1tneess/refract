@@ -16,7 +16,7 @@ Refract is an open-source (GPL-3.0-or-later), local-first file utility workbench
 | `apps/desktop` | Native Slint 1.9 desktop application (`refract-desktop`). |
 | `fixtures/` | Shared test fixtures (valid, rotated EXIF, truncated, empty, disguised extensions, encrypted PDFs, Unicode filenames, audio samples). |
 | `docs/` | Phase reports, audit reports, and research notes. |
-| `specs/` *(Phase 1 target)* | Canonical Tool Manifest (`tool-manifest.json`), JSON schema, and deterministic codegen inputs. |
+| `specs/` | Canonical Tool Manifest (`tool-manifest.json`), JSON schema (`tool-manifest.schema.json`), generating TypeScript, Rust, and `docs/platform-matrix.md`. |
 
 ## 2. Product Domains & Preserved Tool IDs
 

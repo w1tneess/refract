@@ -21,6 +21,8 @@ Refract Web uses an **Apple-inspired interface** — calm, exact, and quiet:
 
 ## Supported Tools & Formats
 
+All 11 canonical tools, option contracts, limits, and platform differences are defined in [specs/tool-manifest.json](specs/tool-manifest.json) and summarized in the generated [Platform Support & Capabilities Matrix](docs/platform-matrix.md).
+
 ### Web App (11 tools via WebAssembly)
 
 Refract Web runs 11 dedicated file conversion and transformation tools across three domains:
@@ -57,6 +59,7 @@ Refract Desktop (`apps/desktop`) runs as a standalone native executable with no 
 
 | Path | Description |
 | --- | --- |
+| `specs/` | Canonical Tool Manifest (`tool-manifest.json`) and JSON Schema (`tool-manifest.schema.json`), generating TypeScript, Rust, and `docs/platform-matrix.md`. |
 | `packages/core` | `@refract/core` — DOM-free TypeScript pipeline: magic-byte detection, HEIF/JPEG/PNG/WebP header probing, route planner, limits & memory budgets, job state machine, output verification. |
 | `packages/engine-wasm` | `@refract/engine-wasm` — Dedicated Web Worker codecs (`libheif-js`, `@jsquash/*`, `pdf-lib`, `pdfjs-dist`, `qpdf-wasm`, `@ffmpeg/ffmpeg`). |
 | `apps/web` | `@refract/web` — React 19 + Vite web UI with Command Palette, Optical Loupe comparison modal, batch queue, and Playwright E2E suite. |
@@ -94,6 +97,9 @@ For the full codebase audit and fixes changelog, see [docs/audit-report.md](docs
 ```bash
 # Install dependencies
 pnpm install
+
+# Validate canonical tool manifest and check for generated-file drift
+pnpm manifest:check
 
 # Run type checks across all workspaces
 pnpm typecheck

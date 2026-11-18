@@ -1,12 +1,18 @@
 pub mod detect;
 pub mod error;
 pub mod format;
+pub mod generated_manifest;
 pub mod job;
 pub mod tools;
 
 pub use detect::detect;
 pub use error::{ErrorCode, RefractError};
 pub use format::{Format, Kind};
+pub use generated_manifest::{
+    limits_for_key, manifest_for, LimitsSpec, ManifestOptionSpec, OptionChoice, OptionDefault,
+    OptionShowIf, OptionType, Platform, PlatformAvailability, ToolEngine, ToolManifestEntry,
+    FORMAT_SUPPORT, LIMITS_MANIFEST, MANIFEST_VERSION, TOOL_MANIFEST,
+};
 pub use job::{Job, JobState};
 pub use tools::ToolId;
 

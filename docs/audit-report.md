@@ -53,7 +53,7 @@ This document records the full-repository audit of Refract (`@refract/core`, `@r
 - **`vercel.json`**: Replaced the invalid combination of `"routes"` + `"headers"` (rejected by Vercel) with `"rewrites"` + `"headers"`, and configured monorepo `buildCommand` / `outputDirectory`.
 - **`netlify.toml`**: Removed invalid `conditions = {Path = ["!assets/*"]}` syntax and unsupported `{js,mjs,css}` brace expansion in header paths.
 - **Repository Hygiene**: Removed duplicate root `REA-findings.md` (canonical file lives at `docs/REA-findings.md`).
-- **Documentation Alignment**: Updated `README.md`, `DESIGN.md`, `apps/web/src/config/toolPresentation.ts`, `docs/phase-3-report.md`, `docs/phase-4-report.md`, and `.github/workflows/release.yml` to reflect exact tool counts (11 Web tools, 9 Desktop tools), supported formats, bitrates (128–320 kbps), QPDF flags, Slint version (1.9), and design tokens.
+- **Documentation Alignment**: Updated `README.md`, `DESIGN.md`, `apps/web/src/config/toolPresentation.ts`, `docs/phase-3-report.md`, `docs/phase-4-report.md`, and `.github/workflows/release.yml` to reflect exact tool counts (11 Web tools, 9 Desktop tools at the time of that audit; expanded to 11 Desktop tools in Desktop v1.1 — see [docs/platform-matrix.md](platform-matrix.md)), supported formats, bitrates (128–320 kbps), QPDF flags, Slint version (1.9), and design tokens.
 
 ---
 
