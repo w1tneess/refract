@@ -1,0 +1,17 @@
+{
+  "name": "Refract — Local-First File Converter",
+  "short_name": "Refract",
+  "description": "Local-first image, PDF, and audio converter running 100% in your browser via WebAssembly. No uploads, no accounts, no telemetry.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f5f5f7",
+  "theme_color": "#0071e3",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

@@ -4047,7 +4047,7 @@ dependencies = [
 
 [[package]]
 name = "refract-core"
-version = "0.1.0"
+version = "1.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -4057,7 +4057,7 @@ dependencies = [
 
 [[package]]
 name = "refract-desktop"
-version = "0.1.0"
+version = "1.1.0"
 dependencies = [
  "dirs",
  "open",
@@ -4074,7 +4074,7 @@ dependencies = [
 
 [[package]]
 name = "refract-engine"
-version = "0.1.0"
+version = "1.1.0"
 dependencies = [
  "image",
  "lopdf",

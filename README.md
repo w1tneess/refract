@@ -123,7 +123,21 @@ pnpm desktop:dev
 
 ### Hosting the Web App (Deploy to the Web)
 
-Refract Web is a **purely client-side static site** — no backend, no server, no database. All conversion happens in the browser via WebAssembly. You can host it on any static hosting platform (Vercel, Netlify, GitHub Pages, Cloudflare Pages, etc.).
+Refract Web is a **purely client-side static site** — no backend, no server, no database. All conversion happens in the browser via WebAssembly. You can host it on any static hosting platform (Cloudflare Workers Static Assets, Vercel, Netlify, GitHub Pages, etc.).
+
+> **WASM size optimization**: During `vite build`, oversized WASM bundles (`ffmpeg-core.wasm`, ~31 MiB) are automatically gzip-compressed to `.wasm.gz` (~9.8 MiB) so every file stays well under Cloudflare's 25 MiB per-asset limit and downloads 3× faster. The audio worker transparently decompresses `.wasm.gz` in the browser via `DecompressionStream`.
+
+#### Cloudflare Workers (Static Assets)
+
+`apps/web/cloudflare.config.ts` and `apps/web/public/_headers` configure Refract Web as an assets-only Cloudflare Worker with SPA fallback (`single-page-application`), COOP/COEP cross-origin isolation headers, `application/wasm` MIME type, and immutable caching for hashed assets:
+
+```bash
+# Build the production bundle
+pnpm --filter @refract/web build
+
+# Deploy to Cloudflare Workers
+pnpm --filter @refract/web deploy:cloudflare
+```
 
 #### Quick deploy (Vercel)
 
@@ -165,7 +179,7 @@ Then push `apps/web/dist` to your `gh-pages` branch or use your preferred Pages 
 
 #### Important: WASM MIME type
 
-Whatever host you choose, **`.wasm` files must be served with `Content-Type: application/wasm`**. Without this, WebAssembly compilation will fail and image/audio/PDF tools will not work. Both `vercel.json` and `netlify.toml` include this header.
+Whatever host you choose, **`.wasm` files must be served with `Content-Type: application/wasm`**. Without this, WebAssembly compilation will fail and image/audio/PDF tools will not work. `apps/web/public/_headers` (Cloudflare), `vercel.json`, and `netlify.toml` all include this header.
 
 ### Desktop External Dependencies
 

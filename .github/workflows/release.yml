@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: 'Release Tag (e.g. v0.1.0)'
+        description: 'Release Tag (e.g. v1.1.0)'
         required: true
-        default: 'v0.1.0'
+        default: 'v1.1.0'
 
 permissions:
   contents: write
@@ -98,19 +98,27 @@ jobs:
           name: Refract ${{ github.event.inputs.tag_name || github.ref_name }}
           draft: false
           prerelease: false
+          generate_release_notes: true
           files: release-artifacts/*
           body: |
-            ## Refract Desktop v1 Release
+            ## Refract ${{ github.event.inputs.tag_name || github.ref_name }}
 
-            High-performance, pure native file converter built with Rust and Slint UI. All conversions happen 100% locally on your machine.
+            Local-first file converter — **pure native Rust + Slint desktop app** and **100% client-side WebAssembly web app**. All conversions run strictly on your own machine with no uploads, no accounts, no ads, and no telemetry.
 
-            ### Included Packages
+            ### Included Desktop Packages
             - **Windows (x86_64)**: `refract-windows-x86_64.zip`
             - **macOS (Apple Silicon / ARM64)**: `refract-macos-arm64.tar.gz`
             - **Linux (x86_64)**: `refract-linux-x86_64.tar.gz`
             - **Verification**: `SHA256SUMS.txt`
 
-            ### Supported Operations
-            - **Images**: Convert (with EXIF orientation baking and alpha flattening), Compress (target KB), Resize (Lanczos-3) across JPEG, PNG, WebP.
-            - **PDF**: Merge multiple PDFs, Split by page ranges (with object pruning), Reorder pages, Lossless `lopdf` compression.
-            - **Audio**: Transcode between MP3, WAV, M4A, OGG with configurable bitrates and exact timestamp trimming (via system FFmpeg).
+            ### Highlights
+            - **All 11 Tools on Desktop & Web**:
+              - **Images**: Convert (EXIF orientation baking, RGBA-to-white flattening, metadata removal), Compress (target KB with automatic scale-down fallback), Resize (Lanczos-3 by pixels or cm + DPI) across JPEG, PNG, and WebP (plus HEIC input on Web).
+              - **PDF**: Merge, Split by page ranges (with object pruning), Reorder pages, Images to PDF, PDF to images, and Lossless `lopdf` / QPDF compression — with password-protected PDF unlocking.
+              - **Audio**: Convert between MP3, WAV, M4A, and OGG (128–320 kbps) and exact timestamp trimming (`mm:ss` / `hh:mm:ss` / seconds).
+            - **Native Desktop UX**: Standalone single executable with no webview, Light/Dark theme persistence, custom output folder selection, batch queue management, and "Show in Folder" reveal.
+            - **Web App**: Apple-inspired UI with Command Palette, Optical Loupe comparison modal, PWA manifest, and gzip-compressed FFmpeg WASM bundle for faster loads.
+
+            ### Desktop Optional External Dependencies
+            - **Audio convert/trim**: `ffmpeg` and `ffprobe` in `PATH`.
+            - **PDF to images (rasterization)**: `mutool`, `pdftoppm`, `pdftocairo`, or `ghostscript` in `PATH` (automatically falls back to embedded image extraction if none are installed).

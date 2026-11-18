@@ -13,6 +13,12 @@
     Cache-Control = "public, max-age=31536000, immutable"
 
 [[headers]]
+  for = "/assets/*.wasm.gz"
+  [headers.values]
+    Content-Type = "application/octet-stream"
+    Cache-Control = "public, max-age=31536000, immutable"
+
+[[headers]]
   for = "/assets/*.js"
   [headers.values]
     Cache-Control = "public, max-age=31536000, immutable"

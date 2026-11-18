@@ -7,20 +7,43 @@ const damaged = (details?: string) =>
 
 let ffmpegPromise: Promise<FFmpeg> | null = null;
 
+async function resolveWasmUrl(url: string): Promise<{ url: string; revoke: boolean }> {
+  if (!url.endsWith('.gz')) return { url, revoke: false };
+  const resolved = new URL(url, self.location.href).href;
+  const res = await fetch(resolved);
+  if (!res.ok) throw new Error(`Failed to fetch FFmpeg WASM (${res.status})`);
+  const raw = new Uint8Array(await res.arrayBuffer());
+  let wasmBytes: ArrayBuffer;
+  // Detect gzip magic bytes (0x1f 0x8b); if the host already decompressed it, use raw WASM bytes directly.
+  if (raw.length >= 2 && raw[0] === 0x1f && raw[1] === 0x8b) {
+    if (typeof DecompressionStream === 'undefined') {
+      throw new Error('This browser cannot decompress the bundled FFmpeg WebAssembly module.');
+    }
+    const stream = new Blob([raw]).stream().pipeThrough(new DecompressionStream('gzip'));
+    wasmBytes = await new Response(stream).arrayBuffer();
+  } else {
+    wasmBytes = raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength);
+  }
+  return { url: URL.createObjectURL(new Blob([wasmBytes], { type: 'application/wasm' })), revoke: true };
+}
+
 async function getFFmpeg(ctx: Ctx): Promise<FFmpeg> {
   if (ffmpegPromise) return ffmpegPromise;
   const t = performance.now();
   ffmpegPromise = (async () => {
+    let wasmBlobUrl: string | null = null;
     try {
       const [{ FFmpeg }, { default: coreJsUrl }, { default: coreWasmUrl }] = await Promise.all([
         import('@ffmpeg/ffmpeg'),
         import('@ffmpeg/core?url'),
         import('@ffmpeg/core/wasm?url'),
       ]);
+      const wasm = await resolveWasmUrl(coreWasmUrl);
+      if (wasm.revoke) wasmBlobUrl = wasm.url;
       const ffmpeg = new FFmpeg();
       await ffmpeg.load({
         coreURL: coreJsUrl,
-        wasmURL: coreWasmUrl,
+        wasmURL: wasm.url,
       });
       ctx.timing('wasmLoadMs', performance.now() - t);
       ctx.heartbeat();
@@ -28,6 +51,8 @@ async function getFFmpeg(ctx: Ctx): Promise<FFmpeg> {
     } catch (e) {
       ffmpegPromise = null;
       throw e;
+    } finally {
+      if (wasmBlobUrl) URL.revokeObjectURL(wasmBlobUrl);
     }
   })();
   return ffmpegPromise;

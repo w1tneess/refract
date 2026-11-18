@@ -1,5 +1,6 @@
 node_modules/
 dist/
+.cloudflare/
 target/
 test-results/
 playwright-report/

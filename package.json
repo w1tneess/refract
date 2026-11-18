@@ -1,5 +1,6 @@
 {
   "name": "refract",
+  "version": "1.1.0",
   "private": true,
   "license": "GPL-3.0-or-later",
   "type": "module",
@@ -9,6 +10,8 @@
     "test": "pnpm -r test",
     "e2e": "pnpm --filter @refract/web e2e",
     "dev": "pnpm --filter @refract/web dev",
+    "build:web": "pnpm --filter @refract/web build",
+    "deploy:cloudflare": "pnpm --filter @refract/web deploy:cloudflare",
     "desktop:dev": "cargo run -p refract-desktop",
     "desktop:test": "cargo test --workspace",
     "desktop:check": "cargo check --workspace"

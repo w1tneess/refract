@@ -4,3 +4,5 @@ packages:
 # Two-week rule for the whole dependency tree (minutes).
 minimumReleaseAge: 20160
 savePrefix: ''
+allowBuilds:
+  workerd: true
