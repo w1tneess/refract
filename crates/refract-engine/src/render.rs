@@ -312,15 +312,23 @@ fn render_page(
     }
 }
 
-/// Render all pages of a PDF byte buffer to image bytes with cooperative cancellation.
-pub fn render_pdf_to_images_cancellable(
+/// Validated, decrypted render request ready to invoke an external rasterizer.
+#[derive(Debug, Clone)]
+pub struct PreparedPdfRender {
+    pub pdf_bytes: Vec<u8>,
+    pub page_count: u32,
+    pub dpi: u32,
+    pub format: RenderImageFormat,
+}
+
+/// Validate render options and unlock encrypted PDFs (auto-unlocking owner-only PDFs with `""`),
+/// preserving the caller's exact requested `format` and `dpi`.
+pub fn prepare_pdf_for_render(
     pdf_bytes: &[u8],
+    password: Option<&str>,
     dpi: u32,
     format: &str,
-    cancel: &CancelToken,
-) -> Result<Vec<RenderedPage>, RefractError> {
-    cancel.check()?;
-
+) -> Result<PreparedPdfRender, RefractError> {
     if pdf_bytes.is_empty() {
         return Err(RefractError::new(
             ErrorCode::EmptyFile,
@@ -329,22 +337,52 @@ pub fn render_pdf_to_images_cancellable(
     }
 
     let requested_format = RenderImageFormat::parse(format)?;
-
-    // Check encryption BEFORE zero-page validation so encrypted PDFs return `NeedsPassword`
-    // rather than `DamagedFile("PDF has no pages")`.
-    let info = crate::pdf::probe_pdf(pdf_bytes)?;
-    if info.is_encrypted {
+    if !(36..=600).contains(&dpi) {
         return Err(RefractError::new(
-            ErrorCode::NeedsPassword,
-            "This PDF is protected. Enter the password to continue.",
+            ErrorCode::InvalidOption,
+            format!(
+                "Invalid PDF render DPI {}. Must be between 36 and 600.",
+                dpi
+            ),
         ));
     }
-    if info.page_count == 0 {
+
+    let info = crate::pdf::probe_pdf(pdf_bytes)?;
+    let (prepared_bytes, page_count) = if info.is_encrypted {
+        let unlocked = crate::pdf::unlock_pdf_bytes(pdf_bytes, password)?;
+        let unlocked_info = crate::pdf::probe_pdf(&unlocked)?;
+        (unlocked, unlocked_info.page_count)
+    } else {
+        (pdf_bytes.to_vec(), info.page_count)
+    };
+
+    if page_count == 0 {
         return Err(RefractError::new(
             ErrorCode::DamagedFile,
             "PDF has no pages",
         ));
     }
+
+    Ok(PreparedPdfRender {
+        pdf_bytes: prepared_bytes,
+        page_count,
+        dpi,
+        format: requested_format,
+    })
+}
+
+/// Render all pages of a PDF byte buffer to image bytes with optional password and cancellation.
+/// Preserves exact requested `dpi` and `format` across both normal and password-unlocked paths.
+pub fn render_pdf_to_images_with_password_cancellable(
+    pdf_bytes: &[u8],
+    password: Option<&str>,
+    dpi: u32,
+    format: &str,
+    cancel: &CancelToken,
+) -> Result<Vec<RenderedPage>, RefractError> {
+    cancel.check()?;
+
+    let prepared = prepare_pdf_for_render(pdf_bytes, password, dpi, format)?;
 
     let renderer = detect_renderer().ok_or_else(|| {
         RefractError::new(
@@ -353,7 +391,6 @@ pub fn render_pdf_to_images_cancellable(
         )
     })?;
 
-    let dpi = dpi.clamp(36, 600);
     let temp_dir = tempdir().map_err(|e| {
         RefractError::with_details(
             ErrorCode::EngineFailed,
@@ -362,7 +399,7 @@ pub fn render_pdf_to_images_cancellable(
         )
     })?;
     let pdf_path = temp_dir.path().join("input.pdf");
-    std::fs::write(&pdf_path, pdf_bytes).map_err(|e| {
+    std::fs::write(&pdf_path, &prepared.pdf_bytes).map_err(|e| {
         RefractError::with_details(
             ErrorCode::EngineFailed,
             "Failed to write PDF to temp file",
@@ -373,12 +410,22 @@ pub fn render_pdf_to_images_cancellable(
     render_pdf_path_pages(
         &renderer,
         &pdf_path,
-        info.page_count,
-        dpi,
-        requested_format,
+        prepared.page_count,
+        prepared.dpi,
+        prepared.format,
         temp_dir.path(),
         cancel,
     )
+}
+
+/// Render all pages of a PDF byte buffer to image bytes with cooperative cancellation.
+pub fn render_pdf_to_images_cancellable(
+    pdf_bytes: &[u8],
+    dpi: u32,
+    format: &str,
+    cancel: &CancelToken,
+) -> Result<Vec<RenderedPage>, RefractError> {
+    render_pdf_to_images_with_password_cancellable(pdf_bytes, None, dpi, format, cancel)
 }
 
 /// Render all pages of an existing on-disk PDF file directly without copying the PDF bytes.
@@ -702,5 +749,58 @@ mod tests {
         let cancel_err =
             render_pdf_to_images_cancellable(&plain_bytes, 150, "png", &token).unwrap_err();
         assert_eq!(cancel_err.code, ErrorCode::Canceled);
+
+        // Invalid DPI must be rejected instead of silently clamped
+        let dpi_err = prepare_pdf_for_render(&plain_bytes, None, 10, "png").unwrap_err();
+        assert_eq!(dpi_err.code, ErrorCode::InvalidOption);
+    }
+
+    #[test]
+    fn pdf_to_images_unlock_preserves_requested_format_and_dpi() {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let locked_bytes =
+            std::fs::read(manifest_dir.join("../../fixtures/locked.pdf")).expect("read locked.pdf");
+        let owner_only = std::fs::read(manifest_dir.join("../../fixtures/owner-only.pdf"))
+            .expect("read owner-only.pdf");
+
+        // Owner-only PDF prepares automatically without a password, preserving JPEG & 220 DPI
+        let owner_prep =
+            prepare_pdf_for_render(&owner_only, None, 220, "jpg").expect("prepare owner-only");
+        assert_eq!(owner_prep.page_count, 3);
+        assert_eq!(owner_prep.dpi, 220);
+        assert_eq!(owner_prep.format, RenderImageFormat::Jpeg);
+        assert!(
+            !crate::pdf::probe_pdf(&owner_prep.pdf_bytes)
+                .unwrap()
+                .is_encrypted
+        );
+
+        // Locked PDF without password -> NeedsPassword
+        assert_eq!(
+            prepare_pdf_for_render(&locked_bytes, None, 240, "jpeg")
+                .unwrap_err()
+                .code,
+            ErrorCode::NeedsPassword
+        );
+
+        // Locked PDF with wrong password -> WrongPassword
+        assert_eq!(
+            prepare_pdf_for_render(&locked_bytes, Some("wrong-pw"), 240, "jpeg")
+                .unwrap_err()
+                .code,
+            ErrorCode::WrongPassword
+        );
+
+        // Locked PDF with right password unlocks cleanly and preserves exact requested JPEG & 240 DPI
+        let unlocked_prep = prepare_pdf_for_render(&locked_bytes, Some("user-pw-123"), 240, "jpeg")
+            .expect("prepare locked with right password");
+        assert_eq!(unlocked_prep.page_count, 3);
+        assert_eq!(unlocked_prep.dpi, 240);
+        assert_eq!(unlocked_prep.format, RenderImageFormat::Jpeg);
+        assert!(
+            !crate::pdf::probe_pdf(&unlocked_prep.pdf_bytes)
+                .unwrap()
+                .is_encrypted
+        );
     }
 }
