@@ -45,7 +45,8 @@ pub fn detect(bytes: &[u8]) -> Option<Format> {
             b"heic" | b"heix" | b"heim" | b"heis" | b"mif1" | b"msf1" => return Some(Format::Heic),
             _ => {
                 // Check compatible brands only within the ftyp box (bounded by box size).
-                let raw_size = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+                let raw_size =
+                    u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
                 let box_end = if raw_size >= 16 {
                     raw_size.min(bytes.len())
                 } else {
@@ -54,7 +55,10 @@ pub fn detect(bytes: &[u8]) -> Option<Format> {
                 let mut offset = 16;
                 while offset + 4 <= box_end {
                     let comp = &bytes[offset..offset + 4];
-                    if matches!(comp, b"heic" | b"heix" | b"heim" | b"heis" | b"mif1" | b"msf1") {
+                    if matches!(
+                        comp,
+                        b"heic" | b"heix" | b"heim" | b"heis" | b"mif1" | b"msf1"
+                    ) {
                         return Some(Format::Heic);
                     }
                     if matches!(comp, b"M4A " | b"M4B ") {
@@ -70,7 +74,11 @@ pub fn detect(bytes: &[u8]) -> Option<Format> {
     if bytes.starts_with(b"ID3") {
         return Some(Format::Mp3);
     }
-    if bytes.len() >= 2 && bytes[0] == 0xFF && (bytes[1] & 0xE0) == 0xE0 && ((bytes[1] >> 1) & 3) != 0 {
+    if bytes.len() >= 2
+        && bytes[0] == 0xFF
+        && (bytes[1] & 0xE0) == 0xE0
+        && ((bytes[1] >> 1) & 3) != 0
+    {
         return Some(Format::Mp3);
     }
 

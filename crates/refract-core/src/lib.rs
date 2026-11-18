@@ -1,10 +1,14 @@
+pub mod cancel;
 pub mod detect;
 pub mod error;
 pub mod format;
 pub mod generated_manifest;
 pub mod job;
+pub mod limits;
+pub mod naming;
 pub mod tools;
 
+pub use cancel::{CancelGuard, CancelToken};
 pub use detect::detect;
 pub use error::{ErrorCode, RefractError};
 pub use format::{Format, Kind};
@@ -13,7 +17,15 @@ pub use generated_manifest::{
     OptionShowIf, OptionType, Platform, PlatformAvailability, ToolEngine, ToolManifestEntry,
     FORMAT_SUPPORT, LIMITS_MANIFEST, MANIFEST_VERSION, TOOL_MANIFEST,
 };
-pub use job::{Job, JobState};
+pub use job::{batch_status, BatchStatus, Job, JobState};
+pub use limits::{
+    check_limits, check_memory, limits_for_tool, memory_budget_bytes, LimitCheckInput,
+    PlatformLimits,
+};
+pub use naming::{
+    output_name, output_name_for_tool, resolve_unique_path, stem_of, suffixed_filename,
+    CONVERTED_TEMPLATE,
+};
 pub use tools::ToolId;
 
 #[cfg(test)]
