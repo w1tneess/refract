@@ -653,13 +653,14 @@ fn mark_jobs_failed_with_error(
     store: &mut [JobRecord],
     target_id: i32,
     recorded_ids: &[i32],
-    target_req: &JobRequest,
     err: &RefractError,
 ) {
     for j in store.iter_mut() {
-        let is_affected = j.id == target_id
-            || (recorded_ids.contains(&j.id) && j.request.is_batch_compatible_with(target_req));
-        if is_affected {
+        let belongs_to_same_recorded_batch = !recorded_ids.is_empty()
+            && recorded_ids.contains(&j.id)
+            && j.last_batch_member_ids == recorded_ids
+            && !matches!(j.status, JobStatus::Done | JobStatus::Working);
+        if j.id == target_id || belongs_to_same_recorded_batch {
             j.status = JobStatus::Failed;
             j.error = err.to_string();
             j.progress = -1.0;
@@ -685,6 +686,17 @@ fn try_claim_password_unlock(
         };
         let target = store[target_idx].clone();
 
+        if target.status != JobStatus::NeedsPassword {
+            is_busy.store(false, Ordering::SeqCst);
+            return Some(Err(RefractError::new(
+                ErrorCode::InvalidOption,
+                format!(
+                    "Job {} is not awaiting a password (current status: {:?}).",
+                    job_id, target.status
+                ),
+            )));
+        }
+
         if target.request.tool() == ToolId::MergePdf {
             match resolve_recorded_batch_indices(
                 &store,
@@ -692,12 +704,7 @@ fn try_claim_password_unlock(
                 &target.last_batch_member_ids,
                 |j| j.id,
                 |j| &j.request,
-                |j| {
-                    matches!(
-                        j.status,
-                        JobStatus::NeedsPassword | JobStatus::Failed | JobStatus::Waiting
-                    )
-                },
+                |j| j.status == JobStatus::NeedsPassword,
             ) {
                 Ok(indices) => {
                     let mut members = Vec::with_capacity(indices.len());
@@ -720,7 +727,6 @@ fn try_claim_password_unlock(
                         &mut store,
                         job_id,
                         &target.last_batch_member_ids,
-                        &target.request,
                         &err,
                     );
                     if let Some(tx) = ui_tx {
@@ -1137,13 +1143,7 @@ fn execute_retry_in_store(
         ) {
             Ok(indices) => indices.into_iter().map(|i| store[i].clone()).collect(),
             Err(err) => {
-                mark_jobs_failed_with_error(
-                    &mut store,
-                    job_id,
-                    &recorded_ids,
-                    &target.request,
-                    &err,
-                );
+                mark_jobs_failed_with_error(&mut store, job_id, &recorded_ids, &err);
                 if let Some(tx) = ui_tx {
                     push_ui_event(tx, UiEvent::JobsUpdated(store.clone()));
                 }
@@ -2162,7 +2162,7 @@ mod tests {
             );
         }
 
-        // Incompatible images-to-pdf jobs (different DPI / quality) execute separately into their own folders
+        // Contiguous compatible images-to-pdf jobs combine in order, while incompatible jobs flush and stay separate
         let mut img_store = Vec::new();
         let img_a = JobRequest::new(
             ToolId::ImagesToPdf,
@@ -2182,10 +2182,11 @@ mod tests {
             OutputDestination::Directory(dir_b.path().to_path_buf()),
         )
         .unwrap();
+        // Queue: [img_a(png), img_a(webp), img_b(jpg), img_a(png)] -> 3 contiguous units: [2, 1, 1]
         enqueue_files(
             &mut img_store,
             &mut next_id,
-            vec![fixture_path("plain.png")],
+            vec![fixture_path("plain.png"), fixture_path("plain.webp")],
             &img_a,
         );
         enqueue_files(
@@ -2197,7 +2198,7 @@ mod tests {
         enqueue_files(
             &mut img_store,
             &mut next_id,
-            vec![fixture_path("plain.webp")],
+            vec![fixture_path("plain.png")],
             &img_a,
         );
 
@@ -2210,7 +2211,7 @@ mod tests {
         );
 
         let img_units = plan_execution_units(img_store, |j| &j.request);
-        assert_eq!(img_units.len(), 2);
+        assert_eq!(img_units.len(), 3);
         let PlannedUnit::Batch {
             request: req0,
             items: items0,
@@ -2219,7 +2220,7 @@ mod tests {
         else {
             panic!("expected first batch");
         };
-        assert_eq!(items0.len(), 2); // plain.png + plain.webp in original order
+        assert_eq!(items0.len(), 2); // contiguous plain.png + plain.webp in original order
         let pdf_a = execute_batch_images_to_pdf(items0, req0).unwrap();
         assert_eq!(pdf_a.parent(), Some(dir_a.path()));
         assert_eq!(
@@ -2242,6 +2243,25 @@ mod tests {
         assert_eq!(pdf_b.parent(), Some(dir_b.path()));
         assert_eq!(
             pdf::probe_pdf(&std::fs::read(&pdf_b).unwrap())
+                .unwrap()
+                .page_count,
+            1
+        );
+
+        let PlannedUnit::Batch {
+            request: req2,
+            items: items2,
+            ..
+        } = &img_units[2]
+        else {
+            panic!("expected third batch after intervening incompatible job");
+        };
+        assert_eq!(*req2, img_a);
+        assert_eq!(items2.len(), 1); // trailing img_a was NOT hoisted ahead of img_b
+        let pdf_c = execute_batch_images_to_pdf(items2, req2).unwrap();
+        assert_eq!(pdf_c.parent(), Some(dir_a.path()));
+        assert_eq!(
+            pdf::probe_pdf(&std::fs::read(&pdf_c).unwrap())
                 .unwrap()
                 .page_count,
             1
@@ -2569,10 +2589,17 @@ mod tests {
         )
         .unwrap();
 
-        // 1. Incompatible batch member request fails cleanly and releases busy flag
+        // 1. Incompatible batch member request fails cleanly, marks BOTH batch members Failed
+        //    (neither stays stuck in NeedsPassword), and leaves unrelated jobs untouched.
         let store_incompat = Arc::new(Mutex::new(Vec::new()));
         let is_busy = AtomicBool::new(false);
         let mut next_id = 1;
+        let unrelated_req = JobRequest::new(
+            ToolId::CompressPdf,
+            DesktopToolOptions::CompressPdf,
+            OutputDestination::NextToSource,
+        )
+        .unwrap();
         {
             let mut guard = store_incompat.lock().unwrap();
             enqueue_files(
@@ -2587,10 +2614,17 @@ mod tests {
                 vec![fixture_path("locked.pdf")],
                 &req_b,
             );
-            for j in guard.iter_mut() {
+            enqueue_files(
+                &mut guard,
+                &mut next_id,
+                vec![fixture_path("locked.pdf")],
+                &unrelated_req,
+            );
+            for j in &mut guard[..2] {
                 j.status = JobStatus::NeedsPassword;
                 j.last_batch_member_ids = vec![1, 2];
             }
+            guard[2].status = JobStatus::NeedsPassword;
         }
 
         let err = try_claim_password_unlock(&store_incompat, &is_busy, 1, None)
@@ -2603,6 +2637,11 @@ mod tests {
             let guard = store_incompat.lock().unwrap();
             assert_eq!(guard[0].status, JobStatus::Failed);
             assert!(guard[0].error.contains("incompatible"));
+            assert_eq!(guard[1].status, JobStatus::Failed);
+            assert!(guard[1].error.contains("incompatible"));
+            // Unrelated job 3 must stay untouched in NeedsPassword
+            assert_eq!(guard[2].status, JobStatus::NeedsPassword);
+            assert!(guard[2].error.is_empty());
         }
 
         // 2. Missing batch member fails cleanly, updates remaining member, and writes no file
@@ -2639,5 +2678,33 @@ mod tests {
             );
         }
         assert!(std::fs::read_dir(dir_a.path()).unwrap().next().is_none());
+
+        // 3. Password unlock refuses targets not in NeedsPassword without mutating their status
+        for non_unlock_status in [
+            JobStatus::Waiting,
+            JobStatus::Working,
+            JobStatus::Done,
+            JobStatus::Failed,
+        ] {
+            let store_state = Arc::new(Mutex::new(Vec::new()));
+            let mut next_id_3 = 1;
+            {
+                let mut guard = store_state.lock().unwrap();
+                enqueue_files(
+                    &mut guard,
+                    &mut next_id_3,
+                    vec![fixture_path("locked.pdf")],
+                    &unrelated_req,
+                );
+                guard[0].status = non_unlock_status.clone();
+            }
+            let status_err = try_claim_password_unlock(&store_state, &is_busy, 1, None)
+                .unwrap()
+                .err()
+                .expect("expected invalid unlock state error");
+            assert_eq!(status_err.code, ErrorCode::InvalidOption);
+            assert!(!is_busy.load(Ordering::SeqCst));
+            assert_eq!(store_state.lock().unwrap()[0].status, non_unlock_status);
+        }
     }
 }

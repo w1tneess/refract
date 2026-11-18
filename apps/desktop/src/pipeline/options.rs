@@ -802,8 +802,11 @@ pub enum PlannedUnit<T> {
     },
 }
 
-/// Plan execution units from waiting jobs while preserving deterministic queue order and never
-/// combining batch jobs whose [`JobRequest`] options or destinations are incompatible.
+/// Plan execution units from waiting jobs in exact original queue order.
+///
+/// Only contiguous compatible runs of batch jobs (`merge-pdf`, `images-to-pdf`) are combined.
+/// Any intervening non-batch job, different tool, or incompatible [`JobRequest`] flushes the
+/// active batch so no job ever executes ahead of an earlier queue item.
 pub fn plan_execution_units<T, F>(jobs: Vec<T>, request_of: F) -> Vec<PlannedUnit<T>>
 where
     F: Fn(&T) -> &JobRequest,
@@ -817,20 +820,18 @@ where
             continue;
         }
 
-        if let Some(PlannedUnit::Batch { items, .. }) = units.iter_mut().find(|unit| {
-            matches!(
-                unit,
-                PlannedUnit::Batch { request, .. } if request.is_batch_compatible_with(&req)
-            )
-        }) {
-            items.push(job);
-        } else {
-            units.push(PlannedUnit::Batch {
-                tool: req.tool(),
-                request: req,
-                items: vec![job],
-            });
+        if let Some(PlannedUnit::Batch { request, items, .. }) = units.last_mut() {
+            if request.is_batch_compatible_with(&req) {
+                items.push(job);
+                continue;
+            }
         }
+
+        units.push(PlannedUnit::Batch {
+            tool: req.tool(),
+            request: req,
+            items: vec![job],
+        });
     }
 
     units
@@ -1338,13 +1339,35 @@ mod tests {
     }
 
     #[test]
-    fn batch_planner_separates_incompatible_requests_and_preserves_deterministic_order() {
+    fn batch_planner_combines_only_contiguous_compatible_runs_and_preserves_queue_order() {
         #[derive(Clone, Debug, PartialEq)]
         struct StubJob {
             id: i32,
             req: JobRequest,
         }
 
+        let convert_req = JobRequest::new(
+            ToolId::ConvertImage,
+            DesktopToolOptions::ConvertImage {
+                target: Format::Png,
+                quality: 90,
+            },
+            OutputDestination::NextToSource,
+        )
+        .unwrap();
+        let resize_req = JobRequest::new(
+            ToolId::ResizeImage,
+            DesktopToolOptions::ResizeImage {
+                unit: image::ResizeUnit::Px,
+                width: 800.0,
+                height: 0.0,
+                dpi: 300.0,
+                target_format: None,
+                quality: 90,
+            },
+            OutputDestination::NextToSource,
+        )
+        .unwrap();
         let img_150_src = JobRequest::new(
             ToolId::ImagesToPdf,
             DesktopToolOptions::ImagesToPdf {
@@ -1363,15 +1386,6 @@ mod tests {
             OutputDestination::NextToSource,
         )
         .unwrap();
-        let img_150_dir = JobRequest::new(
-            ToolId::ImagesToPdf,
-            DesktopToolOptions::ImagesToPdf {
-                dpi: 150.0,
-                quality: 85,
-            },
-            OutputDestination::Directory(PathBuf::from("/out")),
-        )
-        .unwrap();
         let merge_src = JobRequest::new(
             ToolId::MergePdf,
             DesktopToolOptions::MergePdf,
@@ -1385,85 +1399,180 @@ mod tests {
         )
         .unwrap();
 
-        let jobs = vec![
-            StubJob {
-                id: 1,
-                req: img_150_src.clone(),
-            },
-            StubJob {
-                id: 2,
-                req: img_300_src.clone(),
-            },
-            StubJob {
-                id: 3,
-                req: img_150_src.clone(),
-            },
-            StubJob {
-                id: 4,
-                req: img_150_dir.clone(),
-            },
-            StubJob {
-                id: 5,
-                req: merge_src.clone(),
-            },
-            StubJob {
-                id: 6,
-                req: merge_dir.clone(),
-            },
-            StubJob {
-                id: 7,
-                req: merge_src.clone(),
-            },
-        ];
+        // 1. [merge A, merge B, convert C, merge D] -> 3 ordered units: [A, B], C, [D]
+        let case1 = plan_execution_units(
+            vec![
+                StubJob {
+                    id: 1,
+                    req: merge_src.clone(),
+                },
+                StubJob {
+                    id: 2,
+                    req: merge_src.clone(),
+                },
+                StubJob {
+                    id: 3,
+                    req: convert_req.clone(),
+                },
+                StubJob {
+                    id: 4,
+                    req: merge_src.clone(),
+                },
+            ],
+            |j| &j.req,
+        );
+        assert_eq!(case1.len(), 3);
+        assert!(matches!(
+            &case1[0],
+            PlannedUnit::Batch { tool: ToolId::MergePdf, items, .. }
+            if items.iter().map(|j| j.id).collect::<Vec<_>>() == vec![1, 2]
+        ));
+        assert!(matches!(&case1[1], PlannedUnit::Single(j) if j.id == 3));
+        assert!(matches!(
+            &case1[2],
+            PlannedUnit::Batch { tool: ToolId::MergePdf, items, .. }
+            if items.iter().map(|j| j.id).collect::<Vec<_>>() == vec![4]
+        ));
 
-        let planned = plan_execution_units(jobs, |j| &j.req);
-        assert_eq!(planned.len(), 5);
+        // 2. [merge A, incompatible merge B, merge C] -> 3 separate ordered units
+        let case2 = plan_execution_units(
+            vec![
+                StubJob {
+                    id: 10,
+                    req: merge_src.clone(),
+                },
+                StubJob {
+                    id: 20,
+                    req: merge_dir.clone(),
+                },
+                StubJob {
+                    id: 30,
+                    req: merge_src.clone(),
+                },
+            ],
+            |j| &j.req,
+        );
+        assert_eq!(case2.len(), 3);
+        assert!(matches!(
+            &case2[0],
+            PlannedUnit::Batch { request, items, .. }
+            if *request == merge_src && items.iter().map(|j| j.id).collect::<Vec<_>>() == vec![10]
+        ));
+        assert!(matches!(
+            &case2[1],
+            PlannedUnit::Batch { request, items, .. }
+            if *request == merge_dir && items.iter().map(|j| j.id).collect::<Vec<_>>() == vec![20]
+        ));
+        assert!(matches!(
+            &case2[2],
+            PlannedUnit::Batch { request, items, .. }
+            if *request == merge_src && items.iter().map(|j| j.id).collect::<Vec<_>>() == vec![30]
+        ));
 
-        match &planned[0] {
-            PlannedUnit::Batch {
-                tool,
-                request,
-                items,
-            } => {
-                assert_eq!(*tool, ToolId::ImagesToPdf);
-                assert_eq!(*request, img_150_src);
-                assert_eq!(items.iter().map(|j| j.id).collect::<Vec<_>>(), vec![1, 3]);
-            }
-            other => panic!("expected batch, got {:?}", other),
-        }
-        match &planned[1] {
-            PlannedUnit::Batch { request, items, .. } => {
-                assert_eq!(*request, img_300_src);
-                assert_eq!(items.iter().map(|j| j.id).collect::<Vec<_>>(), vec![2]);
-            }
-            other => panic!("expected batch, got {:?}", other),
-        }
-        match &planned[2] {
-            PlannedUnit::Batch { request, items, .. } => {
-                assert_eq!(*request, img_150_dir);
-                assert_eq!(items.iter().map(|j| j.id).collect::<Vec<_>>(), vec![4]);
-            }
-            other => panic!("expected batch, got {:?}", other),
-        }
-        match &planned[3] {
-            PlannedUnit::Batch {
-                tool,
-                request,
-                items,
-            } => {
-                assert_eq!(*tool, ToolId::MergePdf);
-                assert_eq!(*request, merge_src);
-                assert_eq!(items.iter().map(|j| j.id).collect::<Vec<_>>(), vec![5, 7]);
-            }
-            other => panic!("expected batch, got {:?}", other),
-        }
-        match &planned[4] {
-            PlannedUnit::Batch { request, items, .. } => {
-                assert_eq!(*request, merge_dir);
-                assert_eq!(items.iter().map(|j| j.id).collect::<Vec<_>>(), vec![6]);
-            }
-            other => panic!("expected batch, got {:?}", other),
-        }
+        // 3. [merge A, merge B, images-to-pdf C, images-to-pdf D] -> 2 ordered batches
+        let case3 = plan_execution_units(
+            vec![
+                StubJob {
+                    id: 1,
+                    req: merge_src.clone(),
+                },
+                StubJob {
+                    id: 2,
+                    req: merge_src.clone(),
+                },
+                StubJob {
+                    id: 3,
+                    req: img_150_src.clone(),
+                },
+                StubJob {
+                    id: 4,
+                    req: img_150_src.clone(),
+                },
+            ],
+            |j| &j.req,
+        );
+        assert_eq!(case3.len(), 2);
+        assert!(matches!(
+            &case3[0],
+            PlannedUnit::Batch { tool: ToolId::MergePdf, items, .. }
+            if items.iter().map(|j| j.id).collect::<Vec<_>>() == vec![1, 2]
+        ));
+        assert!(matches!(
+            &case3[1],
+            PlannedUnit::Batch { tool: ToolId::ImagesToPdf, items, .. }
+            if items.iter().map(|j| j.id).collect::<Vec<_>>() == vec![3, 4]
+        ));
+
+        // 4. Mixed queue with single jobs and multiple batch types preserves exact unit & member order
+        let case4 = plan_execution_units(
+            vec![
+                StubJob {
+                    id: 1,
+                    req: convert_req.clone(),
+                },
+                StubJob {
+                    id: 2,
+                    req: merge_src.clone(),
+                },
+                StubJob {
+                    id: 3,
+                    req: merge_src.clone(),
+                },
+                StubJob {
+                    id: 4,
+                    req: resize_req,
+                },
+                StubJob {
+                    id: 5,
+                    req: img_150_src.clone(),
+                },
+                StubJob {
+                    id: 6,
+                    req: img_150_src,
+                },
+                StubJob {
+                    id: 7,
+                    req: img_300_src.clone(),
+                },
+                StubJob {
+                    id: 8,
+                    req: img_300_src,
+                },
+                StubJob {
+                    id: 9,
+                    req: convert_req,
+                },
+                StubJob {
+                    id: 10,
+                    req: merge_src,
+                },
+            ],
+            |j| &j.req,
+        );
+        assert_eq!(case4.len(), 7);
+        assert!(matches!(&case4[0], PlannedUnit::Single(j) if j.id == 1));
+        assert!(matches!(
+            &case4[1],
+            PlannedUnit::Batch { tool: ToolId::MergePdf, items, .. }
+            if items.iter().map(|j| j.id).collect::<Vec<_>>() == vec![2, 3]
+        ));
+        assert!(matches!(&case4[2], PlannedUnit::Single(j) if j.id == 4));
+        assert!(matches!(
+            &case4[3],
+            PlannedUnit::Batch { tool: ToolId::ImagesToPdf, items, .. }
+            if items.iter().map(|j| j.id).collect::<Vec<_>>() == vec![5, 6]
+        ));
+        assert!(matches!(
+            &case4[4],
+            PlannedUnit::Batch { tool: ToolId::ImagesToPdf, items, .. }
+            if items.iter().map(|j| j.id).collect::<Vec<_>>() == vec![7, 8]
+        ));
+        assert!(matches!(&case4[5], PlannedUnit::Single(j) if j.id == 9));
+        assert!(matches!(
+            &case4[6],
+            PlannedUnit::Batch { tool: ToolId::MergePdf, items, .. }
+            if items.iter().map(|j| j.id).collect::<Vec<_>>() == vec![10]
+        ));
     }
 
     #[test]
