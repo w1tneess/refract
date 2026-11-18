@@ -3,8 +3,9 @@ slint::include_modules!();
 mod pipeline;
 
 use pipeline::{
-    plan_execution_units, resolve_recorded_batch_indices, select_batch_retry_indices,
-    DesktopToolOptions, JobRequest, OutputDestination, PlannedUnit, TrimEnd, UiOptionInput,
+    plan_execution_units, preflight_inputs, resolve_recorded_batch_indices,
+    select_batch_retry_indices, DesktopToolOptions, JobRequest, OutputDestination, PlannedUnit,
+    TrimEnd, UiOptionInput,
 };
 use refract_core::cancel::CancelToken;
 use refract_core::error::{ErrorCode, RefractError};
@@ -1349,15 +1350,19 @@ fn execute_batch_merge_pdf_with_password(
     password: Option<&str>,
 ) -> Result<PathBuf, RefractError> {
     ensure_batch_compatible(jobs, request)?;
-    if jobs.len() < 2 {
-        return Err(RefractError::new(
-            ErrorCode::InvalidOption,
-            "Merge PDF needs at least 2 compatible PDF files with the same output destination.",
-        ));
-    }
-    let buffers: Vec<Vec<u8>> = jobs
-        .iter()
-        .map(|j| std::fs::read(&j.input_path).map_err(to_refract_err))
+    let paths: Vec<&Path> = jobs.iter().map(|j| j.input_path.as_path()).collect();
+    let report = preflight_inputs(request, &paths, password)?;
+    let buffers: Vec<Vec<u8>> = report
+        .inputs
+        .into_iter()
+        .map(|input| {
+            input.pdf_bytes.ok_or_else(|| {
+                RefractError::new(
+                    ErrorCode::DamagedFile,
+                    "PDF input bytes were unavailable after preflight.",
+                )
+            })
+        })
         .collect::<Result<_, _>>()?;
     let slices: Vec<&[u8]> = buffers.iter().map(|b| b.as_slice()).collect();
     let out_bytes = match password {
@@ -1387,6 +1392,8 @@ fn execute_batch_images_to_pdf(
             "Expected ImagesToPdf options for batch compilation.",
         ));
     };
+    let paths: Vec<&Path> = jobs.iter().map(|j| j.input_path.as_path()).collect();
+    preflight_inputs(request, &paths, None)?;
     let buffers: Vec<Vec<u8>> = jobs
         .iter()
         .map(|j| std::fs::read(&j.input_path).map_err(to_refract_err))
@@ -1455,8 +1462,39 @@ fn render_or_extract_pdf_images(
     }
 }
 
+fn take_preflight_pdf_bytes(
+    mut report: pipeline::preflight::PreflightReport,
+) -> Result<Vec<u8>, RefractError> {
+    report
+        .inputs
+        .pop()
+        .and_then(|input| input.pdf_bytes)
+        .ok_or_else(|| {
+            RefractError::new(
+                ErrorCode::DamagedFile,
+                "PDF input bytes were unavailable after preflight.",
+            )
+        })
+}
+
 fn process_job(job: &JobRecord) -> Result<PathBuf, RefractError> {
     let destination = job.request.destination();
+    match job.request.options() {
+        DesktopToolOptions::ImagesToPdf { .. } => {
+            return execute_batch_images_to_pdf(std::slice::from_ref(job), &job.request);
+        }
+        DesktopToolOptions::MergePdf => {
+            return Err(RefractError::new(
+                ErrorCode::InvalidOption,
+                "Merge PDF needs at least 2 compatible PDF files with the same output destination.",
+            ));
+        }
+        _ => {}
+    }
+
+    let report = preflight_inputs(&job.request, &[job.input_path.as_path()], None)?;
+    let detected_format = report.inputs[0].format;
+
     match job.request.options() {
         DesktopToolOptions::ConvertImage { target, quality } => {
             let bytes = std::fs::read(&job.input_path).map_err(to_refract_err)?;
@@ -1492,22 +1530,19 @@ fn process_job(job: &JobRecord) -> Result<PathBuf, RefractError> {
             std::fs::write(&out_path, out_bytes).map_err(to_refract_err)?;
             Ok(out_path)
         }
-        DesktopToolOptions::ImagesToPdf { .. } => {
-            execute_batch_images_to_pdf(std::slice::from_ref(job), &job.request)
-        }
         DesktopToolOptions::PdfToImages { target, dpi } => {
-            let bytes = std::fs::read(&job.input_path).map_err(to_refract_err)?;
+            let bytes = take_preflight_pdf_bytes(report)?;
             render_or_extract_pdf_images(job, &bytes, *target, *dpi, None)
         }
         DesktopToolOptions::CompressPdf => {
-            let bytes = std::fs::read(&job.input_path).map_err(to_refract_err)?;
+            let bytes = take_preflight_pdf_bytes(report)?;
             let out_bytes = pdf::compress_pdf(&bytes)?;
             let out_path = determine_output_path(job, destination, "compressed", "pdf");
             std::fs::write(&out_path, out_bytes).map_err(to_refract_err)?;
             Ok(out_path)
         }
         DesktopToolOptions::SplitPdf { ranges } => {
-            let bytes = std::fs::read(&job.input_path).map_err(to_refract_err)?;
+            let bytes = take_preflight_pdf_bytes(report)?;
             let parts = pdf::split_pdf(&bytes, ranges)?;
             let parent = destination.resolve_parent(&job.input_path);
             let stem = job
@@ -1526,26 +1561,16 @@ fn process_job(job: &JobRecord) -> Result<PathBuf, RefractError> {
             Ok(last_path)
         }
         DesktopToolOptions::ReorderPdf { order } => {
-            let bytes = std::fs::read(&job.input_path).map_err(to_refract_err)?;
+            let bytes = take_preflight_pdf_bytes(report)?;
             let out_bytes = pdf::reorder_pdf(&bytes, order)?;
             let out_path = determine_output_path(job, destination, "reordered", "pdf");
             std::fs::write(&out_path, out_bytes).map_err(to_refract_err)?;
             Ok(out_path)
         }
-        DesktopToolOptions::MergePdf => Err(RefractError::new(
-            ErrorCode::InvalidOption,
-            "Merge PDF needs at least 2 compatible PDF files with the same output destination.",
-        )),
         DesktopToolOptions::ConvertAudio {
             target,
             bitrate_kbps,
         } => {
-            if !audio::is_ffmpeg_available() {
-                return Err(RefractError::new(
-                    ErrorCode::MissingDependency,
-                    "FFmpeg not found. Install FFmpeg and ensure it is on PATH to convert audio.",
-                ));
-            }
             let out_path = determine_output_path(
                 job,
                 destination,
@@ -1560,17 +1585,7 @@ fn process_job(job: &JobRecord) -> Result<PathBuf, RefractError> {
             end,
             bitrate_kbps,
         } => {
-            if !audio::is_ffmpeg_available() {
-                return Err(RefractError::new(
-                    ErrorCode::MissingDependency,
-                    "FFmpeg not found. Install FFmpeg and ensure it is on PATH to trim audio.",
-                ));
-            }
-            let ext = job
-                .input_path
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("mp3");
+            let ext = format_primary_extension(detected_format);
             let out_path = determine_output_path(job, destination, "trimmed", ext);
             let start_arg = format!("{:.3}", start_secs);
             let end_arg = end.to_engine_arg();
@@ -1584,25 +1599,45 @@ fn process_job(job: &JobRecord) -> Result<PathBuf, RefractError> {
             )?;
             Ok(out_path)
         }
+        DesktopToolOptions::ImagesToPdf { .. } | DesktopToolOptions::MergePdf => unreachable!(),
     }
 }
 
 fn process_job_with_password(job: &JobRecord, password: &str) -> Result<PathBuf, RefractError> {
     let destination = job.request.destination();
     match job.request.options() {
+        DesktopToolOptions::MergePdf => {
+            return Err(RefractError::new(
+                ErrorCode::InvalidOption,
+                "Merge PDF unlock requires the complete recorded batch.",
+            ));
+        }
+        DesktopToolOptions::CompressPdf
+        | DesktopToolOptions::PdfToImages { .. }
+        | DesktopToolOptions::SplitPdf { .. }
+        | DesktopToolOptions::ReorderPdf { .. } => {}
+        _ => {
+            return Err(RefractError::new(
+                ErrorCode::UnsupportedFormat,
+                "Password not needed for this tool",
+            ));
+        }
+    }
+
+    let report = preflight_inputs(&job.request, &[job.input_path.as_path()], Some(password))?;
+    let bytes = take_preflight_pdf_bytes(report)?;
+
+    match job.request.options() {
         DesktopToolOptions::CompressPdf => {
-            let bytes = std::fs::read(&job.input_path).map_err(to_refract_err)?;
             let out_bytes = pdf::compress_pdf_with_password(&bytes, password)?;
             let out_path = determine_output_path(job, destination, "compressed", "pdf");
             std::fs::write(&out_path, out_bytes).map_err(to_refract_err)?;
             Ok(out_path)
         }
         DesktopToolOptions::PdfToImages { target, dpi } => {
-            let bytes = std::fs::read(&job.input_path).map_err(to_refract_err)?;
             render_or_extract_pdf_images(job, &bytes, *target, *dpi, Some(password))
         }
         DesktopToolOptions::SplitPdf { ranges } => {
-            let bytes = std::fs::read(&job.input_path).map_err(to_refract_err)?;
             let parts =
                 pdf::split_pdf_with_password(&bytes, ranges, Some(password), &CancelToken::none())?;
             let parent = destination.resolve_parent(&job.input_path);
@@ -1622,7 +1657,6 @@ fn process_job_with_password(job: &JobRecord, password: &str) -> Result<PathBuf,
             Ok(last_path)
         }
         DesktopToolOptions::ReorderPdf { order } => {
-            let bytes = std::fs::read(&job.input_path).map_err(to_refract_err)?;
             let out_bytes = pdf::reorder_pdf_with_password(
                 &bytes,
                 order,
@@ -1633,14 +1667,7 @@ fn process_job_with_password(job: &JobRecord, password: &str) -> Result<PathBuf,
             std::fs::write(&out_path, out_bytes).map_err(to_refract_err)?;
             Ok(out_path)
         }
-        DesktopToolOptions::MergePdf => Err(RefractError::new(
-            ErrorCode::InvalidOption,
-            "Merge PDF unlock requires the complete recorded batch.",
-        )),
-        _ => Err(RefractError::new(
-            ErrorCode::UnsupportedFormat,
-            "Password not needed for this tool",
-        )),
+        _ => unreachable!(),
     }
 }
 
@@ -2706,5 +2733,126 @@ mod tests {
             assert!(!is_busy.load(Ordering::SeqCst));
             assert_eq!(store_state.lock().unwrap()[0].status, non_unlock_status);
         }
+    }
+
+    #[test]
+    fn desktop_execution_paths_enforce_preflight_before_writing_outputs() {
+        let out_dir = tempfile::tempdir().unwrap();
+        let missing = out_dir.path().join("missing.png");
+        let dest = OutputDestination::Directory(out_dir.path().to_path_buf());
+
+        // 1. Single-file image tool rejects HEIC and missing file via preflight
+        let conv_req = JobRequest::new(
+            ToolId::ConvertImage,
+            DesktopToolOptions::ConvertImage {
+                target: Format::Jpeg,
+                quality: 85,
+            },
+            dest.clone(),
+        )
+        .unwrap();
+        let mut store = Vec::new();
+        let mut next_id = 1;
+        enqueue_files(
+            &mut store,
+            &mut next_id,
+            vec![fixture_path("plain.heic"), missing.clone()],
+            &conv_req,
+        );
+        assert_eq!(
+            process_job(&store[0]).unwrap_err().code,
+            ErrorCode::UnsupportedFormat
+        );
+        let miss_err = process_job(&store[1]).unwrap_err();
+        assert_eq!(miss_err.code, ErrorCode::DamagedFile);
+        assert!(miss_err.message.contains("could not be found"));
+
+        // 2. PDF tool rejects empty file and wrong-format PNG via preflight
+        let compress_req = JobRequest::new(
+            ToolId::CompressPdf,
+            DesktopToolOptions::CompressPdf,
+            dest.clone(),
+        )
+        .unwrap();
+        enqueue_files(
+            &mut store,
+            &mut next_id,
+            vec![fixture_path("empty.heic"), fixture_path("plain.png")],
+            &compress_req,
+        );
+        assert_eq!(
+            process_job(&store[2]).unwrap_err().code,
+            ErrorCode::EmptyFile
+        );
+        assert_eq!(
+            process_job(&store[3]).unwrap_err().code,
+            ErrorCode::UnsupportedFormat
+        );
+
+        // 3. merge-pdf batch with one valid PDF and one unsupported PNG fails without writing output
+        let merge_req =
+            JobRequest::new(ToolId::MergePdf, DesktopToolOptions::MergePdf, dest.clone()).unwrap();
+        let mut merge_store = Vec::new();
+        enqueue_files(
+            &mut merge_store,
+            &mut next_id,
+            vec![fixture_path("plain.pdf"), fixture_path("plain.png")],
+            &merge_req,
+        );
+        assert_eq!(
+            execute_batch_merge_pdf(&merge_store, &merge_req)
+                .unwrap_err()
+                .code,
+            ErrorCode::UnsupportedFormat
+        );
+
+        // 4. images-to-pdf batch with one valid PNG and one missing image fails cleanly
+        let imgs_req = JobRequest::new(
+            ToolId::ImagesToPdf,
+            DesktopToolOptions::ImagesToPdf {
+                dpi: 150.0,
+                quality: 85,
+            },
+            dest.clone(),
+        )
+        .unwrap();
+        let mut img_store = Vec::new();
+        enqueue_files(
+            &mut img_store,
+            &mut next_id,
+            vec![fixture_path("plain.png"), missing],
+            &imgs_req,
+        );
+        assert_eq!(
+            execute_batch_images_to_pdf(&img_store, &imgs_req)
+                .unwrap_err()
+                .code,
+            ErrorCode::DamagedFile
+        );
+
+        // 5. Audio tool rejects non-audio file via preflight before spawning FFmpeg
+        let audio_req = JobRequest::new(
+            ToolId::ConvertAudio,
+            DesktopToolOptions::ConvertAudio {
+                target: Format::Mp3,
+                bitrate_kbps: Some(192),
+            },
+            dest,
+        )
+        .unwrap();
+        let mut audio_store = Vec::new();
+        enqueue_files(
+            &mut audio_store,
+            &mut next_id,
+            vec![fixture_path("plain.pdf")],
+            &audio_req,
+        );
+        assert_eq!(
+            process_job(&audio_store[0]).unwrap_err().code,
+            ErrorCode::UnsupportedFormat
+        );
+
+        // Zero files were written to out_dir across all failed preflights
+        assert!(std::fs::read_dir(out_dir.path()).unwrap().next().is_none());
     }
 }
