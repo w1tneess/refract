@@ -369,6 +369,10 @@ pub fn probe_dimensions(bytes: &[u8]) -> Result<(u32, u32), RefractError> {
 
 /// Decode image bytes into an upright `DynamicImage` (baking EXIF orientation into pixels)
 /// with cooperative cancellation checkpoints.
+///
+/// Note: The underlying `image` crate decoder and orientation transforms are not internally
+/// interruptible with the current library APIs; cancellation is observed at explicit checkpoints
+/// (entry, before pixel decode, and before EXIF orientation transform).
 pub fn decode_image_cancellable(
     bytes: &[u8],
     cancel: &CancelToken,
@@ -519,12 +523,29 @@ fn encode_as(img: &DynamicImage, target: Format, quality: u8) -> Result<Vec<u8>,
 }
 
 /// Convert an image to a target format (`JPEG`, `PNG`, or `WebP`) with cooperative cancellation.
+///
+/// Note: The underlying `image` crate decode and encode operations are not internally
+/// interruptible with the current library APIs; cancellation is observed at explicit checkpoints
+/// (before decoding, after decoding, and after encoding before returning output).
 pub fn convert_image_cancellable(
     bytes: &[u8],
     target: Format,
     quality: Option<u8>,
     cancel: &CancelToken,
 ) -> Result<Vec<u8>, RefractError> {
+    convert_image_cancellable_with_encoder(bytes, target, quality, cancel, encode_as)
+}
+
+fn convert_image_cancellable_with_encoder<F>(
+    bytes: &[u8],
+    target: Format,
+    quality: Option<u8>,
+    cancel: &CancelToken,
+    encode: F,
+) -> Result<Vec<u8>, RefractError>
+where
+    F: FnOnce(&DynamicImage, Format, u8) -> Result<Vec<u8>, RefractError>,
+{
     cancel.check()?;
     validate_output_image_format(target)?;
     let valid_quality = match quality {
@@ -534,7 +555,9 @@ pub fn convert_image_cancellable(
 
     let img = decode_image_cancellable(bytes, cancel)?;
     cancel.check()?;
-    encode_as(&img, target, valid_quality)
+    let out = encode(&img, target, valid_quality)?;
+    cancel.check()?;
+    Ok(out)
 }
 
 /// Convert an image to a target format.
@@ -550,6 +573,8 @@ pub fn convert_image(
 /// scale-down fallback and cooperative cancellation checkpoints between every resize and encode step.
 ///
 /// Note: Desktop native compression outputs JPEG only (no external C/C++ `libwebp` dependency).
+/// The underlying `image` crate decode, resize, and encode calls are not internally interruptible
+/// with the current library APIs; cancellation is observed at explicit checkpoints between steps.
 pub fn compress_image_cancellable(
     bytes: &[u8],
     target_kb: u32,
@@ -635,6 +660,10 @@ pub fn compress_image(bytes: &[u8], target_kb: u32) -> Result<Vec<u8>, RefractEr
 
 /// Resize an image using full manifest-aligned [`ResizeOptions`] (`px` or `cm` + DPI, aspect ratio,
 /// output format selection or source format preservation, quality validation) with cooperative cancellation.
+///
+/// Note: The underlying `image` crate decode, Lanczos3 resize, and encode calls are not internally
+/// interruptible with the current library APIs; cancellation is observed at explicit checkpoints
+/// (entry, decode checkpoints, before resize, before encode, and after encode before returning output).
 pub fn resize_image_with_options_cancellable(
     bytes: &[u8],
     options: &ResizeOptions,
@@ -1059,6 +1088,36 @@ mod tests {
         assert_eq!(
             iterations, 2,
             "compression loop must abort immediately after cancellation checkpoint"
+        );
+    }
+
+    #[test]
+    fn convert_image_cancellable_honors_cancellation_triggered_during_encode() {
+        let plain_png = fixture_bytes("plain.png");
+        let token = CancelToken::new();
+        let mut encoder_ran = false;
+
+        let err = convert_image_cancellable_with_encoder(
+            &plain_png,
+            Format::Jpeg,
+            Some(85),
+            &token,
+            |img, target, quality| {
+                let encoded = encode_as(img, target, quality)?;
+                assert!(!encoded.is_empty());
+                encoder_ran = true;
+                // Simulate cancellation arriving during the non-interruptible encode phase.
+                token.cancel();
+                Ok(encoded)
+            },
+        )
+        .unwrap_err();
+
+        assert!(encoder_ran, "encode phase should have executed");
+        assert_eq!(
+            err.code,
+            ErrorCode::Canceled,
+            "post-encode cancellation checkpoint must return Canceled instead of Ok"
         );
     }
 }
