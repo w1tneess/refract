@@ -67,6 +67,31 @@ fn live_convert_audio_wav_to_mp3_and_mp3_to_wav_with_bitrate() {
     assert_eq!(refract_core::detect(&wav_bytes), Some(Format::Wav));
     let wav_dur = audio::probe_duration(&out_wav).unwrap();
     assert!((2.5..=3.5).contains(&wav_dur));
+
+    // Pre-existing destination must never be overwritten on subsequent conversion
+    let sentinel = dir.path().join("preexisting.mp3");
+    std::fs::write(&sentinel, b"do-not-clobber-convert").unwrap();
+    let collision = audio::convert_audio(
+        &fixture_path("sound.wav"),
+        &sentinel,
+        Format::Mp3,
+        Some(192),
+    )
+    .unwrap_err();
+    assert_eq!(collision.details.as_deref(), Some("destination_exists"));
+    assert_eq!(std::fs::read(&sentinel).unwrap(), b"do-not-clobber-convert");
+
+    // No temporary artifacts remain after success or collision
+    let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .flatten()
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with(".refract-audio-")
+        })
+        .collect();
+    assert!(leftovers.is_empty(), "leftover temp files: {:?}", leftovers);
 }
 
 #[test]
@@ -130,6 +155,35 @@ fn live_trim_audio_explicit_end_eof_zero_and_out_of_bounds_validation() {
     .unwrap_err();
     assert_eq!(err.code, ErrorCode::InvalidOption);
     assert!(!out_bad.exists());
+
+    // 4. Pre-existing destination is preserved on trim collision and leaves zero temp files
+    let sentinel = dir.path().join("preexisting_trim.wav");
+    std::fs::write(&sentinel, b"do-not-clobber-trim").unwrap();
+    let trim_collision = audio::trim_audio_cancellable(
+        &wav_path,
+        &sentinel,
+        Some("0.2"),
+        Some("0.6"),
+        None,
+        &CancelToken::none(),
+    )
+    .unwrap_err();
+    assert_eq!(
+        trim_collision.details.as_deref(),
+        Some("destination_exists")
+    );
+    assert_eq!(std::fs::read(&sentinel).unwrap(), b"do-not-clobber-trim");
+
+    let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .flatten()
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with(".refract-audio-")
+        })
+        .collect();
+    assert!(leftovers.is_empty(), "leftover temp files: {:?}", leftovers);
 }
 
 #[test]
@@ -139,7 +193,9 @@ fn live_ffmpeg_mid_process_cancellation_kills_process_and_cleans_temp_files() {
     let dir = tempfile::tempdir().unwrap();
     let partial_out = dir.path().join("canceled.mp3");
     let keep_existing = dir.path().join("keep.mp3");
+    let unrelated_temp = dir.path().join(".refract-audio-unrelated.mp3");
     std::fs::write(&keep_existing, b"original-data").unwrap();
+    std::fs::write(&unrelated_temp, b"unrelated-temp-data").unwrap();
 
     let deps = audio::detect_audio_dependencies();
     let ffmpeg = deps.ffmpeg.unwrap();
@@ -189,5 +245,10 @@ fn live_ffmpeg_mid_process_cancellation_kills_process_and_cleans_temp_files() {
         std::fs::read(&keep_existing).unwrap(),
         b"original-data",
         "existing files must remain untouched"
+    );
+    assert_eq!(
+        std::fs::read(&unrelated_temp).unwrap(),
+        b"unrelated-temp-data",
+        "unrelated temp files must remain untouched"
     );
 }

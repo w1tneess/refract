@@ -4,13 +4,11 @@ use refract_core::error::{ErrorCode, RefractError};
 use refract_core::format::Format;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use tempfile::{Builder as TempFileBuilder, TempPath};
 
 /// Allowed audio bitrate bounds (kbps) for lossy codecs.
 pub const MIN_BITRATE_KBPS: u32 = 64;
 pub const MAX_BITRATE_KBPS: u32 = 320;
-
-static TEMP_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// Resolved system audio tool binaries on `PATH`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -361,18 +359,85 @@ fn detect_audio_format_from_file(path: &Path) -> Option<Format> {
         .filter(|fmt| fmt.kind() == refract_core::format::Kind::Audio)
 }
 
-/// Build a unique sibling temp path beside `output`, keeping the target file extension
-/// so FFmpeg selects the matching muxer/container while never corrupting `output` on error/cancel.
-fn sibling_temp_path(output: &Path, ext: &str) -> PathBuf {
-    let parent = output.parent().unwrap_or_else(|| Path::new("."));
-    let seq = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let pid = std::process::id();
-    let ext = ext.trim_start_matches('.');
-    if ext.is_empty() {
-        parent.join(format!(".refract-audio-tmp-{}-{}", pid, seq))
+/// Exclusively allocate a uniquely named temporary file in `output`'s parent directory
+/// using OS-level `O_CREAT | O_EXCL` / `CREATE_NEW` semantics via `tempfile::Builder`,
+/// preserving `.ext` so FFmpeg selects the intended muxer.
+///
+/// Converting immediately to [`TempPath`] closes the file handle on Windows before spawning
+/// FFmpeg while retaining exclusive RAII ownership so dropping always removes only this file.
+fn create_sibling_temp_audio_file(output: &Path, ext: &str) -> Result<TempPath, RefractError> {
+    let parent = output
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let clean_ext = ext.trim_start_matches('.');
+    let suffix = if clean_ext.is_empty() {
+        String::new()
     } else {
-        parent.join(format!(".refract-audio-tmp-{}-{}.{}", pid, seq, ext))
+        format!(".{}", clean_ext)
+    };
+
+    let named = TempFileBuilder::new()
+        .prefix(".refract-audio-")
+        .suffix(&suffix)
+        .tempfile_in(parent)
+        .map_err(|e| {
+            RefractError::with_details(
+                ErrorCode::EngineFailed,
+                "Failed to allocate temporary audio output file",
+                e.to_string(),
+            )
+        })?;
+
+    Ok(named.into_temp_path())
+}
+
+/// Atomically persist an owned [`TempPath`] to `output` with strict no-clobber semantics.
+///
+/// - On Windows, `TempPath::persist_noclobber` uses `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING`,
+///   failing atomically with `AlreadyExists` if `output` exists.
+/// - On Unix, `TempPath::persist_noclobber` uses `link` + `unlink`, failing atomically with `AlreadyExists`.
+/// - On any error (including collision), the returned `PathPersistError`'s owned `TempPath` is
+///   dropped, removing only this operation's temporary file while leaving `output` untouched.
+pub fn persist_audio_temp_noclobber(temp: TempPath, output: &Path) -> Result<(), RefractError> {
+    match temp.persist_noclobber(output) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            let io_err = err.error;
+            // Explicitly drop `err.path` so our owned temporary file is cleaned up immediately.
+            drop(err.path);
+            if io_err.kind() == std::io::ErrorKind::AlreadyExists {
+                Err(RefractError::with_details(
+                    ErrorCode::EngineFailed,
+                    format!(
+                        "Output file already exists and will not be overwritten: {}",
+                        output.display()
+                    ),
+                    "destination_exists",
+                ))
+            } else {
+                Err(RefractError::with_details(
+                    ErrorCode::EngineFailed,
+                    "Failed to finalize audio output file",
+                    io_err.to_string(),
+                ))
+            }
+        }
     }
+}
+
+fn reject_if_destination_exists(output: &Path) -> Result<(), RefractError> {
+    if output.exists() {
+        return Err(RefractError::with_details(
+            ErrorCode::EngineFailed,
+            format!(
+                "Output file already exists and will not be overwritten: {}",
+                output.display()
+            ),
+            "destination_exists",
+        ));
+    }
+    Ok(())
 }
 
 /// Probe audio duration in seconds using an explicit `ffprobe` binary path and cancellation token.
@@ -423,8 +488,10 @@ pub fn probe_duration(input: &Path) -> Result<f64, RefractError> {
 }
 
 /// Convert an audio file using an explicit `ffmpeg` binary path and cancellation token.
-/// Writes to a sibling temp file first and renames to `output` only on success so failures
-/// and cancellations never leave partial output or overwrite an existing file.
+///
+/// Exclusively allocates a temporary sibling file, runs FFmpeg into it, and finalizes via
+/// atomic no-clobber persistence so failures, cancellations, and destination collisions never
+/// overwrite an existing user file or leave temporary artifacts behind.
 pub fn convert_audio_with_binary(
     ffmpeg_bin: &Path,
     input: &Path,
@@ -434,31 +501,20 @@ pub fn convert_audio_with_binary(
     cancel: &CancelToken,
 ) -> Result<(), RefractError> {
     cancel.check()?;
+    reject_if_destination_exists(output)?;
 
-    let tmp_path = sibling_temp_path(output, target.primary_extension());
-    let args = build_convert_audio_args(input, &tmp_path, target, bitrate_kbps)?;
+    let temp_file = create_sibling_temp_audio_file(output, target.primary_extension())?;
+    let args = build_convert_audio_args(input, temp_file.as_ref(), target, bitrate_kbps)?;
 
-    run_command_cancellable(
-        ffmpeg_bin,
-        args,
-        cancel,
-        std::slice::from_ref(&tmp_path),
-        "ffmpeg",
-    )?;
+    // `temp_file` owns cleanup via `Drop` on error or cancellation, so cleanup never touches unrelated files.
+    run_command_cancellable(ffmpeg_bin, args, cancel, &[], "ffmpeg")?;
 
     if cancel.is_canceled() {
-        let _ = std::fs::remove_file(&tmp_path);
+        drop(temp_file);
         return Err(RefractError::canceled());
     }
 
-    std::fs::rename(&tmp_path, output).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp_path);
-        RefractError::with_details(
-            ErrorCode::EngineFailed,
-            "Failed to finalize converted audio file",
-            e.to_string(),
-        )
-    })
+    persist_audio_temp_noclobber(temp_file, output)
 }
 
 /// Convert an audio file using system `ffmpeg` with cooperative cancellation.
@@ -490,7 +546,8 @@ pub fn convert_audio(
 }
 
 /// Trim an audio file using explicit `ffmpeg` and `ffprobe` paths, validating `start`/`end`
-/// against actual media duration (`end=0` means EOF) and honoring `bitrate_kbps`.
+/// against actual media duration (`end=0` means EOF), honoring `bitrate_kbps`, and finalizing
+/// with atomic no-clobber persistence.
 #[allow(clippy::too_many_arguments)]
 pub fn trim_audio_with_binaries(
     ffmpeg_bin: &Path,
@@ -503,6 +560,7 @@ pub fn trim_audio_with_binaries(
     cancel: &CancelToken,
 ) -> Result<(), RefractError> {
     cancel.check()?;
+    reject_if_destination_exists(output)?;
 
     let duration_secs = probe_duration_with_binary(ffprobe_bin, input, cancel)?;
     let range = resolve_trim_range(start, end, duration_secs)?;
@@ -513,31 +571,25 @@ pub fn trim_audio_with_binaries(
         .and_then(|e| e.to_str())
         .or_else(|| target_format.map(|f| f.primary_extension()))
         .unwrap_or("mp3");
-    let tmp_path = sibling_temp_path(output, ext);
+    let temp_file = create_sibling_temp_audio_file(output, ext)?;
 
-    let args = build_trim_audio_args(input, &tmp_path, range, target_format, bitrate_kbps)?;
-
-    run_command_cancellable(
-        ffmpeg_bin,
-        args,
-        cancel,
-        std::slice::from_ref(&tmp_path),
-        "ffmpeg",
+    let args = build_trim_audio_args(
+        input,
+        temp_file.as_ref(),
+        range,
+        target_format,
+        bitrate_kbps,
     )?;
 
+    // `temp_file` owns cleanup via `Drop` on error or cancellation.
+    run_command_cancellable(ffmpeg_bin, args, cancel, &[], "ffmpeg")?;
+
     if cancel.is_canceled() {
-        let _ = std::fs::remove_file(&tmp_path);
+        drop(temp_file);
         return Err(RefractError::canceled());
     }
 
-    std::fs::rename(&tmp_path, output).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp_path);
-        RefractError::with_details(
-            ErrorCode::EngineFailed,
-            "Failed to finalize trimmed audio file",
-            e.to_string(),
-        )
-    })
+    persist_audio_temp_noclobber(temp_file, output)
 }
 
 /// Trim an audio file using system `ffmpeg` and `ffprobe` with bitrate and cancellation support.
@@ -849,13 +901,26 @@ mod tests {
         );
     }
 
+    fn temp_audio_files_in(dir: &Path) -> Vec<PathBuf> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.starts_with(".refract-audio-"))
+                    .unwrap_or(false)
+            })
+            .collect()
+    }
+
     #[test]
-    fn missing_ffmpeg_and_ffprobe_return_missing_dependency_and_preserve_existing_files() {
+    fn missing_ffmpeg_and_ffprobe_return_missing_dependency_and_leave_no_temp_files() {
         let dir = tempfile::tempdir().unwrap();
         let dummy_in = dir.path().join("in.wav");
-        let existing_out = dir.path().join("existing.mp3");
+        let new_out = dir.path().join("new_out.mp3");
         std::fs::write(&dummy_in, b"RIFF0000WAVE").unwrap();
-        std::fs::write(&existing_out, b"keep-existing-audio").unwrap();
 
         let missing_bin = Path::new("refract-missing-ffmpeg-binary-99999");
 
@@ -866,24 +931,24 @@ mod tests {
         let conv_err = convert_audio_with_binary(
             missing_bin,
             &dummy_in,
-            &existing_out,
+            &new_out,
             Format::Mp3,
             Some(192),
             &CancelToken::none(),
         )
         .unwrap_err();
         assert_eq!(conv_err.code, ErrorCode::MissingDependency);
-        assert_eq!(
-            std::fs::read(&existing_out).unwrap(),
-            b"keep-existing-audio",
-            "failed conversion must never overwrite existing file"
+        assert!(!new_out.exists());
+        assert!(
+            temp_audio_files_in(dir.path()).is_empty(),
+            "no temporary audio files may remain after spawn failure"
         );
 
         let trim_err = trim_audio_with_binaries(
             missing_bin,
             missing_bin,
             &dummy_in,
-            &existing_out,
+            &new_out,
             Some("0"),
             Some("0"),
             Some(192),
@@ -891,10 +956,8 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(trim_err.code, ErrorCode::MissingDependency);
-        assert_eq!(
-            std::fs::read(&existing_out).unwrap(),
-            b"keep-existing-audio"
-        );
+        assert!(!new_out.exists());
+        assert!(temp_audio_files_in(dir.path()).is_empty());
 
         // AudioDependencies helper reports missing binaries explicitly
         let partial_deps = AudioDependencies {
@@ -903,6 +966,89 @@ mod tests {
         };
         assert!(!partial_deps.is_ready());
         assert_eq!(partial_deps.missing(), vec!["ffprobe"]);
+    }
+
+    #[test]
+    fn destination_collision_is_rejected_and_preserves_original_file_and_cleans_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        let dummy_in = dir.path().join("in.wav");
+        let existing_out = dir.path().join("existing.mp3");
+        std::fs::write(&dummy_in, b"RIFF0000WAVE").unwrap();
+        std::fs::write(&existing_out, b"original-user-audio").unwrap();
+
+        // 1. Direct atomic persist_noclobber collision (simulates TOCTOU race after FFmpeg succeeds)
+        let temp = create_sibling_temp_audio_file(&existing_out, "mp3").unwrap();
+        assert_eq!(temp.extension().and_then(|e| e.to_str()), Some("mp3"));
+        std::fs::write(&temp, b"new-converted-audio").unwrap();
+
+        let err = persist_audio_temp_noclobber(temp, &existing_out).unwrap_err();
+        assert_eq!(err.code, ErrorCode::EngineFailed);
+        assert_eq!(err.details.as_deref(), Some("destination_exists"));
+        assert!(err.message.contains("already exists"));
+        assert_eq!(
+            std::fs::read(&existing_out).unwrap(),
+            b"original-user-audio",
+            "existing destination must never be overwritten"
+        );
+        assert!(
+            temp_audio_files_in(dir.path()).is_empty(),
+            "temporary file must be removed after no-clobber collision"
+        );
+
+        // 2. Upfront collision check on convert and trim preserves existing destination
+        let dummy_bin = Path::new("refract-missing-ffmpeg-binary-99999");
+        let conv_err = convert_audio_with_binary(
+            dummy_bin,
+            &dummy_in,
+            &existing_out,
+            Format::Mp3,
+            Some(192),
+            &CancelToken::none(),
+        )
+        .unwrap_err();
+        assert_eq!(conv_err.details.as_deref(), Some("destination_exists"));
+        assert_eq!(
+            std::fs::read(&existing_out).unwrap(),
+            b"original-user-audio"
+        );
+
+        let trim_err = trim_audio_with_binaries(
+            dummy_bin,
+            dummy_bin,
+            &dummy_in,
+            &existing_out,
+            Some("0"),
+            Some("0"),
+            Some(192),
+            &CancelToken::none(),
+        )
+        .unwrap_err();
+        assert_eq!(trim_err.details.as_deref(), Some("destination_exists"));
+        assert_eq!(
+            std::fs::read(&existing_out).unwrap(),
+            b"original-user-audio"
+        );
+        assert!(temp_audio_files_in(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn exclusive_temp_allocation_never_clobbers_or_deletes_unrelated_temp_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let unrelated = dir.path().join(".refract-audio-unrelated.mp3");
+        let dest = dir.path().join("target.mp3");
+        std::fs::write(&unrelated, b"unrelated-sibling").unwrap();
+
+        {
+            let owned_temp = create_sibling_temp_audio_file(&dest, "mp3").unwrap();
+            assert_ne!(owned_temp.as_ref() as &Path, unrelated.as_path());
+            assert_eq!(owned_temp.extension().and_then(|e| e.to_str()), Some("mp3"));
+            std::fs::write(&owned_temp, b"owned-work").unwrap();
+            // Simulate failure/cancellation drop of `owned_temp`
+        }
+
+        // Unrelated sibling file must remain completely untouched while owned temp file is gone
+        assert_eq!(std::fs::read(&unrelated).unwrap(), b"unrelated-sibling");
+        assert_eq!(temp_audio_files_in(dir.path()), vec![unrelated]);
     }
 
     #[test]
@@ -932,5 +1078,174 @@ mod tests {
             ErrorCode::Canceled
         );
         assert!(!out.exists());
+        assert!(temp_audio_files_in(dir.path()).is_empty());
+    }
+
+    fn write_test_script(dir: &Path, name: &str, windows_body: &str, unix_body: &str) -> PathBuf {
+        #[cfg(windows)]
+        {
+            let _ = unix_body;
+            let path = dir.join(format!("{}.cmd", name));
+            std::fs::write(&path, windows_body).unwrap();
+            path
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = windows_body;
+            let path = dir.join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{}\n", unix_body)).unwrap();
+            let mut perms = std::fs::metadata(&path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&path, perms).unwrap();
+            path
+        }
+    }
+
+    #[test]
+    fn toctou_collision_on_convert_and_trim_preserves_destination_and_cleans_owned_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        let dummy_in = dir.path().join("in.wav");
+        let convert_out = dir.path().join("raced_convert.mp3");
+        let trim_out = dir.path().join("raced_trim.mp3");
+        let unrelated = dir.path().join(".refract-audio-unrelated.mp3");
+        std::fs::write(&dummy_in, b"RIFF0000WAVE").unwrap();
+        std::fs::write(&unrelated, b"keep-unrelated").unwrap();
+
+        // Fake ffprobe returning 3.0s duration
+        let fake_ffprobe = write_test_script(
+            dir.path(),
+            "fake_ffprobe",
+            "@echo off\r\necho 3.0\r\nexit /b 0\r\n",
+            "echo 3.0\nexit 0",
+        );
+
+        // Fake ffmpeg that writes to its last arg (temp output) AND races by creating convert_out
+        let fake_ffmpeg_convert = write_test_script(
+            dir.path(),
+            "fake_ffmpeg_convert",
+            &format!(
+                "@echo off\r\n:loop\r\nif \"%~2\"==\"\" goto done\r\nshift\r\ngoto loop\r\n:done\r\necho new-temp>\"%~1\"\r\n<nul set /p =raced-original>\"{}\"\r\nexit /b 0\r\n",
+                convert_out.display()
+            ),
+            &format!(
+                "for last; do :; done\necho new-temp > \"$last\"\nprintf 'raced-original' > '{}'\nexit 0",
+                convert_out.display()
+            ),
+        );
+
+        let err = convert_audio_with_binary(
+            &fake_ffmpeg_convert,
+            &dummy_in,
+            &convert_out,
+            Format::Mp3,
+            Some(192),
+            &CancelToken::none(),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::EngineFailed);
+        assert_eq!(err.details.as_deref(), Some("destination_exists"));
+        assert_eq!(std::fs::read(&convert_out).unwrap(), b"raced-original");
+        assert_eq!(std::fs::read(&unrelated).unwrap(), b"keep-unrelated");
+        assert_eq!(temp_audio_files_in(dir.path()), vec![unrelated.clone()]);
+
+        // Same TOCTOU race for trim_audio_with_binaries
+        let fake_ffmpeg_trim = write_test_script(
+            dir.path(),
+            "fake_ffmpeg_trim",
+            &format!(
+                "@echo off\r\n:loop\r\nif \"%~2\"==\"\" goto done\r\nshift\r\ngoto loop\r\n:done\r\necho new-trim-temp>\"%~1\"\r\n<nul set /p =raced-trim-original>\"{}\"\r\nexit /b 0\r\n",
+                trim_out.display()
+            ),
+            &format!(
+                "for last; do :; done\necho new-trim-temp > \"$last\"\nprintf 'raced-trim-original' > '{}'\nexit 0",
+                trim_out.display()
+            ),
+        );
+
+        let trim_err = trim_audio_with_binaries(
+            &fake_ffmpeg_trim,
+            &fake_ffprobe,
+            &dummy_in,
+            &trim_out,
+            Some("0.2"),
+            Some("1.0"),
+            Some(192),
+            &CancelToken::none(),
+        )
+        .unwrap_err();
+        assert_eq!(trim_err.code, ErrorCode::EngineFailed);
+        assert_eq!(trim_err.details.as_deref(), Some("destination_exists"));
+        assert_eq!(std::fs::read(&trim_out).unwrap(), b"raced-trim-original");
+        assert_eq!(std::fs::read(&unrelated).unwrap(), b"keep-unrelated");
+        assert_eq!(temp_audio_files_in(dir.path()), vec![unrelated]);
+    }
+
+    #[test]
+    fn ffmpeg_failure_and_mid_run_cancel_clean_only_owned_temp_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let dummy_in = dir.path().join("in.wav");
+        let out_fail = dir.path().join("failed.mp3");
+        let out_cancel = dir.path().join("canceled.mp3");
+        let unrelated = dir.path().join(".refract-audio-unrelated.mp3");
+        std::fs::write(&dummy_in, b"RIFF0000WAVE").unwrap();
+        std::fs::write(&unrelated, b"keep-unrelated").unwrap();
+
+        // 1. Failing process writes partial bytes into temp output then exits non-zero
+        let failing_ffmpeg = write_test_script(
+            dir.path(),
+            "failing_ffmpeg",
+            "@echo off\r\n:loop\r\nif \"%~2\"==\"\" goto done\r\nshift\r\ngoto loop\r\n:done\r\necho partial>\"%~1\"\r\necho codec error 1>&2\r\nexit /b 2\r\n",
+            "for last; do :; done\necho partial > \"$last\"\necho codec error >&2\nexit 2",
+        );
+
+        let err = convert_audio_with_binary(
+            &failing_ffmpeg,
+            &dummy_in,
+            &out_fail,
+            Format::Mp3,
+            Some(192),
+            &CancelToken::none(),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::EngineFailed);
+        assert!(!out_fail.exists());
+        assert_eq!(std::fs::read(&unrelated).unwrap(), b"keep-unrelated");
+        assert_eq!(temp_audio_files_in(dir.path()), vec![unrelated.clone()]);
+
+        // 2. Mid-process cancellation cleans only the owned temp file and keeps unrelated files
+        let slow_ffmpeg = write_test_script(
+            dir.path(),
+            "slow_ffmpeg",
+            "@echo off\r\n:spin\r\ngoto spin\r\n",
+            "exec sleep 30",
+        );
+
+        let token = CancelToken::new();
+        let canceller = token.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(120));
+            canceller.cancel();
+        });
+
+        let started = std::time::Instant::now();
+        let cancel_err = convert_audio_with_binary(
+            &slow_ffmpeg,
+            &dummy_in,
+            &out_cancel,
+            Format::Mp3,
+            Some(192),
+            &token,
+        )
+        .unwrap_err();
+        assert_eq!(cancel_err.code, ErrorCode::Canceled);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "canceled audio subprocess took too long: {:?}",
+            started.elapsed()
+        );
+        assert!(!out_cancel.exists());
+        assert_eq!(std::fs::read(&unrelated).unwrap(), b"keep-unrelated");
+        assert_eq!(temp_audio_files_in(dir.path()), vec![unrelated]);
     }
 }
