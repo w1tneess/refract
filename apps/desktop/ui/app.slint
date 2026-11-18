@@ -1,4 +1,4 @@
-import { Button, VerticalBox, HorizontalBox, ScrollView, ComboBox, LineEdit } from "std-widgets.slint";
+import { Button, VerticalBox, HorizontalBox, ScrollView, ComboBox, LineEdit, Slider, SpinBox, CheckBox, ProgressIndicator, GroupBox } from "std-widgets.slint";
 
 export struct JobEntry {
     id: int,
@@ -8,94 +8,307 @@ export struct JobEntry {
     status: string,
     error: string,
     output_path: string,
+    progress: float,
+}
+
+export struct ToolSpec {
+    id: string,
+    title: string,
+    tagline: string,
+    description: string,
+    domain: string,
+    input_formats: [string],
+    output_capability: string,
+    engine: int,
+    batch: bool,
+    min_files: int,
+    max_files: int,
+    extensions: [string],
+}
+
+export struct ToolGroup {
+    domain_label: string,
+    tools: [ToolSpec],
+}
+
+global Palette {
+    in-out property<color> background: #121214;
+    in-out property<color> surface: #18181b;
+    in-out property<color> surface-hover: #1f1f23;
+    in-out property<color> border: #27272a;
+    in-out property<color> border-focus: #0b57d0;
+    in-out property<color> primary: #8ab4f8;
+    in-out property<color> primary-hover: #a5c8fa;
+    in-out property<color> primary-pressed: #0b57d0;
+    in-out property<color> foreground: #e4e4e7;
+    in-out property<color> muted: #71717a;
+    in-out property<color> success: #4ade80;
+    in-out property<color> warning: #fbbf24;
+    in-out property<color> error: #f87171;
+    in-out property<color> dropzone-bg: #0d0d10;
+    in-out property<color> dropzone-border: #27272a;
+    in-out property<color> dropzone-border-hover: #0b57d0;
 }
 
 export component MainWindow inherits Window {
-    title: "Refract — Native File Converter";
-    preferred-width: 860px;
-    preferred-height: 640px;
-    background: #121214;
+    title: "Refract";
+    preferred-width: 1024px;
+    preferred-height: 720px;
+    background: Palette.background;
 
     callback pick_files();
+    callback pick_output_folder();
+    callback toggle_theme();
     callback start_processing();
     callback clear_jobs();
     callback open_output_folder(string);
+    callback retry_job(int);
+    callback remove_job(int);
+    callback move_job_up(int);
+    callback move_job_down(int);
     callback tool_changed(string);
+    callback show_password_dialog_cb(int, string);
+    callback password_entered(int, string);
 
-    in-out property <[string]> tool_list: [
-        "Convert image",
-        "Compress image",
-        "Resize image",
-        "Merge PDF",
-        "Split PDF",
-        "Reorder PDF",
-        "Compress PDF",
-        "Convert audio",
-        "Trim audio"
-    ];
-    in-out property <string> selected_tool: "Convert image";
+    in-out property<[ToolSpec]> tool_specs: [];
+    in-out property<[ToolGroup]> tool_groups: [];
 
-    // Options properties
-    in-out property <string> opt_image_format: "jpg";
-    in-out property <int> opt_image_quality: 85;
-    in-out property <string> opt_target_kb: "200";
-    in-out property <string> opt_resize_width: "800";
-    in-out property <string> opt_resize_height: "0";
-    in-out property <string> opt_audio_format: "mp3";
-    in-out property <string> opt_audio_bitrate: "192";
-    in-out property <string> opt_trim_start: "0";
-    in-out property <string> opt_trim_end: "30";
-    in-out property <string> opt_pdf_ranges: "1-2";
-    in-out property <string> opt_pdf_order: "1, 2";
+    in-out property<string> selected_tool_id: "";
+    in-out property<bool> is_dark_mode: true;
+    in-out property<bool> is_running: false;
+    in-out property<float> overall_progress: 0.0;
+    in-out property<string> status_text: "Ready";
+    in-out property<bool> ffmpeg_available: false;
+    in-out property<bool> pdf_renderer_available: false;
+    in-out property<string> output_folder: "";
+    in-out property<bool> output_next_to_source: true;
 
-    // Queue properties
-    in-out property <[JobEntry]> jobs: [];
-    in-out property <bool> is_running: false;
+    in-out property<string> current_tool_title: "";
+    in-out property<string> current_tool_tagline: "";
+    in-out property<string> current_tool_description: "";
+    in-out property<string> current_tool_domain: "";
+    in-out property<[string]> current_tool_extensions: [];
+    in-out property<string> current_tool_extensions_joined: "";
+    in-out property<bool> current_tool_batch: false;
 
-    HorizontalBox {
-        padding: 16px;
-        spacing: 16px;
+    in-out property<string> opt_string_1: "";
+    in-out property<string> opt_string_2: "";
+    in-out property<int> opt_int_1: 0;
+    in-out property<int> opt_int_2: 0;
+    in-out property<float> opt_float_1: 0.0;
+    in-out property<bool> opt_bool_1: false;
+    in-out property<string> opt_combo_1: "";
+    in-out property<[string]> opt_combo_1_model: [];
 
-        // Left sidebar: Tool selection
-        Rectangle {
-            width: 200px;
-            background: #18181b;
-            border-radius: 8px;
-            border-width: 1px;
-            border-color: #27272a;
+    in-out property<[JobEntry]> jobs: [];
+    in-out property<string> jobs_count_str: "";
 
-            VerticalBox {
-                padding: 12px;
-                spacing: 8px;
+    in-out property<bool> show_password_dialog: false;
+    in-out property<int> password_job_id: -1;
+    in-out property<string> password_prompt: "";
+    in-out property<string> password_input: "";
 
-                Text {
-                    text: "TOOLS";
-                    font-size: 11px;
-                    font-weight: 700;
-                    color: #71717a;
-                }
-
-                ScrollView {
-                    VerticalBox {
-                        spacing: 4px;
-                        for tool in root.tool_list : Rectangle {
-                            height: 34px;
-                            border-radius: 6px;
-                            background: root.selected_tool == tool ? #27272a : transparent;
-
-                            TouchArea {
-                                clicked => {
-                                    root.selected_tool = tool;
-                                    root.tool_changed(tool);
+    VerticalBox { spacing: 0px;
+        HorizontalBox { spacing: 0px;
+            Rectangle {
+                width: 260px;
+                background: Palette.surface;
+                border-width: 1px;
+                border-color: Palette.border;
+                VerticalBox { padding: 16px; spacing: 16px;
+                    HorizontalBox { spacing: 10px; alignment: center;
+                        Rectangle { width: 32px; height: 32px; border-radius: 8px; background: Palette.primary; }
+                        VerticalBox {
+                            Text { text: "Refract"; font-size: 18px; font-weight: 700; color: Palette.foreground; }
+                            Text { text: "Native File Converter"; font-size: 11px; color: Palette.muted; }
+                        }
+                    }
+                    for group in root.tool_groups : GroupBox {
+                        title: group.domain_label;
+                        property<[ToolSpec]> group_tools: group.tools;
+                        VerticalBox { padding: 8px; spacing: 4px;
+                            for tool in group_tools : Rectangle {
+                                height: 40px; border-radius: 8px;
+                                background: root.selected_tool_id == tool.id ? Palette.primary : transparent;
+                                border-width: root.selected_tool_id == tool.id ? 0px : 1px;
+                                border-color: Palette.border;
+                                animate background { duration: 120ms; easing: ease-in-out; }
+                                TouchArea { clicked => { root.tool_changed(tool.id); } }
+                                HorizontalBox { padding: 8px; spacing: 10px; alignment: center;
+                                    Rectangle { width: 24px; height: 24px; border-radius: 6px;
+                                        background: tool.domain == "Image" ? #f59e0b : (tool.domain == "PDF" ? #ef4444 : #8b5cf6); }
+                                    VerticalBox { spacing: 1px;
+                                        Text { text: tool.title; font-size: 13px; font-weight: 600; color: root.selected_tool_id == tool.id ? #ffffff : Palette.foreground; }
+                                        Text { text: tool.tagline; font-size: 10px; color: root.selected_tool_id == tool.id ? #d1d5db : Palette.muted; }
+                                    }
                                 }
                             }
+                        }
+                    }
+                    HorizontalBox { spacing: 8px; alignment: center;
+                        Rectangle { width: 8px; height: 8px; border-radius: 4px; background: root.ffmpeg_available ? Palette.success : Palette.error; }
+                        Text { text: "FFmpeg"; font-size: 10px; color: Palette.muted; }
+                        Rectangle { width: 8px; height: 8px; border-radius: 4px; background: root.pdf_renderer_available ? Palette.success : Palette.error; }
+                        Text { text: "PDF Renderer"; font-size: 10px; color: Palette.muted; }
+                    }
+                    HorizontalBox { spacing: 10px; alignment: center;
+                        Rectangle { width: 20px; height: 20px; border-radius: 10px; background: root.is_dark_mode ? Palette.primary : #d4d4d8; border-width: 1px; border-color: Palette.border; animate background { duration: 200ms; easing: ease-in-out; } }
+                        Text { text: root.is_dark_mode ? "Dark mode" : "Light mode"; font-size: 12px; color: Palette.foreground; }
+                        TouchArea { clicked => { root.toggle_theme(); } }
+                    }
+                }
+            }
 
-                            Text {
-                                x: 10px;
-                                y: (parent.height - self.height) / 2;
-                                text: tool;
-                                font-size: 13px;
-                                color: root.selected_tool == tool ? #ffffff : #a1a1aa;
+            VerticalBox { spacing: 0px;
+                HorizontalBox { width: 100%;
+                    Rectangle {
+                        background: Palette.surface;
+                        border-width: 1px; border-color: Palette.border;
+                        padding-left: 24px; padding-right: 24px; padding-top: 16px; padding-bottom: 16px;
+                        VerticalBox { spacing: 4px;
+                            Text { text: root.current_tool_title; font-size: 24px; font-weight: 700; color: Palette.foreground; }
+                            Text { text: root.current_tool_description; font-size: 13px; color: Palette.muted; }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    width: 100%;
+                    Rectangle {
+                        background: Palette.surface;
+                        border-width: 1px; border-color: Palette.border;
+                        padding-left: 24px; padding-right: 24px; padding-top: 16px; padding-bottom: 16px;
+                        HorizontalBox { spacing: 20px; alignment: start;
+                            if root.selected_tool_id == "convert-image" : HorizontalBox { spacing: 12px; alignment: center;
+                                Text { text: "Output format:"; color: Palette.foreground; font-size: 13px; }
+                                ComboBox { model: root.opt_combo_1_model; current-value: root.opt_combo_1; selected(val) => { root.opt_combo_1 = val; } width: 120px; }
+                            }
+                            if root.selected_tool_id == "compress-image" : HorizontalBox { spacing: 12px; alignment: center;
+                                Text { text: "Target KB:"; color: Palette.foreground; font-size: 13px; }
+                                SpinBox { value: root.opt_int_1; minimum: 10; maximum: 10000; width: 100px; }
+                            }
+                            if root.selected_tool_id == "resize-image" : HorizontalBox { spacing: 12px; alignment: center;
+                                Text { text: "Width:"; color: Palette.foreground; font-size: 13px; }
+                                SpinBox { value: root.opt_int_1; minimum: 0; maximum: 10000; width: 90px; }
+                                Text { text: "Height:"; color: Palette.foreground; font-size: 13px; }
+                                SpinBox { value: root.opt_int_2; minimum: 0; maximum: 10000; width: 90px; }
+                                Text { text: "(0=auto)"; color: Palette.muted; font-size: 11px; width: 40px; }
+                            }
+                            if root.selected_tool_id == "images-to-pdf" : HorizontalBox { spacing: 12px; alignment: center;
+                                Text { text: "DPI:"; color: Palette.foreground; font-size: 13px; }
+                                SpinBox { value: root.opt_float_1; minimum: 72; maximum: 600; width: 90px; }
+                                Text { text: "Quality:"; color: Palette.foreground; font-size: 13px; }
+                                Slider { value: root.opt_int_1; minimum: 10; maximum: 100; width: 150px; }
+                                Text { text: root.opt_int_1 + "%"; color: Palette.muted; font-size: 11px; width: 40px; }
+                            }
+                            if root.selected_tool_id == "pdf-to-images" : HorizontalBox { spacing: 12px; alignment: center;
+                                Text { text: "Format:"; color: Palette.foreground; font-size: 13px; }
+                                ComboBox { model: root.opt_combo_1_model; current-value: root.opt_combo_1; selected(val) => { root.opt_combo_1 = val; } width: 100px; }
+                                Text { text: "DPI:"; color: Palette.foreground; font-size: 13px; }
+                                SpinBox { value: root.opt_float_1; minimum: 72; maximum: 600; width: 90px; }
+                            }
+                            if root.selected_tool_id == "merge-pdf" || root.selected_tool_id == "split-pdf" || root.selected_tool_id == "reorder-pdf" : HorizontalBox { spacing: 12px; alignment: center;
+                                Text { text: root.selected_tool_id == "merge-pdf" ? "Drop order = page order" : root.selected_tool_id == "split-pdf" ? "Ranges (1-2,3):" : "Page order (3,1,2):"; color: Palette.foreground; font-size: 13px; }
+                                LineEdit { text: root.opt_string_1; width: 200px; }
+                            }
+                            if root.selected_tool_id == "convert-audio" : HorizontalBox { spacing: 12px; alignment: center;
+                                Text { text: "Format:"; color: Palette.foreground; font-size: 13px; }
+                                ComboBox { model: root.opt_combo_1_model; current-value: root.opt_combo_1; selected(val) => { root.opt_combo_1 = val; } width: 100px; }
+                                Text { text: "Bitrate:"; color: Palette.foreground; font-size: 13px; }
+                                ComboBox { model: ["64","96","128","192","256","320"]; current-value: root.opt_combo_1; selected(val) => { root.opt_combo_1 = val; } width: 80px; }
+                                Text { text: "kbps"; color: Palette.muted; font-size: 11px; }
+                            }
+                            if root.selected_tool_id == "trim-audio" : HorizontalBox { spacing: 12px; alignment: center;
+                                Text { text: "Start:"; color: Palette.foreground; font-size: 13px; }
+                                LineEdit { text: root.opt_string_1; width: 90px; placeholder-text: "0"; }
+                                Text { text: "End:"; color: Palette.foreground; font-size: 13px; }
+                                LineEdit { text: root.opt_string_2; width: 90px; placeholder-text: "30"; }
+                            }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    width: 100%;
+                    Rectangle {
+                        background: Palette.surface;
+                        border-width: 1px; border-color: Palette.border;
+                        padding-left: 24px; padding-right: 24px; padding-top: 12px; padding-bottom: 12px;
+                        HorizontalBox { spacing: 12px; alignment: center;
+                            CheckBox { text: "Save next to source"; checked: root.output_next_to_source; toggled => { root.output_next_to_source = !root.output_next_to_source; } }
+                            CheckBox { text: "Custom folder:"; checked: !root.output_next_to_source; toggled => { root.output_next_to_source = !root.output_next_to_source; } }
+                            if !root.output_next_to_source : HorizontalBox { spacing: 8px;
+                                Text { text: root.output_folder != "" ? root.output_folder : "Choose folder…"; color: root.output_folder != "" ? Palette.foreground : Palette.muted; font-size: 13px; }
+                                Button { text: "Browse…"; clicked => { root.pick_output_folder(); } }
+                            }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    width: 100%;
+                    background: transparent;
+                    VerticalBox { spacing: 12px;
+                        Rectangle {
+                            height: root.jobs.length == 0 ? 140px : 80px;
+                            background: Palette.dropzone-bg;
+                            border-radius: 12px; border-width: 2px; border-color: Palette.dropzone-border;
+                            VerticalBox { alignment: center; spacing: 8px;
+                                if root.jobs.length == 0 : VerticalBox { alignment: center; spacing: 8px;
+                                    Rectangle { width: 48px; height: 48px; border-radius: 24px; background: Palette.primary; }
+                                    Text { text: "Drop files or click Choose"; font-size: 15px; font-weight: 600; color: Palette.foreground; }
+                                    Text { text: "Accepts: " + root.current_tool_extensions_joined; font-size: 12px; color: Palette.muted; }
+                                    Button { text: "Choose Files…"; clicked => { root.pick_files(); } }
+                                }
+                                if root.jobs.length > 0 : HorizontalBox { alignment: center; spacing: 12px;
+                                    Text { text: root.jobs.length + " file(s) queued"; font-size: 13px; color: Palette.foreground; }
+                                    Button { text: "Add More…"; clicked => { root.pick_files(); } }
+                                    Button { text: "Clear All"; clicked => { root.clear_jobs(); } }
+                                }
+                            }
+                        }
+
+                        if root.jobs.length > 0 : Rectangle {
+                            background: Palette.surface; border-radius: 12px; border-width: 1px; border-color: Palette.border;
+                            VerticalBox {
+                                HorizontalBox {
+                                    Rectangle { background: Palette.border; height: 1px; width: 100%; }
+                                    HorizontalBox { spacing: 8px; alignment: center;
+                                        Text { text: "Queue"; font-size: 14px; font-weight: 700; color: Palette.foreground; }
+                                        Rectangle { width: 24px; height: 24px; border-radius: 12px; background: Palette.primary;
+                                            Text { text: root.jobs_count_str; font-size: 11px; font-weight: 700; color: #ffffff; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; }
+                                        }
+                                    }
+                                    HorizontalBox { alignment: end; spacing: 8px;
+                                        Button { text: root.is_running ? "Processing…" : "Process All"; primary: true; enabled: !root.is_running; clicked => { root.start_processing(); } }
+                                        Button { text: "Clear"; enabled: !root.is_running; clicked => { root.clear_jobs(); } }
+                                    }
+                                }
+                                ScrollView {
+                                    VerticalBox { padding: 8px; spacing: 6px;
+                                        for job in root.jobs : Rectangle {
+                                            height: 64px; border-radius: 8px; background: Palette.surface-hover; border-width: 1px; border-color: Palette.border;
+                                            HorizontalBox { padding: 12px; spacing: 12px; alignment: center;
+                                                Rectangle { width: 40px; height: 40px; border-radius: 8px; background: job.tool_label == "PDF" ? #ef4444 : (job.tool_label == "Audio" ? #8b5cf6 : #f59e0b); }
+                                                VerticalBox { spacing: 2px;
+                                                    Text { text: job.name; font-size: 13px; font-weight: 600; color: Palette.foreground; }
+                                                    Text { text: job.size_text + " · " + job.tool_label; font-size: 11px; color: Palette.muted; }
+                                                }
+                                                HorizontalBox { width: 100%; alignment: end; spacing: 8px;
+                                                    if job.progress >= 0.0 && job.progress < 1.0 : ProgressIndicator { progress: job.progress * 100; width: 120px; height: 6px; }
+                                                    if job.status == "Waiting" : Text { text: "Waiting"; font-size: 12px; color: Palette.muted; }
+                                                    if job.status == "Working" : Text { text: "Working…"; font-size: 12px; color: Palette.primary; }
+                                                    if job.status == "Done" : Text { text: "Done"; font-size: 12px; font-weight: 600; color: Palette.success; }
+                                                    if job.status == "Failed" : Text { text: "Failed"; font-size: 12px; font-weight: 600; color: Palette.error; }
+                                                    if job.status == "Needs Password" : Text { text: "Needs Password"; font-size: 12px; font-weight: 600; color: Palette.warning; }
+                                                    if job.status == "Done" : Button { text: "Show"; clicked => { root.open_output_folder(job.output_path); } }
+                                                    if job.status == "Failed" || job.status == "Needs Password" : Button { text: job.status == "Needs Password" ? "Password" : "Retry"; clicked => { if (job.status == "Needs Password") { root.show_password_dialog_cb(job.id, job.error); } else { root.retry_job(job.id); } } }
+                                                    if job.status != "Working" : Button { text: "✕"; width: 28px; height: 28px; clicked => { root.remove_job(job.id); } }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -103,253 +316,32 @@ export component MainWindow inherits Window {
             }
         }
 
-        // Right side: Active tool, Options, Dropzone, and Queue
-        VerticalBox {
-            spacing: 12px;
-
-            // Header and active tool title
-            HorizontalBox {
-                VerticalBox {
-                    spacing: 2px;
-                    Text {
-                        text: root.selected_tool;
-                        font-size: 20px;
-                        font-weight: 700;
-                        color: #ffffff;
-                    }
-                    Text {
-                        text: "Files are processed locally using native high-speed engines";
-                        font-size: 12px;
-                        color: #71717a;
-                    }
+        Rectangle {
+            height: 40px; width: 100%; background: Palette.surface; border-width: 1px; border-color: Palette.border;
+            HorizontalBox { padding-left: 24px; padding-right: 24px; spacing: 16px; alignment: space-between;
+                HorizontalBox { spacing: 12px; alignment: center;
+                    if root.is_running : ProgressIndicator { progress: root.overall_progress * 100; width: 160px; height: 6px; }
+                    Text { text: root.status_text; font-size: 12px; color: Palette.foreground; }
+                }
+                HorizontalBox { spacing: 8px; alignment: center;
+                    Text { text: "Refract v0.2.0"; font-size: 11px; color: Palette.muted; }
                 }
             }
+        }
 
-            // Tool options panel
-            Rectangle {
-                background: #18181b;
-                border-radius: 8px;
-                border-width: 1px;
-                border-color: #27272a;
-                height: 56px;
-
-                HorizontalBox {
-                    padding: 8px;
-                    alignment: start;
-                    spacing: 16px;
-
-                    if root.selected_tool == "Convert image" : HorizontalBox {
-                        spacing: 8px;
-                        Text { text: "Format:"; color: #d4d4d8; vertical-alignment: center; }
-                        ComboBox {
-                            model: ["jpg", "png", "webp"];
-                            current-value: root.opt_image_format;
-                            selected(val) => { root.opt_image_format = val; }
-                        }
-                    }
-
-                    if root.selected_tool == "Compress image" : HorizontalBox {
-                        spacing: 8px;
-                        Text { text: "Target Size (KB):"; color: #d4d4d8; vertical-alignment: center; }
-                        LineEdit {
-                            text: root.opt_target_kb;
-                            width: 80px;
-                            edited(val) => { root.opt_target_kb = val; }
-                        }
-                    }
-
-                    if root.selected_tool == "Resize image" : HorizontalBox {
-                        spacing: 8px;
-                        Text { text: "Width (px):"; color: #d4d4d8; vertical-alignment: center; }
-                        LineEdit {
-                            text: root.opt_resize_width;
-                            width: 70px;
-                            edited(val) => { root.opt_resize_width = val; }
-                        }
-                        Text { text: "Height (px):"; color: #d4d4d8; vertical-alignment: center; }
-                        LineEdit {
-                            text: root.opt_resize_height;
-                            width: 70px;
-                            edited(val) => { root.opt_resize_height = val; }
-                        }
-                    }
-
-                    if root.selected_tool == "Convert audio" : HorizontalBox {
-                        spacing: 8px;
-                        Text { text: "Format:"; color: #d4d4d8; vertical-alignment: center; }
-                        ComboBox {
-                            model: ["mp3", "wav", "m4a", "ogg"];
-                            current-value: root.opt_audio_format;
-                            selected(val) => { root.opt_audio_format = val; }
-                        }
-                        Text { text: "Bitrate:"; color: #d4d4d8; vertical-alignment: center; }
-                        ComboBox {
-                            model: ["128", "192", "256", "320"];
-                            current-value: root.opt_audio_bitrate;
-                            selected(val) => { root.opt_audio_bitrate = val; }
-                        }
-                    }
-
-                    if root.selected_tool == "Trim audio" : HorizontalBox {
-                        spacing: 8px;
-                        Text { text: "Start (sec):"; color: #d4d4d8; vertical-alignment: center; }
-                        LineEdit {
-                            text: root.opt_trim_start;
-                            width: 60px;
-                            edited(val) => { root.opt_trim_start = val; }
-                        }
-                        Text { text: "End (sec):"; color: #d4d4d8; vertical-alignment: center; }
-                        LineEdit {
-                            text: root.opt_trim_end;
-                            width: 60px;
-                            edited(val) => { root.opt_trim_end = val; }
-                        }
-                    }
-
-                    if root.selected_tool == "Split PDF" : HorizontalBox {
-                        spacing: 8px;
-                        Text { text: "Ranges (e.g. 1-2, 3):"; color: #d4d4d8; vertical-alignment: center; }
-                        LineEdit {
-                            text: root.opt_pdf_ranges;
-                            width: 120px;
-                            edited(val) => { root.opt_pdf_ranges = val; }
-                        }
-                    }
-
-                    if root.selected_tool == "Reorder PDF" : HorizontalBox {
-                        spacing: 8px;
-                        Text { text: "Page Order (e.g. 3, 1, 2):"; color: #d4d4d8; vertical-alignment: center; }
-                        LineEdit {
-                            text: root.opt_pdf_order;
-                            width: 120px;
-                            edited(val) => { root.opt_pdf_order = val; }
-                        }
-                    }
-                }
-            }
-
-            // Dropzone
-            Rectangle {
-                height: 110px;
-                border-radius: 8px;
-                border-width: 1px;
-                border-color: #3f3f46;
-                background: #18181b;
-
-                VerticalBox {
-                    alignment: center;
-                    spacing: 6px;
-
-                    Text {
-                        text: "Add files to convert";
-                        font-size: 15px;
-                        font-weight: 600;
-                        color: #ffffff;
-                        horizontal-alignment: center;
-                    }
-                    HorizontalBox {
-                        alignment: center;
-                        Button {
-                            text: "Choose Files…";
-                            clicked => { root.pick_files(); }
-                        }
-                    }
-                }
-            }
-
-            // Queue Controls Header
-            HorizontalBox {
-                Text {
-                    text: "Queue (" + root.jobs.length + " files)";
-                    font-size: 14px;
-                    font-weight: 600;
-                    color: #e4e4e7;
-                    vertical-alignment: center;
-                }
-
-                HorizontalBox {
-                    alignment: end;
-                    spacing: 8px;
-
-                    Button {
-                        text: root.is_running ? "Processing…" : "Convert All";
-                        primary: true;
-                        enabled: root.jobs.length > 0 && !root.is_running;
-                        clicked => { root.start_processing(); }
-                    }
-
-                    Button {
-                        text: "Clear Queue";
-                        enabled: root.jobs.length > 0 && !root.is_running;
-                        clicked => { root.clear_jobs(); }
-                    }
-                }
-            }
-
-            // Queue List View
-            Rectangle {
-                border-radius: 8px;
-                background: #18181b;
-                border-width: 1px;
-                border-color: #27272a;
-
-                if root.jobs.length == 0 : VerticalBox {
-                    alignment: center;
-                    Text {
-                        text: "No files in queue. Click 'Choose Files…' above to begin.";
-                        font-size: 13px;
-                        color: #71717a;
-                        horizontal-alignment: center;
-                    }
-                }
-
-                if root.jobs.length > 0 : ScrollView {
-                    VerticalBox {
-                        padding: 8px;
-                        spacing: 6px;
-
-                        for job in root.jobs : Rectangle {
-                            height: 48px;
-                            border-radius: 6px;
-                            background: #27272a;
-
-                            HorizontalBox {
-                                padding-left: 12px;
-                                padding-right: 12px;
-                                alignment: space-between;
-
-                                VerticalBox {
-                                    alignment: center;
-                                    spacing: 2px;
-                                    Text {
-                                        text: job.name;
-                                        font-size: 13px;
-                                        font-weight: 600;
-                                        color: #ffffff;
-                                    }
-                                    Text {
-                                        text: job.size_text + " · " + job.tool_label;
-                                        font-size: 11px;
-                                        color: #a1a1aa;
-                                    }
-                                }
-
-                                HorizontalBox {
-                                    alignment: end;
-                                    spacing: 8px;
-
-                                    Text {
-                                        text: job.status;
-                                        font-size: 12px;
-                                        color: job.status == "Done" ? #4ade80 : (job.status == "Failed" ? #f87171 : (job.status == "Working" ? #60a5fa : #a1a1aa));
-                                        vertical-alignment: center;
-                                    }
-
-                                    if job.status == "Done" && job.output_path != "" : Button {
-                                        text: "Show in Folder";
-                                        clicked => { root.open_output_folder(job.output_path); }
-                                    }
-                                }
+        if root.show_password_dialog : Rectangle {
+            background: #000000aa;
+            HorizontalBox { alignment: center;
+                VerticalBox { alignment: center;
+                    Rectangle { width: 420px; background: Palette.surface; border-radius: 12px; border-width: 1px; border-color: Palette.border; padding: 24px;
+                        VerticalBox { spacing: 16px;
+                            Text { text: root.password_prompt; font-size: 14px; color: Palette.foreground; width: 370px; }
+                            Rectangle { height: 36px; background: Palette.background; border-radius: 6px; border-width: 1px; border-color: Palette.border;
+                                Text { text: root.password_input; font-size: 13px; color: Palette.foreground; x: 12px; y: (parent.height - self.height) / 2; }
+                            }
+                            HorizontalBox { alignment: end; spacing: 12px;
+                                Button { text: "Cancel"; clicked => { root.password_input = ""; root.show_password_dialog = false; } }
+                                Button { text: "Unlock"; primary: true; clicked => { root.password_entered(root.password_job_id, root.password_input); root.password_input = ""; root.show_password_dialog = false; } }
                             }
                         }
                     }

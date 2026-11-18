@@ -83,3 +83,55 @@ pnpm desktop:test
 # Start the desktop app in dev mode
 pnpm desktop:dev
 ```
+
+## Native Desktop App (Refract Desktop v1)
+
+Refract Desktop v1 is a native Rust application built with **Slint 1.19**, providing all 11 tools with genuine local processing:
+
+### 🖼️ Images
+- **Convert image** — Convert between HEIC, JPEG, PNG, WebP with EXIF orientation handling
+- **Compress image** — Target-size compression (KB) via binary quality search (JPEG, PNG, WebP)
+- **Resize image** — Lanczos-3 resampling by dimensions or physical size (cm + DPI), aspect ratio preserved
+
+### 📄 PDF
+- **Merge PDF** — Combine multiple PDFs with custom drop order (batch-aware)
+- **Split PDF** — Split by page ranges (`1-3, 5, 8-end`) into individual PDFs
+- **Reorder PDF** — Reorder pages with strict sequence validation
+- **Images to PDF** — Convert multiple images to multi-page PDF with configurable DPI/quality
+- **PDF to images** — Render PDF pages to PNG/JPEG via external rasterizer chain (`mutool` → `pdftoppm` → `pdftocairo` → `ghostscript`) with embedded-image fallback
+- **Compress PDF** — Lossless linearization + stream compression via QPDF
+
+### 🎵 Audio
+- **Convert audio** — Transcode MP3/WAV/M4A/OGG (64–320 kbps) via FFmpeg
+- **Trim audio** — Frame-accurate trimming with `mm:ss` or seconds via FFmpeg
+
+### ✅ Password-Protected PDFs
+Both **Compress PDF** and **PDF to images** support encrypted PDFs with a password prompt dialog (user password unlock / owner password bypass).
+
+### 🖥️ External Dependencies (Desktop Only)
+| Feature | Dependency | Notes |
+|---------|------------|-------|
+| Audio convert/trim | **FFmpeg** (`ffmpeg` + `ffprobe` in PATH) | Required for all audio tools |
+| PDF → images (render) | **mutool** / **pdftoppm** / **pdftocairo** / **ghostscript** | First available in PATH is used; PDF renderer detection at startup |
+| HEIC decode | *(not supported natively)* | Produces a clear, friendly error instead of generic decode failure |
+
+### 🎨 Design System (DESIGN.md Compliant)
+- **Graphite neutral base**, **Refract Cobalt accent** (`#0b57d0` light / `#8ab4f8` dark)
+- **IBM Plex Sans / Mono** typography
+- **4px spacing grid**, radii: 14/12/8px
+- No pure black, no emoji icons, no uppercase tracked labels
+- Tactile press feedback, single easing curve
+- Light/Dark theme toggle with system preference detection
+- Settings persisted to `APPDATA/Refract/settings.json`
+
+### 📦 Development Commands
+```bash
+# Run desktop app (requires Rust 1.80+)
+pnpm desktop:dev
+
+# Type-check + build check
+pnpm desktop:check
+
+# Run tests
+pnpm desktop:test
+```
