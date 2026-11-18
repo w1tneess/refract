@@ -1,4 +1,4 @@
-import { Button, VerticalBox, HorizontalBox, ScrollView, ComboBox, LineEdit } from "std-widgets.slint";
+import { Button, VerticalBox, HorizontalBox, ScrollView, ComboBox, LineEdit, Slider, SpinBox, CheckBox, ProgressIndicator } from "std-widgets.slint";
 
 export struct JobEntry {
     id: int,
@@ -8,37 +8,61 @@ export struct JobEntry {
     status: string,
     error: string,
     output_path: string,
+    progress: float,
+}
+
+export struct ToolSpec {
+    id: string,
+    title: string,
+    tagline: string,
+    description: string,
+    domain: string,
+    input_formats: [string],
+    output_capability: string,
+    engine: int,
+    batch: bool,
+    min_files: int,
+    max_files: int,
+    extensions: [string],
+}
+
+export struct ToolGroup {
+    domain_label: string,
+    tools: [ToolSpec],
 }
 
 global Palette {
-    // Refract Dark Mode — WCAG 2.2 AA Graphite + Apple Blue (matches DESIGN.md)
-    out property <color> bg: #000000;
-    out property <color> surface: #1c1c1e;
-    out property <color> surface-raised: #2c2c2e;
-    out property <color> surface-hover: #3a3a3c;
-    out property <color> hairline: #38383a;
-    out property <color> control-border: #76767b;
+    // Refract Design System — WCAG 2.2 AA Light & Dark Graphite + Apple Blue (matches DESIGN.md)
+    in-out property<bool> dark: true;
 
-    out property <color> text: #f5f5f7;
-    out property <color> text-soft: #a1a1a6;
-    out property <color> text-faint: #98989d;
+    out property<color> background: root.dark ? #000000 : #f5f5f7;
+    out property<color> surface: root.dark ? #1c1c1e : #ffffff;
+    out property<color> surface-raised: root.dark ? #2c2c2e : #f0f0f5;
+    out property<color> surface-hover: root.dark ? #3a3a3c : #e5e5ea;
+    out property<color> hairline: root.dark ? #38383a : #d2d2d7;
+    out property<color> control-border: root.dark ? #76767b : #86868b;
 
-    out property <color> accent: #0a84ff;
-    out property <color> accent-hover: #379cff;
-    out property <color> accent-text: #000000;
-    out property <color> accent-ink: #70b8ff;
+    out property<color> foreground: root.dark ? #f5f5f7 : #1d1d1f;
+    out property<color> text-soft: root.dark ? #a1a1a6 : #58585d;
+    out property<color> text-faint: root.dark ? #98989d : #66666b;
 
-    out property <color> success: #32d74b;
-    out property <color> danger: #ff6961;
-    out property <color> warn: #ffd60a;
+    out property<color> accent: root.dark ? #0a84ff : #0066cc;
+    out property<color> accent-hover: root.dark ? #379cff : #0055b3;
+    out property<color> accent-text: root.dark ? #000000 : #ffffff;
+    out property<color> accent-ink: root.dark ? #70b8ff : #0055b3;
+    out property<color> accent-soft: root.dark ? #192f47 : #e6f0fa;
+
+    out property<color> success: root.dark ? #32d74b : #167231;
+    out property<color> warning: root.dark ? #ffd60a : #8a5300;
+    out property<color> error: root.dark ? #ff6961 : #c92a2a;
 }
 
 component SidebarItem inherits Rectangle {
-    in property <string> label;
-    in property <bool> active;
+    in property<string> title;
+    in property<bool> active;
     callback clicked();
 
-    height: 36px;
+    height: 34px;
     border-radius: 7px;
     border-width: focus-scope.has-focus ? 2px : 0px;
     border-color: Palette.accent;
@@ -49,7 +73,7 @@ component SidebarItem inherits Rectangle {
     animate background { duration: 150ms; easing: ease-out; }
 
     accessible-role: button;
-    accessible-label: root.label;
+    accessible-label: root.title;
 
     focus-scope := FocusScope {
         key-pressed(event) => {
@@ -67,489 +91,917 @@ component SidebarItem inherits Rectangle {
     }
 
     HorizontalLayout {
-        padding-left: 12px;
-        padding-right: 12px;
+        padding-left: 10px;
+        padding-right: 10px;
         alignment: start;
 
         Text {
-            text: root.label;
+            text: root.title;
             font-size: 13px;
             font-weight: root.active ? 600 : 400;
-            color: root.active ? Palette.accent-text : (touch.has-hover ? Palette.text : Palette.text-soft);
+            color: root.active ? Palette.accent-text : (touch.has-hover ? Palette.foreground : Palette.text-soft);
             vertical-alignment: center;
             overflow: elide;
         }
     }
 }
 
+component ThemeButton inherits Rectangle {
+    in property<bool> is-dark;
+    callback clicked();
+
+    height: 34px;
+    border-radius: 7px;
+    border-width: focus-scope.has-focus ? 2px : 1px;
+    border-color: focus-scope.has-focus ? Palette.accent : Palette.hairline;
+    background: touch.has-hover ? Palette.surface-hover : Palette.surface-raised;
+
+    animate background { duration: 150ms; easing: ease-out; }
+
+    accessible-role: button;
+    accessible-label: root.is-dark ? "Switch to light mode" : "Switch to dark mode";
+
+    focus-scope := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Return || event.text == " ") {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 8px;
+        alignment: space-between;
+
+        Text {
+            text: root.is-dark ? "Dark appearance" : "Light appearance";
+            font-size: 12px;
+            font-weight: 500;
+            color: Palette.foreground;
+            vertical-alignment: center;
+        }
+
+        // Toggle pill indicator
+        Rectangle {
+            width: 32px;
+            height: 18px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 9px;
+            background: root.is-dark ? Palette.accent : Palette.control-border;
+
+            Rectangle {
+                width: 14px;
+                height: 14px;
+                border-radius: 7px;
+                x: root.is-dark ? 16px : 2px;
+                y: 2px;
+                background: #ffffff;
+                animate x { duration: 150ms; easing: ease-out; }
+            }
+        }
+    }
+}
+
 export component MainWindow inherits Window {
     title: "Refract — Local-First File Converter";
-    preferred-width: 920px;
-    preferred-height: 660px;
-    min-width: 720px;
-    min-height: 520px;
-    background: Palette.bg;
+    preferred-width: 1080px;
+    preferred-height: 740px;
+    min-width: 820px;
+    min-height: 580px;
+    background: Palette.background;
 
     callback pick_files();
+    callback pick_output_folder();
+    callback toggle_theme();
     callback start_processing();
     callback clear_jobs();
     callback open_output_folder(string);
+    callback retry_job(int);
+    callback remove_job(int);
+    callback move_job_up(int);
+    callback move_job_down(int);
     callback tool_changed(string);
+    callback show_password_dialog_cb(int, string);
+    callback password_entered(int, string);
 
-    in-out property <[string]> tool_list: [
-        "Convert image",
-        "Compress image",
-        "Resize image",
-        "Merge PDF",
-        "Split PDF",
-        "Reorder PDF",
-        "Compress PDF",
-        "Convert audio",
-        "Trim audio"
-    ];
-    in-out property <string> selected_tool: "Convert image";
+    in-out property<[ToolSpec]> tool_specs: [];
+    in-out property<[ToolGroup]> tool_groups: [];
 
-    // Options properties
-    in-out property <string> opt_image_format: "jpg";
-    in-out property <int> opt_image_quality: 85;
-    in-out property <string> opt_target_kb: "200";
-    in-out property <string> opt_resize_width: "800";
-    in-out property <string> opt_resize_height: "0";
-    in-out property <string> opt_audio_format: "mp3";
-    in-out property <string> opt_audio_bitrate: "192";
-    in-out property <string> opt_trim_start: "0";
-    in-out property <string> opt_trim_end: "30";
-    in-out property <string> opt_pdf_ranges: "1-2";
-    in-out property <string> opt_pdf_order: "1, 2";
+    in-out property<string> selected_tool_id: "";
+    in-out property<bool> is_dark_mode <=> Palette.dark;
+    in-out property<bool> is_running: false;
+    in-out property<float> overall_progress: 0.0;
+    in-out property<string> status_text: "Ready";
+    in-out property<bool> ffmpeg_available: false;
+    in-out property<bool> pdf_renderer_available: false;
+    in-out property<string> output_folder: "";
+    in-out property<bool> output_next_to_source: true;
 
-    // Queue properties
-    in-out property <[JobEntry]> jobs: [];
-    in-out property <bool> is_running: false;
+    in-out property<string> current_tool_title: "";
+    in-out property<string> current_tool_tagline: "";
+    in-out property<string> current_tool_description: "";
+    in-out property<string> current_tool_domain: "";
+    in-out property<[string]> current_tool_extensions: [];
+    in-out property<string> current_tool_extensions_joined: "";
+    in-out property<bool> current_tool_batch: false;
 
-    HorizontalBox {
-        padding: 16px;
-        spacing: 16px;
+    in-out property<string> opt_string_1: "";
+    in-out property<string> opt_string_2: "";
+    in-out property<int> opt_int_1: 85;
+    in-out property<int> opt_int_2: 0;
+    in-out property<float> opt_float_1: 150.0;
+    in-out property<bool> opt_bool_1: false;
+    in-out property<string> opt_combo_1: "jpg";
+    in-out property<[string]> opt_combo_1_model: ["jpg", "png", "webp"];
+    in-out property<string> opt_combo_2: "192";
 
-        // Left sidebar: Brand + Tool selection
-        Rectangle {
-            width: 224px;
-            background: Palette.surface;
-            border-radius: 13px;
-            border-width: 1px;
-            border-color: Palette.hairline;
+    in-out property<[JobEntry]> jobs: [];
+    in-out property<string> jobs_count_str: "0";
 
-            VerticalBox {
-                padding: 12px;
-                spacing: 12px;
+    in-out property<bool> show_password_dialog: false;
+    in-out property<int> password_job_id: -1;
+    in-out property<string> password_prompt: "";
+    in-out property<string> password_input: "";
 
-                VerticalLayout {
-                    padding-left: 6px;
-                    padding-right: 6px;
-                    spacing: 2px;
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        background: Palette.background;
 
-                    Text {
-                        text: "refract";
-                        font-size: 16px;
-                        font-weight: 600;
-                        color: Palette.text;
-                    }
-                    Text {
-                        text: "Local file tools";
-                        font-size: 11px;
-                        color: Palette.text-faint;
-                    }
-                }
+        VerticalLayout {
+            spacing: 0px;
 
+            HorizontalLayout {
+                vertical-stretch: 1;
+                spacing: 0px;
+
+                // Left Sidebar
                 Rectangle {
-                    height: 1px;
-                    background: Palette.hairline;
-                }
+                    width: 244px;
+                    background: Palette.surface;
+                    border-width: 0px;
 
-                Text {
-                    text: "Tools";
-                    font-size: 12px;
-                    font-weight: 600;
-                    color: Palette.text-soft;
-                }
+                    // Right hairline separator
+                    Rectangle {
+                        x: parent.width - 1px;
+                        y: 0px;
+                        width: 1px;
+                        height: 100%;
+                        background: Palette.hairline;
+                    }
 
-                ScrollView {
-                    vertical-stretch: 1;
-                    VerticalBox {
-                        padding: 0px;
-                        spacing: 4px;
-                        for tool in root.tool_list : SidebarItem {
-                            label: tool;
-                            active: root.selected_tool == tool;
-                            clicked => {
-                                root.selected_tool = tool;
-                                root.tool_changed(tool);
+                    VerticalLayout {
+                        padding: 14px;
+                        spacing: 12px;
+
+                        // Brand header
+                        HorizontalLayout {
+                            spacing: 10px;
+                            alignment: start;
+
+                            Rectangle {
+                                width: 30px;
+                                height: 30px;
+                                border-radius: 7px;
+                                background: Palette.accent;
+
+                                Text {
+                                    text: "R";
+                                    font-size: 15px;
+                                    font-weight: 600;
+                                    color: Palette.accent-text;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                    width: 100%;
+                                    height: 100%;
+                                }
                             }
+
+                            VerticalLayout {
+                                alignment: center;
+                                spacing: 1px;
+
+                                Text {
+                                    text: "refract";
+                                    font-size: 15px;
+                                    font-weight: 600;
+                                    color: Palette.foreground;
+                                }
+                                Text {
+                                    text: "Local file tools";
+                                    font-size: 11px;
+                                    color: Palette.text-faint;
+                                }
+                            }
+                        }
+
+                        // Scrollable Tool Groups
+                        ScrollView {
+                            vertical-stretch: 1;
+
+                            VerticalLayout {
+                                padding-right: 4px;
+                                spacing: 14px;
+
+                                for group in root.tool_groups : VerticalLayout {
+                                    spacing: 4px;
+
+                                    Text {
+                                        text: group.domain_label;
+                                        font-size: 11px;
+                                        font-weight: 600;
+                                        color: Palette.text-faint;
+                                    }
+
+                                    for tool in group.tools : SidebarItem {
+                                        title: tool.title;
+                                        active: root.selected_tool_id == tool.id;
+                                        clicked => { root.tool_changed(tool.id); }
+                                    }
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            height: 1px;
+                            background: Palette.hairline;
+                        }
+
+                        // Engine availability indicators
+                        HorizontalLayout {
+                            spacing: 12px;
+                            alignment: start;
+
+                            HorizontalLayout {
+                                spacing: 6px;
+                                alignment: center;
+                                Rectangle {
+                                    width: 7px;
+                                    height: 7px;
+                                    y: (parent.height - self.height) / 2;
+                                    border-radius: 4px;
+                                    background: root.ffmpeg_available ? Palette.success : Palette.text-faint;
+                                }
+                                Text {
+                                    text: root.ffmpeg_available ? "FFmpeg ready" : "No FFmpeg";
+                                    font-size: 11px;
+                                    color: Palette.text-soft;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            HorizontalLayout {
+                                spacing: 6px;
+                                alignment: center;
+                                Rectangle {
+                                    width: 7px;
+                                    height: 7px;
+                                    y: (parent.height - self.height) / 2;
+                                    border-radius: 4px;
+                                    background: root.pdf_renderer_available ? Palette.success : Palette.text-faint;
+                                }
+                                Text {
+                                    text: root.pdf_renderer_available ? "PDF render" : "PDF fallback";
+                                    font-size: 11px;
+                                    color: Palette.text-soft;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+
+                        // Theme switcher
+                        ThemeButton {
+                            is-dark: root.is_dark_mode;
+                            clicked => { root.toggle_theme(); }
                         }
                     }
                 }
 
+                // Main Workspace
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    padding: 20px;
+                    spacing: 14px;
+
+                    // Tool Header
+                    VerticalLayout {
+                        spacing: 6px;
+
+                        HorizontalLayout {
+                            spacing: 8px;
+                            alignment: start;
+
+                            if root.current_tool_domain != "" : Rectangle {
+                                border-radius: 6px;
+                                background: Palette.accent-soft;
+
+                                HorizontalLayout {
+                                    padding-left: 8px;
+                                    padding-right: 8px;
+                                    padding-top: 3px;
+                                    padding-bottom: 3px;
+
+                                    Text {
+                                        text: root.current_tool_domain;
+                                        font-size: 11px;
+                                        font-weight: 500;
+                                        color: Palette.accent-ink;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+
+                            Text {
+                                text: root.current_tool_title;
+                                font-size: 22px;
+                                font-weight: 600;
+                                color: Palette.foreground;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        Text {
+                            text: root.current_tool_description;
+                            font-size: 13px;
+                            color: Palette.text-soft;
+                            wrap: word-wrap;
+                        }
+                    }
+
+                    // Options & Output Card
+                    Rectangle {
+                        background: Palette.surface;
+                        border-radius: 13px;
+                        border-width: 1px;
+                        border-color: Palette.hairline;
+
+                        VerticalLayout {
+                            padding: 14px;
+                            spacing: 12px;
+
+                            // Tool-specific options row
+                            HorizontalLayout {
+                                spacing: 16px;
+                                alignment: start;
+
+                                if root.selected_tool_id == "convert-image" : HorizontalLayout {
+                                    spacing: 12px;
+                                    alignment: start;
+                                    Text { text: "Output format"; color: Palette.text-soft; font-size: 13px; vertical-alignment: center; }
+                                    ComboBox {
+                                        model: root.opt_combo_1_model;
+                                        current-value <=> root.opt_combo_1;
+                                        width: 110px;
+                                    }
+                                    if root.opt_combo_1 == "jpg" : HorizontalLayout {
+                                        spacing: 8px;
+                                        Text { text: "Quality (%)"; color: Palette.text-soft; font-size: 13px; vertical-alignment: center; }
+                                        SpinBox { value <=> root.opt_int_1; minimum: 10; maximum: 100; width: 92px; }
+                                    }
+                                }
+
+                                if root.selected_tool_id == "compress-image" : HorizontalLayout {
+                                    spacing: 12px;
+                                    alignment: start;
+                                    Text { text: "Target size (KB)"; color: Palette.text-soft; font-size: 13px; vertical-alignment: center; }
+                                    SpinBox { value <=> root.opt_int_1; minimum: 10; maximum: 10000; width: 110px; }
+                                }
+
+                                if root.selected_tool_id == "resize-image" : HorizontalLayout {
+                                    spacing: 12px;
+                                    alignment: start;
+                                    Text { text: "Width (px)"; color: Palette.text-soft; font-size: 13px; vertical-alignment: center; }
+                                    SpinBox { value <=> root.opt_int_1; minimum: 0; maximum: 10000; width: 96px; }
+                                    Text { text: "Height (px)"; color: Palette.text-soft; font-size: 13px; vertical-alignment: center; }
+                                    SpinBox { value <=> root.opt_int_2; minimum: 0; maximum: 10000; width: 96px; }
+                                    Text { text: "0 = auto aspect ratio"; color: Palette.text-faint; font-size: 12px; vertical-alignment: center; }
+                                }
+
+                                if root.selected_tool_id == "images-to-pdf" : HorizontalLayout {
+                                    spacing: 12px;
+                                    alignment: start;
+                                    Text { text: "DPI"; color: Palette.text-soft; font-size: 13px; vertical-alignment: center; }
+                                    SpinBox { value <=> root.opt_int_2; minimum: 72; maximum: 600; width: 92px; }
+                                    Text { text: "Quality"; color: Palette.text-soft; font-size: 13px; vertical-alignment: center; }
+                                    Slider {
+                                        value: root.opt_int_1;
+                                        minimum: 10;
+                                        maximum: 100;
+                                        width: 140px;
+                                        changed(val) => { root.opt_int_1 = Math.round(val); }
+                                    }
+                                    Text { text: root.opt_int_1 + "%"; color: Palette.text-soft; font-size: 12px; vertical-alignment: center; min-width: 36px; }
+                                }
+
+                                if root.selected_tool_id == "pdf-to-images" : HorizontalLayout {
+                                    spacing: 12px;
+                                    alignment: start;
+                                    Text { text: "Format"; color: Palette.text-soft; font-size: 13px; vertical-alignment: center; }
+                                    ComboBox { model: root.opt_combo_1_model; current-value <=> root.opt_combo_1; width: 100px; }
+                                    Text { text: "DPI"; color: Palette.text-soft; font-size: 13px; vertical-alignment: center; }
+                                    SpinBox { value <=> root.opt_int_1; minimum: 72; maximum: 600; width: 92px; }
+                                }
+
+                                if root.selected_tool_id == "merge-pdf" : Text {
+                                    text: "PDFs combine in queue order. Use the up/down arrows to arrange files before processing.";
+                                    color: Palette.text-soft;
+                                    font-size: 13px;
+                                    vertical-alignment: center;
+                                    wrap: word-wrap;
+                                }
+
+                                if root.selected_tool_id == "compress-pdf" : Text {
+                                    text: "Lossless stream and object compression. Encrypted PDFs will prompt for their password.";
+                                    color: Palette.text-soft;
+                                    font-size: 13px;
+                                    vertical-alignment: center;
+                                    wrap: word-wrap;
+                                }
+
+                                if root.selected_tool_id == "split-pdf" : HorizontalLayout {
+                                    spacing: 12px;
+                                    alignment: start;
+                                    Text { text: "Page ranges"; color: Palette.text-soft; font-size: 13px; vertical-alignment: center; }
+                                    LineEdit { text <=> root.opt_string_1; placeholder-text: "e.g. 1-2, 3, 5-end"; width: 220px; }
+                                }
+
+                                if root.selected_tool_id == "reorder-pdf" : HorizontalLayout {
+                                    spacing: 12px;
+                                    alignment: start;
+                                    Text { text: "Page order"; color: Palette.text-soft; font-size: 13px; vertical-alignment: center; }
+                                    LineEdit { text <=> root.opt_string_1; placeholder-text: "e.g. 3, 1, 2"; width: 220px; }
+                                }
+
+                                if root.selected_tool_id == "convert-audio" : HorizontalLayout {
+                                    spacing: 12px;
+                                    alignment: start;
+                                    Text { text: "Format"; color: Palette.text-soft; font-size: 13px; vertical-alignment: center; }
+                                    ComboBox { model: root.opt_combo_1_model; current-value <=> root.opt_combo_1; width: 100px; }
+                                    Text { text: "Bitrate"; color: Palette.text-soft; font-size: 13px; vertical-alignment: center; }
+                                    ComboBox { model: ["64", "96", "128", "192", "256", "320"]; current-value <=> root.opt_combo_2; width: 88px; }
+                                    Text { text: "kbps"; color: Palette.text-faint; font-size: 12px; vertical-alignment: center; }
+                                }
+
+                                if root.selected_tool_id == "trim-audio" : HorizontalLayout {
+                                    spacing: 12px;
+                                    alignment: start;
+                                    Text { text: "Start (sec or mm:ss)"; color: Palette.text-soft; font-size: 13px; vertical-alignment: center; }
+                                    LineEdit { text <=> root.opt_string_1; width: 100px; placeholder-text: "0"; }
+                                    Text { text: "End"; color: Palette.text-soft; font-size: 13px; vertical-alignment: center; }
+                                    LineEdit { text <=> root.opt_string_2; width: 100px; placeholder-text: "30"; }
+                                }
+                            }
+
+                            Rectangle {
+                                height: 1px;
+                                background: Palette.hairline;
+                            }
+
+                            // Output destination row
+                            HorizontalLayout {
+                                spacing: 12px;
+                                alignment: start;
+
+                                CheckBox {
+                                    text: "Save next to source file";
+                                    checked <=> root.output_next_to_source;
+                                }
+
+                                if !root.output_next_to_source : HorizontalLayout {
+                                    spacing: 8px;
+                                    alignment: start;
+                                    horizontal-stretch: 1;
+
+                                    Text {
+                                        text: root.output_folder != "" ? root.output_folder : "No output folder chosen";
+                                        color: root.output_folder != "" ? Palette.foreground : Palette.text-faint;
+                                        font-size: 12px;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                    }
+                                    Button {
+                                        text: "Choose folder…";
+                                        clicked => { root.pick_output_folder(); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // File Picker / Dropzone Panel
+                    Rectangle {
+                        min-height: root.jobs.length == 0 ? 116px : 60px;
+                        background: Palette.surface;
+                        border-radius: 10px;
+                        border-width: 1px;
+                        border-color: Palette.control-border;
+
+                        VerticalLayout {
+                            padding: 16px;
+                            alignment: center;
+                            spacing: 8px;
+
+                            if root.jobs.length == 0 : VerticalLayout {
+                                alignment: center;
+                                spacing: 6px;
+
+                                Text {
+                                    text: "Add files to convert locally";
+                                    font-size: 15px;
+                                    font-weight: 600;
+                                    color: Palette.foreground;
+                                    horizontal-alignment: center;
+                                }
+                                Text {
+                                    text: "Accepts " + root.current_tool_extensions_joined;
+                                    font-size: 12px;
+                                    color: Palette.text-faint;
+                                    horizontal-alignment: center;
+                                }
+                                HorizontalLayout {
+                                    alignment: center;
+                                    padding-top: 4px;
+                                    Button {
+                                        text: "Choose files…";
+                                        primary: true;
+                                        clicked => { root.pick_files(); }
+                                    }
+                                }
+                            }
+
+                            if root.jobs.length > 0 : HorizontalLayout {
+                                alignment: space-between;
+                                spacing: 12px;
+
+                                Text {
+                                    text: root.jobs.length == 1 ? "1 file in queue" : root.jobs.length + " files in queue";
+                                    font-size: 13px;
+                                    font-weight: 500;
+                                    color: Palette.foreground;
+                                    vertical-alignment: center;
+                                }
+
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    Button {
+                                        text: "Add more…";
+                                        clicked => { root.pick_files(); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Queue Panel
+                    if root.jobs.length > 0 : Rectangle {
+                        vertical-stretch: 1;
+                        background: Palette.surface;
+                        border-radius: 13px;
+                        border-width: 1px;
+                        border-color: Palette.hairline;
+
+                        VerticalLayout {
+                            spacing: 0px;
+
+                            // Queue Header
+                            HorizontalLayout {
+                                padding-left: 14px;
+                                padding-right: 14px;
+                                padding-top: 10px;
+                                padding-bottom: 10px;
+                                alignment: space-between;
+
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    alignment: start;
+
+                                    Text {
+                                        text: "Queue";
+                                        font-size: 13px;
+                                        font-weight: 600;
+                                        color: Palette.foreground;
+                                        vertical-alignment: center;
+                                    }
+
+                                    Rectangle {
+                                        min-width: 24px;
+                                        height: 20px;
+                                        y: (parent.height - self.height) / 2;
+                                        border-radius: 6px;
+                                        background: Palette.surface-raised;
+
+                                        Text {
+                                            text: root.jobs_count_str;
+                                            font-size: 11px;
+                                            font-weight: 500;
+                                            color: Palette.text-soft;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                            width: 100%;
+                                            height: 100%;
+                                        }
+                                    }
+                                }
+
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    alignment: end;
+
+                                    Button {
+                                        text: root.is_running ? "Processing…" : "Process all";
+                                        primary: true;
+                                        enabled: !root.is_running;
+                                        clicked => { root.start_processing(); }
+                                    }
+
+                                    Button {
+                                        text: "Clear queue";
+                                        enabled: !root.is_running;
+                                        clicked => { root.clear_jobs(); }
+                                    }
+                                }
+                            }
+
+                            Rectangle {
+                                height: 1px;
+                                background: Palette.hairline;
+                            }
+
+                            ScrollView {
+                                vertical-stretch: 1;
+
+                                VerticalLayout {
+                                    padding: 10px;
+                                    spacing: 8px;
+
+                                    for job in root.jobs : Rectangle {
+                                        border-radius: 7px;
+                                        background: Palette.surface-raised;
+                                        border-width: 1px;
+                                        border-color: Palette.hairline;
+
+                                        VerticalLayout {
+                                            padding: 10px;
+                                            spacing: 6px;
+
+                                            HorizontalLayout {
+                                                spacing: 10px;
+                                                alignment: space-between;
+
+                                                // File identity
+                                                VerticalLayout {
+                                                    horizontal-stretch: 1;
+                                                    alignment: center;
+                                                    spacing: 2px;
+
+                                                    Text {
+                                                        text: job.name;
+                                                        font-size: 13px;
+                                                        font-weight: 600;
+                                                        color: Palette.foreground;
+                                                        overflow: elide;
+                                                    }
+                                                    Text {
+                                                        text: job.size_text + " · " + job.tool_label;
+                                                        font-size: 12px;
+                                                        color: Palette.text-soft;
+                                                        overflow: elide;
+                                                    }
+                                                }
+
+                                                // Status pill + actions
+                                                HorizontalLayout {
+                                                    spacing: 6px;
+                                                    alignment: end;
+
+                                                    if job.progress >= 0.0 && job.progress < 1.0 : ProgressIndicator {
+                                                        progress: job.progress;
+                                                        width: 96px;
+                                                        height: 6px;
+                                                        y: (parent.height - self.height) / 2;
+                                                    }
+
+                                                    // Status badge (dot + text, never color alone)
+                                                    Rectangle {
+                                                        border-radius: 6px;
+                                                        border-width: 1px;
+                                                        border-color: Palette.hairline;
+                                                        background: Palette.surface;
+
+                                                        HorizontalLayout {
+                                                            padding-left: 8px;
+                                                            padding-right: 8px;
+                                                            padding-top: 4px;
+                                                            padding-bottom: 4px;
+                                                            spacing: 6px;
+
+                                                            Rectangle {
+                                                                width: 6px;
+                                                                height: 6px;
+                                                                y: (parent.height - self.height) / 2;
+                                                                border-radius: 3px;
+                                                                background: job.status == "Done" ? Palette.success
+                                                                    : (job.status == "Failed" ? Palette.error
+                                                                    : (job.status == "Needs Password" ? Palette.warning
+                                                                    : (job.status == "Working…" ? Palette.accent : Palette.text-faint)));
+                                                            }
+
+                                                            Text {
+                                                                text: job.status;
+                                                                font-size: 12px;
+                                                                font-weight: 500;
+                                                                color: job.status == "Done" ? Palette.success
+                                                                    : (job.status == "Failed" ? Palette.error
+                                                                    : (job.status == "Needs Password" ? Palette.warning
+                                                                    : (job.status == "Working…" ? Palette.accent-ink : Palette.text-soft)));
+                                                                vertical-alignment: center;
+                                                            }
+                                                        }
+                                                    }
+
+                                                    if root.current_tool_batch && !root.is_running : Button {
+                                                        text: "↑";
+                                                        width: 28px;
+                                                        clicked => { root.move_job_up(job.id); }
+                                                    }
+
+                                                    if root.current_tool_batch && !root.is_running : Button {
+                                                        text: "↓";
+                                                        width: 28px;
+                                                        clicked => { root.move_job_down(job.id); }
+                                                    }
+
+                                                    if job.status == "Done" && job.output_path != "" : Button {
+                                                        text: "Show in folder";
+                                                        clicked => { root.open_output_folder(job.output_path); }
+                                                    }
+
+                                                    if job.status == "Failed" : Button {
+                                                        text: "Retry";
+                                                        clicked => { root.retry_job(job.id); }
+                                                    }
+
+                                                    if job.status == "Needs Password" : Button {
+                                                        text: "Unlock…";
+                                                        primary: true;
+                                                        clicked => { root.show_password_dialog_cb(job.id, job.error); }
+                                                    }
+
+                                                    if job.status != "Working…" : Button {
+                                                        text: "×";
+                                                        width: 28px;
+                                                        clicked => { root.remove_job(job.id); }
+                                                    }
+                                                }
+                                            }
+
+                                            if job.error != "" : Text {
+                                                text: job.error;
+                                                font-size: 12px;
+                                                color: job.status == "Needs Password" ? Palette.warning : Palette.error;
+                                                wrap: word-wrap;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Spacer when queue is empty so layout rests calmly
+                    if root.jobs.length == 0 : Rectangle {
+                        vertical-stretch: 1;
+                    }
+                }
+            }
+
+            // Bottom Status Bar
+            Rectangle {
+                height: 36px;
+                background: Palette.surface;
+
                 Rectangle {
+                    x: 0px;
+                    y: 0px;
+                    width: 100%;
                     height: 1px;
                     background: Palette.hairline;
                 }
 
-                Text {
-                    text: "Runs locally on this device";
-                    font-size: 11px;
-                    color: Palette.text-faint;
-                    wrap: word-wrap;
+                HorizontalLayout {
+                    padding-left: 16px;
+                    padding-right: 16px;
+                    spacing: 12px;
+                    alignment: space-between;
+
+                    HorizontalLayout {
+                        spacing: 10px;
+                        alignment: start;
+
+                        if root.is_running : ProgressIndicator {
+                            progress: root.overall_progress;
+                            width: 140px;
+                            height: 6px;
+                            y: (parent.height - self.height) / 2;
+                        }
+                        Text {
+                            text: root.status_text;
+                            font-size: 12px;
+                            color: Palette.text-soft;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    Text {
+                        text: "Local-only · files never leave this device";
+                        font-size: 12px;
+                        color: Palette.text-faint;
+                        vertical-alignment: center;
+                    }
                 }
             }
         }
 
-        // Right side: Active tool, Options, Dropzone, and Queue
-        VerticalBox {
-            horizontal-stretch: 1;
-            spacing: 12px;
+        // Password Unlock Modal Overlay
+        if root.show_password_dialog : Rectangle {
+            width: 100%;
+            height: 100%;
+            background: #00000099;
 
-            // Header and active tool title
-            VerticalLayout {
-                spacing: 4px;
+            // Block clicks behind modal
+            TouchArea {}
 
-                Text {
-                    text: root.selected_tool;
-                    font-size: 22px;
-                    font-weight: 600;
-                    color: Palette.text;
-                }
-                Text {
-                    text: "Files stay on this device and process locally with native engines.";
-                    font-size: 13px;
-                    color: Palette.text-soft;
-                    wrap: word-wrap;
-                }
-            }
+            HorizontalLayout {
+                alignment: center;
 
-            // Tool options panel
-            Rectangle {
-                background: Palette.surface;
-                border-radius: 13px;
-                border-width: 1px;
-                border-color: Palette.hairline;
-                min-height: 56px;
+                VerticalLayout {
+                    alignment: center;
 
-                HorizontalBox {
-                    padding: 12px;
-                    alignment: start;
-                    spacing: 16px;
+                    Rectangle {
+                        width: 420px;
+                        background: Palette.surface;
+                        border-radius: 13px;
+                        border-width: 1px;
+                        border-color: Palette.hairline;
 
-                    if root.selected_tool == "Convert image" : HorizontalBox {
-                        padding: 0px;
-                        spacing: 10px;
-                        Text { text: "Format"; font-size: 13px; color: Palette.text-soft; vertical-alignment: center; }
-                        ComboBox {
-                            model: ["jpg", "png", "webp"];
-                            current-value: root.opt_image_format;
-                            selected(val) => { root.opt_image_format = val; }
-                        }
-                        if root.opt_image_format == "jpg" : HorizontalBox {
-                            padding: 0px;
-                            spacing: 8px;
-                            Text { text: "Quality (%)"; font-size: 13px; color: Palette.text-soft; vertical-alignment: center; }
+                        VerticalLayout {
+                            padding: 20px;
+                            spacing: 14px;
+
+                            Text {
+                                text: "Password-protected PDF";
+                                font-size: 15px;
+                                font-weight: 600;
+                                color: Palette.foreground;
+                            }
+
+                            Text {
+                                text: root.password_prompt != "" ? root.password_prompt : "Enter the password to unlock this document.";
+                                font-size: 13px;
+                                color: Palette.text-soft;
+                                wrap: word-wrap;
+                            }
+
                             LineEdit {
-                                text: root.opt_image_quality;
-                                width: 72px;
-                                edited(val) => {
-                                    if val.is-float() {
-                                        root.opt_image_quality = val.to-float();
-                                    }
+                                text <=> root.password_input;
+                                input-type: InputType.password;
+                                placeholder-text: "Enter PDF password…";
+                                accepted(val) => {
+                                    root.password_entered(root.password_job_id, val);
+                                    root.password_input = "";
+                                    root.show_password_dialog = false;
                                 }
                             }
-                        }
-                    }
 
-                    if root.selected_tool == "Compress image" : HorizontalBox {
-                        padding: 0px;
-                        spacing: 10px;
-                        Text { text: "Target size (KB)"; font-size: 13px; color: Palette.text-soft; vertical-alignment: center; }
-                        LineEdit {
-                            text: root.opt_target_kb;
-                            width: 88px;
-                            edited(val) => { root.opt_target_kb = val; }
-                        }
-                    }
+                            HorizontalLayout {
+                                alignment: end;
+                                spacing: 10px;
 
-                    if root.selected_tool == "Resize image" : HorizontalBox {
-                        padding: 0px;
-                        spacing: 10px;
-                        Text { text: "Width (px)"; font-size: 13px; color: Palette.text-soft; vertical-alignment: center; }
-                        LineEdit {
-                            text: root.opt_resize_width;
-                            width: 76px;
-                            edited(val) => { root.opt_resize_width = val; }
-                        }
-                        Text { text: "Height (px, 0 = auto)"; font-size: 13px; color: Palette.text-soft; vertical-alignment: center; }
-                        LineEdit {
-                            text: root.opt_resize_height;
-                            width: 76px;
-                            edited(val) => { root.opt_resize_height = val; }
-                        }
-                    }
-
-                    if root.selected_tool == "Convert audio" : HorizontalBox {
-                        padding: 0px;
-                        spacing: 10px;
-                        Text { text: "Format"; font-size: 13px; color: Palette.text-soft; vertical-alignment: center; }
-                        ComboBox {
-                            model: ["mp3", "wav", "m4a", "ogg"];
-                            current-value: root.opt_audio_format;
-                            selected(val) => { root.opt_audio_format = val; }
-                        }
-                        Text { text: "Bitrate (kbps)"; font-size: 13px; color: Palette.text-soft; vertical-alignment: center; }
-                        ComboBox {
-                            model: ["128", "192", "256", "320"];
-                            current-value: root.opt_audio_bitrate;
-                            selected(val) => { root.opt_audio_bitrate = val; }
-                        }
-                    }
-
-                    if root.selected_tool == "Trim audio" : HorizontalBox {
-                        padding: 0px;
-                        spacing: 10px;
-                        Text { text: "Start (sec)"; font-size: 13px; color: Palette.text-soft; vertical-alignment: center; }
-                        LineEdit {
-                            text: root.opt_trim_start;
-                            width: 72px;
-                            edited(val) => { root.opt_trim_start = val; }
-                        }
-                        Text { text: "End (sec)"; font-size: 13px; color: Palette.text-soft; vertical-alignment: center; }
-                        LineEdit {
-                            text: root.opt_trim_end;
-                            width: 72px;
-                            edited(val) => { root.opt_trim_end = val; }
-                        }
-                    }
-
-                    if root.selected_tool == "Split PDF" : HorizontalBox {
-                        padding: 0px;
-                        spacing: 10px;
-                        Text { text: "Ranges (e.g. 1-2, 3)"; font-size: 13px; color: Palette.text-soft; vertical-alignment: center; }
-                        LineEdit {
-                            text: root.opt_pdf_ranges;
-                            width: 140px;
-                            edited(val) => { root.opt_pdf_ranges = val; }
-                        }
-                    }
-
-                    if root.selected_tool == "Reorder PDF" : HorizontalBox {
-                        padding: 0px;
-                        spacing: 10px;
-                        Text { text: "Page order (e.g. 3, 1, 2)"; font-size: 13px; color: Palette.text-soft; vertical-alignment: center; }
-                        LineEdit {
-                            text: root.opt_pdf_order;
-                            width: 140px;
-                            edited(val) => { root.opt_pdf_order = val; }
-                        }
-                    }
-
-                    if root.selected_tool == "Merge PDF" : Text {
-                        text: "No settings needed — selected PDFs combine in the order added.";
-                        font-size: 13px;
-                        color: Palette.text-soft;
-                        vertical-alignment: center;
-                    }
-
-                    if root.selected_tool == "Compress PDF" : Text {
-                        text: "No settings needed — uses lossless stream compression.";
-                        font-size: 13px;
-                        color: Palette.text-soft;
-                        vertical-alignment: center;
-                    }
-                }
-            }
-
-            // Dropzone / file picker card
-            Rectangle {
-                min-height: 104px;
-                border-radius: 10px;
-                border-width: 1px;
-                border-color: Palette.control-border;
-                background: Palette.surface;
-
-                VerticalBox {
-                    alignment: center;
-                    padding: 16px;
-                    spacing: 8px;
-
-                    Text {
-                        text: "Add files to queue";
-                        font-size: 15px;
-                        font-weight: 600;
-                        color: Palette.text;
-                        horizontal-alignment: center;
-                    }
-                    HorizontalBox {
-                        padding: 0px;
-                        alignment: center;
-                        Button {
-                            text: "Choose files…";
-                            clicked => { root.pick_files(); }
-                        }
-                    }
-                }
-            }
-
-            // Queue Controls Header
-            HorizontalBox {
-                padding: 0px;
-                alignment: space-between;
-
-                Text {
-                    text: "Queue (" + (root.jobs.length == 1 ? "1 file" : root.jobs.length + " files") + ")";
-                    font-size: 14px;
-                    font-weight: 600;
-                    color: Palette.text;
-                    vertical-alignment: center;
-                }
-
-                HorizontalBox {
-                    padding: 0px;
-                    alignment: end;
-                    spacing: 8px;
-
-                    Button {
-                        text: root.is_running ? "Processing…" : "Convert all";
-                        primary: true;
-                        enabled: root.jobs.length > 0 && !root.is_running;
-                        clicked => { root.start_processing(); }
-                    }
-
-                    Button {
-                        text: "Clear queue";
-                        enabled: root.jobs.length > 0 && !root.is_running;
-                        clicked => { root.clear_jobs(); }
-                    }
-                }
-            }
-
-            // Queue List View
-            Rectangle {
-                vertical-stretch: 1;
-                border-radius: 13px;
-                background: Palette.surface;
-                border-width: 1px;
-                border-color: Palette.hairline;
-
-                if root.jobs.length == 0 : VerticalBox {
-                    alignment: center;
-                    padding: 24px;
-                    spacing: 6px;
-
-                    Text {
-                        text: "No files in the queue yet";
-                        font-size: 14px;
-                        font-weight: 500;
-                        color: Palette.text;
-                        horizontal-alignment: center;
-                    }
-                    Text {
-                        text: "Choose files above to prepare them for local conversion.";
-                        font-size: 13px;
-                        color: Palette.text-soft;
-                        horizontal-alignment: center;
-                        wrap: word-wrap;
-                    }
-                }
-
-                if root.jobs.length > 0 : ScrollView {
-                    VerticalBox {
-                        padding: 10px;
-                        spacing: 8px;
-
-                        for job in root.jobs : Rectangle {
-                            min-height: 52px;
-                            border-radius: 7px;
-                            border-width: 1px;
-                            border-color: Palette.hairline;
-                            background: Palette.surface-raised;
-
-                            VerticalBox {
-                                padding: 10px;
-                                spacing: 6px;
-
-                                HorizontalBox {
-                                    padding: 0px;
-                                    alignment: space-between;
-                                    spacing: 12px;
-
-                                    VerticalLayout {
-                                        horizontal-stretch: 1;
-                                        alignment: center;
-                                        spacing: 2px;
-
-                                        Text {
-                                            text: job.name;
-                                            font-size: 13px;
-                                            font-weight: 600;
-                                            color: Palette.text;
-                                            overflow: elide;
-                                        }
-                                        Text {
-                                            text: job.size_text + " · " + job.tool_label;
-                                            font-size: 12px;
-                                            color: Palette.text-soft;
-                                            overflow: elide;
-                                        }
-                                    }
-
-                                    HorizontalBox {
-                                        padding: 0px;
-                                        alignment: end;
-                                        spacing: 8px;
-
-                                        Rectangle {
-                                            border-radius: 6px;
-                                            border-width: 1px;
-                                            border-color: Palette.hairline;
-                                            background: Palette.surface;
-
-                                            HorizontalLayout {
-                                                padding-left: 8px;
-                                                padding-right: 8px;
-                                                padding-top: 4px;
-                                                padding-bottom: 4px;
-                                                spacing: 6px;
-                                                alignment: center;
-
-                                                Rectangle {
-                                                    width: 6px;
-                                                    height: 6px;
-                                                    border-radius: 3px;
-                                                    y: (parent.height - self.height) / 2;
-                                                    background: job.status == "Done" ? Palette.success
-                                                        : (job.status == "Failed" ? Palette.danger
-                                                        : (job.status == "Working" ? Palette.accent : Palette.text-faint));
-                                                }
-
-                                                Text {
-                                                    text: job.status;
-                                                    font-size: 12px;
-                                                    font-weight: 500;
-                                                    color: job.status == "Done" ? Palette.success
-                                                        : (job.status == "Failed" ? Palette.danger
-                                                        : (job.status == "Working" ? Palette.accent-ink : Palette.text-soft));
-                                                    vertical-alignment: center;
-                                                }
-                                            }
-                                        }
-
-                                        if job.status == "Done" && job.output_path != "" : Button {
-                                            text: "Show in folder";
-                                            clicked => { root.open_output_folder(job.output_path); }
-                                        }
+                                Button {
+                                    text: "Cancel";
+                                    clicked => {
+                                        root.password_input = "";
+                                        root.show_password_dialog = false;
                                     }
                                 }
 
-                                if job.status == "Failed" && job.error != "" : Text {
-                                    text: job.error;
-                                    font-size: 12px;
-                                    color: Palette.danger;
-                                    wrap: word-wrap;
+                                Button {
+                                    text: "Unlock";
+                                    primary: true;
+                                    clicked => {
+                                        root.password_entered(root.password_job_id, root.password_input);
+                                        root.password_input = "";
+                                        root.show_password_dialog = false;
+                                    }
                                 }
                             }
                         }

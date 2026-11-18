@@ -44,11 +44,11 @@ Refract Web runs 11 dedicated file conversion and transformation tools across th
 - **Trim audio**: Trim audio clips with exact start and end timestamps (in seconds).
 - **Lazy Load**: Heavy FFmpeg WASM binaries (~32 MB) are loaded on demand only when an audio job is scheduled.
 
-### Native Desktop App (9 tools via Rust + Slint UI)
+### Native Desktop App (11 tools via Rust + Slint UI)
 
-Refract Desktop (`apps/desktop`) runs as a standalone native executable with no webview:
+Refract Desktop (`apps/desktop`) runs as a standalone native executable with no webview, supporting all 11 tools with Light/Dark theme persistence, custom output folders, batch queue management, and password-protected PDF unlocking:
 - **Images**: Convert image (JPEG/PNG/WebP with EXIF orientation baking and RGBA-to-white flattening), Compress image (target KB with scale-down fallback), Resize image (Lanczos-3 resampling preserving format).
-- **PDF**: Merge PDF (full multi-document page & object merging), Split PDF (range extraction with object pruning), Reorder PDF, Compress PDF (via `lopdf`).
+- **PDF**: Merge PDF, Split PDF (range extraction with object pruning), Reorder PDF, Images to PDF (configurable DPI & quality), PDF to images (external rasterizer chain `mutool` / `pdftoppm` / `pdftocairo` / `ghostscript` with embedded-image fallback), Compress PDF (via `lopdf`, with password unlock).
 - **Audio**: Convert audio and Trim audio (with `mm:ss` / `hh:mm:ss` / seconds timestamps) via system `ffmpeg` / `ffprobe`.
 
 ---
@@ -166,3 +166,11 @@ Then push `apps/web/dist` to your `gh-pages` branch or use your preferred Pages 
 #### Important: WASM MIME type
 
 Whatever host you choose, **`.wasm` files must be served with `Content-Type: application/wasm`**. Without this, WebAssembly compilation will fail and image/audio/PDF tools will not work. Both `vercel.json` and `netlify.toml` include this header.
+
+### Desktop External Dependencies
+
+| Feature | Dependency | Notes |
+| --- | --- | --- |
+| Audio convert/trim | **FFmpeg** (`ffmpeg` + `ffprobe` in PATH) | Required for audio tools |
+| PDF → images (render) | `mutool` / `pdftoppm` / `pdftocairo` / `ghostscript` | First available in PATH is used; falls back to embedded image extraction |
+| HEIC decode | *(web app only)* | Native build shows a clear error explaining HEIC is handled in Refract Web |
