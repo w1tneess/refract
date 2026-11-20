@@ -212,7 +212,13 @@ pub fn verify_audio_file(
     check_format(refract_core::detect(&header), expect.format)?;
 
     if let (Some(want), Some(probe)) = (expect.duration_s, probe_duration) {
-        let got = probe(path).map_err(|_| failed("its length could not be measured"))?;
+        let got = probe(path).map_err(|e| {
+            if e.code.is_cancellation() {
+                e
+            } else {
+                failed("its length could not be measured")
+            }
+        })?;
         if (got - want).abs() > DURATION_TOLERANCE_S {
             return Err(failed(format!(
                 "it is {:.2} s long, expected {:.2} s",
@@ -332,6 +338,21 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(detail(err), "file 2 of 2: it is not a known file type");
+    }
+
+    #[test]
+    fn a_canceled_length_probe_reports_cancel_not_a_failed_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("out.wav");
+        std::fs::write(&wav, fixture("sound.wav")).unwrap();
+        let canceled = |_: &Path| Err(RefractError::canceled());
+        let err = verify_audio_file(
+            &wav,
+            &Expect::format(Format::Wav).duration(3.0),
+            Some(&canceled),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::Canceled);
     }
 
     #[test]

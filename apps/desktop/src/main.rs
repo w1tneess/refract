@@ -33,7 +33,10 @@ struct JobRecord {
     size_bytes: u64,
     tool_label: String,
     request: JobRequest,
-    last_batch_member_ids: Vec<i32>,
+    /// Ids of the batch this job last ran in (merge/images-to-pdf), shared by every member.
+    last_batch_member_ids: Arc<[i32]>,
+    /// Bumped by every retry: a run planned for an earlier attempt must not claim this one.
+    attempt: u32,
     /// This job's own file is the one a merge batch (or single job) is waiting on a password for.
     awaiting_password: bool,
     /// The canonical 9-state job state; change it only through `set_state` / `start_new_attempt`.
@@ -68,6 +71,7 @@ fn start_new_attempt(job: &mut JobRecord) {
         job.status
     );
     job.status = JobState::Queued;
+    job.attempt = job.attempt.wrapping_add(1);
     job.error.clear();
     job.output_path = PathBuf::new();
     job.awaiting_password = false;
@@ -355,7 +359,8 @@ fn main() -> Result<(), slint::PlatformError> {
     apply_tool_selection(&main_window, &tool_specs, &initial_tool);
 
     // Engine availability
-    main_window.set_ffmpeg_available(audio::is_ffmpeg_available());
+    // Audio tools need both ffmpeg and ffprobe.
+    main_window.set_ffmpeg_available(audio::is_audio_toolchain_available());
     main_window.set_pdf_renderer_available(render::has_renderer());
 
     // Shared state
@@ -404,7 +409,7 @@ fn main() -> Result<(), slint::PlatformError> {
     setup_move_job(&main_window, &shared, &ui_tx);
     setup_toggle_theme(&main_window);
     setup_tool_changed(&main_window, &tool_specs);
-    setup_password_handlers(&main_window, &worker);
+    setup_password_handlers(&main_window, &shared, &worker);
 
     main_window.run()
 }
@@ -529,7 +534,8 @@ fn enqueue_files(
             size_bytes,
             tool_label: tool_label.clone(),
             request: request.clone(),
-            last_batch_member_ids: Vec::new(),
+            last_batch_member_ids: Arc::from([]),
+            attempt: 0,
             awaiting_password: false,
             status: JobState::Queued,
             error: String::new(),
@@ -712,7 +718,7 @@ fn reject_recorded_batch(
     for j in store.iter_mut() {
         let belongs_to_same_recorded_batch = !recorded_ids.is_empty()
             && recorded_ids.contains(&j.id)
-            && j.last_batch_member_ids == recorded_ids;
+            && *j.last_batch_member_ids == *recorded_ids;
         if j.id != target_id && !belongs_to_same_recorded_batch {
             continue;
         }
@@ -925,10 +931,13 @@ enum Command {
     /// "Process all": every waiting job, in queue order, grouped where the tool combines files.
     ProcessAll,
     /// A retry prepared on the UI thread: these jobs were moved to a fresh `Queued` attempt.
-    Retry(Vec<i32>),
+    Retry(Vec<JobKey>),
     /// The password the user entered for a job (zeroed when the command is dropped).
+    /// `for_member` is the file the dialog was asking about; a submission for a prompt that has
+    /// since moved on (e.g. a merge advanced to its next locked file) is discarded.
     Unlock {
         job_id: i32,
+        for_member: i32,
         password: SecretPassword,
     },
 }
@@ -972,7 +981,9 @@ fn spawn_worker(
     thread::spawn(move || {
         while let Ok(command) = rx.recv() {
             set_running(&window, true);
+            shared.active.lock().unwrap().set_busy(true);
             execute_command(&shared, command, Some(&ui_tx));
+            shared.active.lock().unwrap().set_busy(false);
             set_running(&window, false);
         }
     });
@@ -982,8 +993,12 @@ fn spawn_worker(
 fn execute_command(shared: &Shared, command: Command, ui_tx: Option<&mpsc::Sender<UiEvent>>) {
     match command {
         Command::ProcessAll => run_all_waiting(shared, ui_tx),
-        Command::Retry(ids) => run_retry(shared, &ids, ui_tx),
-        Command::Unlock { job_id, password } => run_unlock(shared, job_id, password, ui_tx),
+        Command::Retry(keys) => run_retry(shared, &keys, ui_tx),
+        Command::Unlock {
+            job_id,
+            for_member,
+            password,
+        } => run_unlock(shared, job_id, for_member, password, ui_tx),
     }
 }
 
@@ -1005,28 +1020,45 @@ fn run_registered(shared: &Shared, ids: &[i32], work: impl FnOnce(&CancelToken))
 /// The check and the move happen under one lock, so a cancel or remove can never slip in between
 /// (a job canceled or removed after planning is simply not claimed). Register the unit right
 /// after; a cancel landing in that instant is kept by `ActiveRun` and applied when it starts.
+/// A job's id and the attempt a run was planned for.
+type JobKey = (i32, u32);
+
+fn job_key(job: &JobRecord) -> JobKey {
+    (job.id, job.attempt)
+}
+
+/// Keys for `ids` as they are now (used when a retry is prepared).
+fn current_keys(store: &[JobRecord], ids: &[i32]) -> Vec<JobKey> {
+    ids.iter()
+        .filter_map(|id| store.iter().find(|j| j.id == *id).map(job_key))
+        .collect()
+}
+
 fn claim_queued(
     shared: &Shared,
-    ids: &[i32],
+    keys: &[JobKey],
     record_batch: bool,
     ui_tx: Option<&mpsc::Sender<UiEvent>>,
 ) -> Vec<JobRecord> {
     let mut store = shared.jobs.lock().unwrap();
-    let claimed_ids: Vec<i32> = ids
+    // A job is claimed only for the attempt the run was planned for: if it was canceled and
+    // retried meanwhile, the retry's own command owns the new attempt.
+    let claimed_ids: Vec<i32> = keys
         .iter()
-        .copied()
-        .filter(|id| {
+        .filter(|(id, attempt)| {
             store
                 .iter()
-                .any(|j| j.id == *id && j.status == JobState::Queued)
+                .any(|j| j.id == *id && j.attempt == *attempt && j.status == JobState::Queued)
         })
+        .map(|(id, _)| *id)
         .collect();
     if claimed_ids.is_empty() {
         return Vec::new();
     }
     if record_batch {
+        let shared_ids: Arc<[i32]> = claimed_ids.clone().into();
         for j in store.iter_mut().filter(|j| claimed_ids.contains(&j.id)) {
-            j.last_batch_member_ids = claimed_ids.clone();
+            j.last_batch_member_ids = Arc::clone(&shared_ids);
         }
     }
     begin_probing(&mut store, &claimed_ids);
@@ -1065,8 +1097,8 @@ fn run_all_waiting(shared: &Shared, ui_tx: Option<&mpsc::Sender<UiEvent>>) {
                 request,
                 items,
             } => {
-                let ids: Vec<i32> = items.iter().map(|j| j.id).collect();
-                let members = claim_queued(shared, &ids, true, ui_tx);
+                let keys: Vec<JobKey> = items.iter().map(job_key).collect();
+                let members = claim_queued(shared, &keys, true, ui_tx);
                 if members.is_empty() {
                     continue;
                 }
@@ -1089,10 +1121,12 @@ fn run_all_waiting(shared: &Shared, ui_tx: Option<&mpsc::Sender<UiEvent>>) {
             }
             PlannedUnit::Batch { items, .. } => {
                 for job in items {
-                    run_single(shared, job.id, completed, total_units, ui_tx);
+                    run_single(shared, job_key(&job), completed, total_units, ui_tx);
                 }
             }
-            PlannedUnit::Single(job) => run_single(shared, job.id, completed, total_units, ui_tx),
+            PlannedUnit::Single(job) => {
+                run_single(shared, job_key(&job), completed, total_units, ui_tx)
+            }
         }
         status(
             ui_tx,
@@ -1105,15 +1139,15 @@ fn run_all_waiting(shared: &Shared, ui_tx: Option<&mpsc::Sender<UiEvent>>) {
 
 fn run_single(
     shared: &Shared,
-    id: i32,
+    key: JobKey,
     completed: usize,
     total_units: usize,
     ui_tx: Option<&mpsc::Sender<UiEvent>>,
 ) {
-    let Some(job) = claim_queued(shared, &[id], false, ui_tx).pop() else {
+    let Some(job) = claim_queued(shared, &[key], false, ui_tx).pop() else {
         return;
     };
-    run_registered(shared, &[id], |cancel| {
+    run_registered(shared, &[key.0], |cancel| {
         run_single_job_in_store(&shared.jobs, &job, completed, total_units, cancel, ui_tx);
     });
 }
@@ -1161,7 +1195,7 @@ fn prepare_retry(store: &mut [JobRecord], job_id: i32) -> Result<Vec<i32>, Refra
             ),
         ));
     }
-    let recorded_ids = target.last_batch_member_ids.clone();
+    let recorded_ids: Vec<i32> = target.last_batch_member_ids.to_vec();
     // Without a recorded batch, only peers that also have none may join; files that ran in
     // another batch keep their own recorded membership.
     let no_history = recorded_ids.is_empty();
@@ -1181,18 +1215,19 @@ fn prepare_retry(store: &mut [JobRecord], job_id: i32) -> Result<Vec<i32>, Refra
     };
     let ids: Vec<i32> = indices.iter().map(|&i| store[i].id).collect();
     let batch = target.request.tool().spec().batch;
+    let shared_ids: Arc<[i32]> = ids.clone().into();
     for &i in &indices {
         start_new_attempt(&mut store[i]);
         if batch {
-            store[i].last_batch_member_ids = ids.clone();
+            store[i].last_batch_member_ids = Arc::clone(&shared_ids);
         }
     }
     Ok(ids)
 }
 
-fn run_retry(shared: &Shared, ids: &[i32], ui_tx: Option<&mpsc::Sender<UiEvent>>) {
-    // Recorded batch ids were set by `prepare_retry`; claim only what is still waiting.
-    let members = claim_queued(shared, ids, false, ui_tx);
+fn run_retry(shared: &Shared, keys: &[JobKey], ui_tx: Option<&mpsc::Sender<UiEvent>>) {
+    // Recorded batch ids were set by `prepare_retry`; claim only this retry's attempts.
+    let members = claim_queued(shared, keys, false, ui_tx);
     let Some(primary) = members.first().cloned() else {
         return;
     };
@@ -1200,7 +1235,7 @@ fn run_retry(shared: &Shared, ids: &[i32], ui_tx: Option<&mpsc::Sender<UiEvent>>
     let member_ids: Vec<i32> = members.iter().map(|j| j.id).collect();
 
     // A merge/images-to-pdf retry runs exactly its recorded files or not at all.
-    if request.tool().spec().batch && member_ids.len() != ids.len() {
+    if request.tool().spec().batch && member_ids.len() != keys.len() {
         let err = RefractError::new(
             ErrorCode::InvalidOption,
             "Some files of this batch were canceled or removed before it could run.",
@@ -1235,18 +1270,48 @@ fn run_retry(shared: &Shared, ids: &[i32], ui_tx: Option<&mpsc::Sender<UiEvent>>
 #[cfg(test)]
 fn execute_retry_in_store(jobs_store: &Arc<Mutex<Vec<JobRecord>>>, job_id: i32) {
     let shared = Shared::for_store(jobs_store);
-    let prepared = prepare_retry(&mut jobs_store.lock().unwrap(), job_id);
-    if let Ok(ids) = prepared {
-        execute_command(&shared, Command::Retry(ids), None);
+    let prepared = {
+        let mut store = jobs_store.lock().unwrap();
+        prepare_retry(&mut store, job_id).map(|ids| current_keys(&store, &ids))
+    };
+    if let Ok(keys) = prepared {
+        execute_command(&shared, Command::Retry(keys), None);
     }
+}
+
+/// The file a password prompt for `job_id` is currently asking about: for a merge batch, the
+/// member marked `awaiting_password`; otherwise the job itself.
+fn awaiting_member(store: &[JobRecord], job_id: i32) -> i32 {
+    let Some(job) = store.iter().find(|j| j.id == job_id) else {
+        return job_id;
+    };
+    if job.awaiting_password || job.last_batch_member_ids.is_empty() {
+        return job_id;
+    }
+    store
+        .iter()
+        .find(|j| j.awaiting_password && j.last_batch_member_ids == job.last_batch_member_ids)
+        .map_or(job_id, |j| j.id)
 }
 
 fn run_unlock(
     shared: &Shared,
     job_id: i32,
+    for_member: i32,
     password: SecretPassword,
     ui_tx: Option<&mpsc::Sender<UiEvent>>,
 ) {
+    // Discard a submission for a prompt that has moved on (its password belongs to another file).
+    let current = awaiting_member(&shared.jobs.lock().unwrap(), job_id);
+    if current != for_member {
+        drop(password);
+        status(
+            ui_tx,
+            "That password was for an earlier prompt; enter the password for the file shown now.",
+            -1.0,
+        );
+        return;
+    }
     let claim = match try_claim_password_unlock(&shared.jobs, job_id, ui_tx) {
         Some(Ok(claim)) => claim,
         Some(Err(err)) => {
@@ -1294,7 +1359,7 @@ fn cancel_job(shared: &Shared, job_id: i32, ui_tx: Option<&mpsc::Sender<UiEvent>
                 j.id == job_id
                     || (job.request.tool().spec().batch
                         && !recorded.is_empty()
-                        && &j.last_batch_member_ids == recorded
+                        && j.last_batch_member_ids == *recorded
                         && matches!(j.status, JobState::Queued | JobState::NeedsPassword))
             };
             for j in store.iter_mut().filter(|j| in_same_batch(j)) {
@@ -1320,7 +1385,14 @@ fn cancel_all(shared: &Shared, ui_tx: Option<&mpsc::Sender<UiEvent>>) {
         j.error = "Canceled.".into();
         j.progress = -1.0;
     }
-    shared.active.lock().unwrap().cancel_current();
+    // Active jobs go through ActiveRun like a row Cancel: this also reaches a unit that was
+    // claimed (Probing) but has not registered its token yet.
+    let mut active = shared.active.lock().unwrap();
+    active.cancel_current();
+    for j in store.iter().filter(|j| j.status.is_active()) {
+        active.cancel(j.id);
+    }
+    drop(active);
     if let Some(tx) = ui_tx {
         push_ui_event(tx, UiEvent::JobsUpdated(store.clone()));
     }
@@ -1345,7 +1417,7 @@ fn setup_run_controls(
         match prepare_retry(&mut store, job_id) {
             Ok(ids) => {
                 push_ui_event(&retry_ui, UiEvent::JobsUpdated(store.clone()));
-                tx.send(Command::Retry(ids)).ok();
+                tx.send(Command::Retry(current_keys(&store, &ids))).ok();
             }
             Err(err) => {
                 push_ui_event(&retry_ui, UiEvent::JobsUpdated(store.clone()));
@@ -1363,7 +1435,7 @@ fn setup_run_controls(
     window.on_cancel_all(move || cancel_all(&cancel_all_shared, Some(&cancel_all_ui)));
 }
 
-fn setup_password_handlers(window: &MainWindow, worker: &mpsc::Sender<Command>) {
+fn setup_password_handlers(window: &MainWindow, shared: &Shared, worker: &mpsc::Sender<Command>) {
     let window_weak_show = window.as_weak();
     window.on_show_password_dialog_cb(move |job_id, prompt| {
         if let Some(window) = window_weak_show.upgrade() {
@@ -1375,13 +1447,16 @@ fn setup_password_handlers(window: &MainWindow, worker: &mpsc::Sender<Command>) 
     });
 
     let tx = worker.clone();
+    let unlock_shared = shared.clone();
     window.on_password_entered(move |job_id, password| {
         // Copy out of the UI string at once; from here on it is only a zeroed-on-drop secret.
         // The UI toolkit's own copy of the typed text is outside Refract's control.
         let password_secret = SecretPassword::new(password.as_str());
         drop(password);
+        let for_member = awaiting_member(&unlock_shared.jobs.lock().unwrap(), job_id);
         tx.send(Command::Unlock {
             job_id,
+            for_member,
             password: password_secret,
         })
         .ok();
@@ -1488,14 +1563,34 @@ fn move_job_guarded(store: &mut [JobRecord], job_id: i32, up: bool) -> bool {
     }
 }
 
+/// Move a job unless the worker is running a command: a running Process all keeps the order it
+/// planned, so a reorder then would show one order and produce another.
+fn move_job_if_idle(shared: &Shared, job_id: i32, up: bool) -> bool {
+    let mut store = shared.jobs.lock().unwrap();
+    if shared.active.lock().unwrap().is_busy() {
+        return false;
+    }
+    move_job_guarded(&mut store, job_id, up)
+}
+
 fn setup_move_job(window: &MainWindow, shared: &Shared, ui_tx: &mpsc::Sender<UiEvent>) {
     for up in [true, false] {
         let shared = shared.clone();
         let ui_tx = ui_tx.clone();
         let handler = move |job_id: i32| {
-            let mut store = shared.jobs.lock().unwrap();
-            move_job_guarded(&mut store, job_id, up);
-            push_ui_event(&ui_tx, UiEvent::JobsUpdated(store.clone()));
+            if !move_job_if_idle(&shared, job_id, up) {
+                push_ui_event(
+                    &ui_tx,
+                    UiEvent::StatusUpdate(
+                        "Reorder the queue after processing finishes.".into(),
+                        -1.0,
+                    ),
+                );
+            }
+            push_ui_event(
+                &ui_tx,
+                UiEvent::JobsUpdated(shared.jobs.lock().unwrap().clone()),
+            );
         };
         if up {
             window.on_move_job_up(handler);
@@ -1570,7 +1665,11 @@ fn preflight_then_work(
     passwords: PdfPasswords<'_>,
     ctx: &RunCtx<'_>,
 ) -> Result<pipeline::preflight::PreflightReport, RefractError> {
-    let report = preflight_inputs_with_passwords(request, paths, passwords)?;
+    ctx.cancel.check()?;
+    let result = preflight_inputs_with_passwords(request, paths, passwords);
+    // A cancel during preflight wins over whatever it found (e.g. a password prompt).
+    ctx.cancel.check()?;
+    let report = result?;
     ctx.begin_work()?;
     Ok(report)
 }
@@ -1707,7 +1806,9 @@ fn render_or_extract_pdf_images(
                 (outputs, vec![Expect::format(target); page_count as usize])
             }
             Err(render_err) => {
-                if render_err.code.is_password_error() || render_err.code.is_cancellation() {
+                // Extract embedded images only when no rasterizer is installed; a renderer that
+                // fails must not be reported as a successful extraction.
+                if render_err.code != ErrorCode::MissingDependency {
                     return Err(render_err);
                 }
                 let embedded =
@@ -1892,18 +1993,19 @@ fn process_job_in(job: &JobRecord, ctx: &RunCtx<'_>) -> Result<PathBuf, RefractE
         } => {
             let dir = output_dir(job);
             let name = output_file_name(job, format_primary_extension(*target));
-            // convert-audio does not require ffprobe, and FFmpeg may convert inputs ffprobe can't
-            // measure; in either case the length check is skipped and only the type checks run.
-            let input_secs = if audio::is_ffprobe_available() {
-                audio::probe_duration(&job.input_path).ok()
-            } else {
-                None
+            // FFmpeg may convert inputs ffprobe can't measure: then the length check is skipped and
+            // only the type checks run. A cancel during the probe still stops the job.
+            let input_secs = match audio::probe_duration_cancellable(&job.input_path, cancel) {
+                Ok(secs) => Some(secs),
+                Err(e) if e.code.is_cancellation() => return Err(e),
+                Err(_) => None,
             };
             let mut expect = Expect::format(*target);
             if let Some(secs) = input_secs {
                 expect = expect.duration(secs);
             }
-            let probe: verify::DurationProbe = &audio::probe_duration;
+            let probe_with_cancel = |p: &Path| audio::probe_duration_cancellable(p, cancel);
+            let probe: verify::DurationProbe = &probe_with_cancel;
             let check = |out: &Path| {
                 ctx.begin_verify()?;
                 verify::verify_audio_file(out, &expect, input_secs.is_some().then_some(probe))
@@ -1936,7 +2038,8 @@ fn process_job_in(job: &JobRecord, ctx: &RunCtx<'_>) -> Result<PathBuf, RefractE
                 audio::probe_duration_cancellable(&job.input_path, cancel)?,
             )?;
             let expect = Expect::format(detected_format).duration(range.expected_duration_secs);
-            let probe: verify::DurationProbe = &audio::probe_duration;
+            let probe_with_cancel = |p: &Path| audio::probe_duration_cancellable(p, cancel);
+            let probe: verify::DurationProbe = &probe_with_cancel;
             let check = |out: &Path| {
                 ctx.begin_verify()?;
                 verify::verify_audio_file(out, &expect, Some(probe))
@@ -2100,7 +2203,8 @@ mod tests {
             size_bytes: 1000,
             tool_label: String::new(),
             request: JobRequest::new(tool, options, destination).unwrap(),
-            last_batch_member_ids: Vec::new(),
+            last_batch_member_ids: Arc::from([]),
+            attempt: 0,
             awaiting_password: false,
             status: JobState::Queued,
             error: String::new(),
@@ -2682,8 +2786,8 @@ mod tests {
             );
             guard[1].status = JobState::Failed;
             guard[2].status = JobState::Failed;
-            guard[1].last_batch_member_ids = vec![2, 3];
-            guard[2].last_batch_member_ids = vec![2, 3];
+            guard[1].last_batch_member_ids = vec![2, 3].into();
+            guard[2].last_batch_member_ids = vec![2, 3].into();
         }
 
         execute_retry_in_store(&store, 2);
@@ -2716,8 +2820,8 @@ mod tests {
             );
             guard[3].status = JobState::Failed;
             guard[4].status = JobState::Failed;
-            guard[3].last_batch_member_ids = vec![4, 5];
-            guard[4].last_batch_member_ids = vec![4, 5];
+            guard[3].last_batch_member_ids = vec![4, 5].into();
+            guard[4].last_batch_member_ids = vec![4, 5].into();
         }
 
         execute_retry_in_store(&store, 4);
@@ -3092,6 +3196,114 @@ mod tests {
     }
 
     #[test]
+    fn an_old_plan_never_claims_a_job_that_was_canceled_and_retried_meanwhile() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(vec![
+            convert_job_in(dir.path(), 1),
+            convert_job_in(dir.path(), 2),
+        ]));
+        let shared = Shared::for_store(&store);
+        // Process all planned both jobs at attempt 0.
+        let planned = current_keys(&store.lock().unwrap(), &[1, 2]);
+        // Meanwhile job 1 is canceled and retried: a fresh attempt owned by the retry.
+        cancel_job(&shared, 1, None);
+        let retry_ids = prepare_retry(&mut store.lock().unwrap(), 1).unwrap();
+        let retry_keys = current_keys(&store.lock().unwrap(), &retry_ids);
+        assert_eq!(retry_keys, vec![(1, 1)]);
+
+        let claimed = claim_queued(&shared, &planned, false, None);
+        assert_eq!(claimed.iter().map(|j| j.id).collect::<Vec<_>>(), vec![2]);
+        assert_eq!(store.lock().unwrap()[0].status, JobState::Queued);
+        assert_eq!(claim_queued(&shared, &retry_keys, false, None).len(), 1);
+    }
+
+    #[test]
+    fn cancel_all_reaches_a_unit_claimed_but_not_yet_registered() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(vec![convert_job_in(dir.path(), 1)]));
+        let shared = Shared::for_store(&store);
+        let claimed = claim_queued(&shared, &[(1, 0)], false, None);
+        cancel_all(&shared, None);
+        run_registered(&shared, &[1], |cancel| {
+            assert!(cancel.is_canceled());
+            run_single_job_in_store(&shared.jobs, &claimed[0], 0, 1, cancel, None);
+        });
+        assert_eq!(store.lock().unwrap()[0].status, JobState::Canceled);
+        assert!(!dir_names(dir.path())
+            .iter()
+            .any(|n| n.contains("converted")));
+    }
+
+    #[test]
+    fn queue_moves_are_refused_while_the_worker_is_busy() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(vec![
+            convert_job_in(dir.path(), 1),
+            convert_job_in(dir.path(), 2),
+        ]));
+        let shared = Shared::for_store(&store);
+        shared.active.lock().unwrap().set_busy(true);
+        assert!(!move_job_if_idle(&shared, 2, true));
+        shared.active.lock().unwrap().set_busy(false);
+        assert!(move_job_if_idle(&shared, 2, true));
+        assert_eq!(store.lock().unwrap()[0].id, 2);
+    }
+
+    #[test]
+    fn a_password_submitted_for_an_earlier_prompt_is_discarded() {
+        let work = tempfile::tempdir().unwrap();
+        let a = write_locked_marker_pdf(work.path(), "a.pdf", 101, 51, "alpha-pw");
+        let b = write_locked_marker_pdf(work.path(), "b.pdf", 103, 53, "bravo-pw");
+        let (fx, _) = MergeFixture::run(vec![a, b], work);
+        let shared = Shared {
+            jobs: Arc::clone(&fx.store),
+            secrets: Arc::new(Mutex::new(JobSecretStore::new())),
+            active: Arc::new(Mutex::new(ActiveRun::default())),
+        };
+        // The dialog asked for a.pdf; the user submits twice before the worker gets to it.
+        let for_member = awaiting_member(&fx.store.lock().unwrap(), 1);
+        assert_eq!(for_member, 1);
+        for _ in 0..2 {
+            execute_command(
+                &shared,
+                Command::Unlock {
+                    job_id: 1,
+                    for_member,
+                    password: SecretPassword::new("alpha-pw"),
+                },
+                None,
+            );
+        }
+        // The first unlocked a.pdf and moved the prompt to b.pdf; the second (for a.pdf) was
+        // discarded rather than tried on b.pdf, so b.pdf has no stored password.
+        assert_eq!(fx.awaiting(), vec![2]);
+        assert!(!shared.secrets.lock().unwrap().contains(2));
+        assert!(fx
+            .store
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|j| j.status == JobState::NeedsPassword));
+    }
+
+    #[test]
+    fn a_cancel_before_preflight_finishes_wins_over_a_password_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("locked.pdf");
+        std::fs::copy(fixture_path("locked.pdf"), &input).unwrap();
+        let job = record_for(
+            input,
+            ToolId::CompressPdf,
+            DesktopToolOptions::CompressPdf,
+            OutputDestination::NextToSource,
+        );
+        let cancel = CancelToken::new();
+        cancel.cancel();
+        let err = process_job_in(&job, &RunCtx::new(&cancel, &|_| {})).unwrap_err();
+        assert_eq!(err.code, ErrorCode::Canceled);
+    }
+
+    #[test]
     fn jobs_canceled_or_removed_after_planning_are_never_claimed_or_run() {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(Mutex::new(vec![
@@ -3104,7 +3316,7 @@ mod tests {
         cancel_job(&shared, 2, None);
         assert!(remove_job_guarded(&shared, 3));
 
-        let claimed = claim_queued(&shared, &[1, 2, 3], false, None);
+        let claimed = claim_queued(&shared, &[(1, 0), (2, 0), (3, 0)], false, None);
         assert_eq!(claimed.iter().map(|j| j.id).collect::<Vec<_>>(), vec![1]);
         {
             let guard = store.lock().unwrap();
@@ -3113,7 +3325,7 @@ mod tests {
             assert_eq!(guard.len(), 2);
         }
         // Nothing left to claim twice.
-        assert!(claim_queued(&shared, &[1, 2, 3], false, None).is_empty());
+        assert!(claim_queued(&shared, &[(1, 0), (2, 0), (3, 0)], false, None).is_empty());
 
         run_registered(&shared, &[1], |cancel| {
             run_single_job_in_store(&shared.jobs, &claimed[0], 0, 1, cancel, None);
@@ -3131,7 +3343,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(Mutex::new(vec![convert_job_in(dir.path(), 1)]));
         let shared = Shared::for_store(&store);
-        let claimed = claim_queued(&shared, &[1], false, None);
+        let claimed = claim_queued(&shared, &[(1, 0)], false, None);
         // The user presses Cancel after the claim, before the unit registers.
         cancel_job(&shared, 1, None);
         run_registered(&shared, &[1], |cancel| {
@@ -3235,7 +3447,8 @@ mod tests {
             assert_eq!(guard[1].status, JobState::Queued);
             assert!(guard[1].error.is_empty());
         }
-        execute_command(&Shared::for_store(&store), Command::Retry(ids), None);
+        let keys = current_keys(&store.lock().unwrap(), &ids);
+        execute_command(&Shared::for_store(&store), Command::Retry(keys), None);
         assert_eq!(store.lock().unwrap()[1].status, JobState::Saved);
     }
 
@@ -3256,15 +3469,16 @@ mod tests {
         enqueue_files(&mut jobs, &mut next_id, vec![p1, p2], &request);
         for j in jobs.iter_mut() {
             j.status = JobState::Failed;
-            j.last_batch_member_ids = vec![1, 2];
+            j.last_batch_member_ids = vec![1, 2].into();
         }
         let store = Arc::new(Mutex::new(jobs));
         let shared = Shared::for_store(&store);
         let ids = prepare_retry(&mut store.lock().unwrap(), 1).unwrap();
         assert_eq!(ids, vec![1, 2]);
         // Cancel one member after Retry was clicked: the whole recorded batch is canceled.
+        let keys = current_keys(&store.lock().unwrap(), &ids);
         cancel_job(&shared, 2, None);
-        execute_command(&shared, Command::Retry(ids), None);
+        execute_command(&shared, Command::Retry(keys), None);
         assert!(store
             .lock()
             .unwrap()
@@ -3293,6 +3507,7 @@ mod tests {
         for _ in 0..2 {
             tx.send(Command::Unlock {
                 job_id: 1,
+                for_member: 1,
                 password: SecretPassword::new("user-pw-123"),
             })
             .unwrap();
@@ -3334,7 +3549,7 @@ mod tests {
             // Record original batch order [1, 2, 3] and simulate failed batch
             for j in guard.iter_mut() {
                 j.status = JobState::Failed;
-                j.last_batch_member_ids = vec![1, 2, 3];
+                j.last_batch_member_ids = vec![1, 2, 3].into();
             }
             // Reorder the job store in UI to [3, 1, 2]
             guard.rotate_right(1);
@@ -3388,7 +3603,7 @@ mod tests {
             );
             for j in guard.iter_mut() {
                 j.status = JobState::Failed;
-                j.last_batch_member_ids = vec![1, 2, 3];
+                j.last_batch_member_ids = vec![1, 2, 3].into();
             }
             // Delete member 2 before retrying
             guard.retain(|j| j.id != 2);
@@ -3434,7 +3649,7 @@ mod tests {
             let mut guard = store.lock().unwrap();
             enqueue_files(&mut guard, &mut next_id, vec![enc_1, enc_2], &merge_req);
             for j in guard.iter_mut() {
-                j.last_batch_member_ids = vec![1, 2];
+                j.last_batch_member_ids = vec![1, 2].into();
             }
         }
 
@@ -3537,7 +3752,7 @@ mod tests {
             );
             for j in guard.iter_mut() {
                 j.status = JobState::NeedsPassword;
-                j.last_batch_member_ids = vec![1, 2, 3, 4];
+                j.last_batch_member_ids = vec![1, 2, 3, 4].into();
             }
             // Reverse UI store to [4, 3, 2, 1]
             guard.reverse();
@@ -3623,7 +3838,7 @@ mod tests {
             enqueue_files(&mut jobs, &mut next_id, files, &request);
             let ids: Vec<i32> = jobs.iter().map(|j| j.id).collect();
             for j in jobs.iter_mut() {
-                j.last_batch_member_ids = ids.clone();
+                j.last_batch_member_ids = ids.clone().into();
             }
             // Same path as "Process all": Probing, then the run reports stages and the result.
             begin_probing(&mut jobs, &ids);
@@ -3853,7 +4068,7 @@ mod tests {
             );
             for j in &mut guard[..2] {
                 j.status = JobState::NeedsPassword;
-                j.last_batch_member_ids = vec![1, 2];
+                j.last_batch_member_ids = vec![1, 2].into();
             }
             guard[2].status = JobState::NeedsPassword;
         }
@@ -3887,7 +4102,7 @@ mod tests {
             );
             for j in guard.iter_mut() {
                 j.status = JobState::NeedsPassword;
-                j.last_batch_member_ids = vec![1, 2];
+                j.last_batch_member_ids = vec![1, 2].into();
             }
             guard.retain(|j| j.id != 2);
         }
