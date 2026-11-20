@@ -3,16 +3,17 @@ slint::include_modules!();
 mod pipeline;
 
 use pipeline::preflight::{preflight_inputs_with_passwords, PdfPasswords};
+use pipeline::runner::RunCtx;
 use pipeline::secrets::{self, JobSecretStore};
 use pipeline::verify::{self, Expect};
 use pipeline::{
-    plan_execution_units, preflight_inputs, resolve_recorded_batch_indices,
-    select_batch_retry_indices, DesktopToolOptions, JobRequest, PlannedUnit, TrimEnd,
-    UiOptionInput,
+    plan_execution_units, resolve_recorded_batch_indices, select_batch_retry_indices,
+    DesktopToolOptions, JobRequest, PlannedUnit, TrimEnd, UiOptionInput,
 };
 use refract_core::cancel::CancelToken;
 use refract_core::error::{ErrorCode, RefractError};
 use refract_core::format::Format;
+use refract_core::job::JobState;
 use refract_core::naming;
 use refract_core::tools::ToolId;
 use refract_engine::pdf::SecretPassword;
@@ -36,19 +37,56 @@ struct JobRecord {
     last_batch_member_ids: Vec<i32>,
     /// This job's own file is the one a merge batch (or single job) is waiting on a password for.
     awaiting_password: bool,
-    status: JobStatus,
+    /// The canonical 9-state job state; change it only through `set_state` / `start_new_attempt`.
+    status: JobState,
     error: String,
     output_path: PathBuf,
     progress: f32,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-enum JobStatus {
-    Waiting,
-    Working,
-    Done,
-    Failed,
-    NeedsPassword,
+/// Move `job` to `next`, enforcing `JobState::can_transition` (the 9-state table shared with Web).
+/// An illegal move is a bug: it panics in debug and test builds, and is ignored in release builds.
+fn set_state(job: &mut JobRecord, next: JobState) -> bool {
+    let legal = job.status.can_transition(next);
+    debug_assert!(
+        legal,
+        "illegal job state transition {:?} -> {:?} (job {})",
+        job.status, next, job.id
+    );
+    if legal {
+        job.status = next;
+    }
+    legal
+}
+
+/// Start a fresh attempt (retry or re-run): terminal states have no outgoing transitions, so a new
+/// attempt begins again at `Queued` with the same immutable request, like Web's retry.
+fn start_new_attempt(job: &mut JobRecord) {
+    debug_assert!(
+        matches!(job.status, JobState::Failed | JobState::Canceled),
+        "only Failed or Canceled jobs start a new attempt (job {} is {:?})",
+        job.id,
+        job.status
+    );
+    job.status = JobState::Queued;
+    job.error.clear();
+    job.output_path = PathBuf::new();
+    job.awaiting_password = false;
+    job.progress = 0.0;
+}
+
+/// Final state of a run from the furthest stage it reached and its result, per the state table:
+/// errors found while checking inputs reject the job; errors after work began fail it.
+fn final_state(reached: JobState, result: &Result<PathBuf, RefractError>) -> JobState {
+    match result {
+        Ok(_) => JobState::Saved,
+        Err(e) if e.code.is_cancellation() => JobState::Canceled,
+        Err(e) if reached == JobState::Probing && e.code.is_password_error() => {
+            JobState::NeedsPassword
+        }
+        Err(_) if reached == JobState::Probing => JobState::Rejected,
+        Err(_) => JobState::Failed,
+    }
 }
 
 fn format_size(bytes: u64) -> String {
@@ -371,7 +409,6 @@ fn main() -> Result<(), slint::PlatformError> {
 enum UiEvent {
     JobsUpdated(Vec<JobRecord>),
     StatusUpdate(String, f32),
-    JobProgress(i32, f32, JobStatus),
     PasswordNeeded(i32, String),
     EngineAvailability(bool, bool),
 }
@@ -383,11 +420,12 @@ fn job_record_to_entry(job: &JobRecord) -> slint_generatedMainWindow::JobEntry {
         size_text: format_size(job.size_bytes).into(),
         tool_label: job.tool_label.clone().into(),
         status: match job.status {
-            JobStatus::Waiting => "Waiting".into(),
-            JobStatus::Working => "Working…".into(),
-            JobStatus::Done => "Done".into(),
-            JobStatus::Failed => "Failed".into(),
-            JobStatus::NeedsPassword => "Needs Password".into(),
+            JobState::Queued => "Waiting".into(),
+            JobState::Probing | JobState::Running | JobState::Verifying => "Working…".into(),
+            JobState::Saved => "Done".into(),
+            JobState::Failed | JobState::Rejected => "Failed".into(),
+            JobState::NeedsPassword => "Needs Password".into(),
+            JobState::Canceled => "Canceled".into(),
         },
         error: job.error.clone().into(),
         output_path: job.output_path.to_string_lossy().to_string().into(),
@@ -406,22 +444,6 @@ fn handle_ui_event(ui: &MainWindow, event: UiEvent) {
         UiEvent::StatusUpdate(text, progress) => {
             ui.set_status_text(text.into());
             ui.set_overall_progress(progress);
-        }
-        UiEvent::JobProgress(id, progress, status) => {
-            let model = ui.get_jobs();
-            let mut entries: Vec<slint_generatedMainWindow::JobEntry> = model.iter().collect();
-            if let Some(idx) = entries.iter().position(|e| e.id == id) {
-                let status_str: SharedString = match status {
-                    JobStatus::Waiting => "Waiting".into(),
-                    JobStatus::Working => "Working…".into(),
-                    JobStatus::Done => "Done".into(),
-                    JobStatus::Failed => "Failed".into(),
-                    JobStatus::NeedsPassword => "Needs Password".into(),
-                };
-                entries[idx].progress = progress;
-                entries[idx].status = status_str;
-                ui.set_jobs(Rc::new(VecModel::from(entries)).into());
-            }
         }
         UiEvent::PasswordNeeded(job_id, prompt) => {
             ui.set_password_job_id(job_id);
@@ -494,7 +516,7 @@ fn enqueue_files(
             request: request.clone(),
             last_batch_member_ids: Vec::new(),
             awaiting_password: false,
-            status: JobStatus::Waiting,
+            status: JobState::Queued,
             error: String::new(),
             output_path: PathBuf::new(),
             progress: -1.0,
@@ -643,7 +665,10 @@ enum PasswordUnlockClaim {
     },
 }
 
-fn mark_jobs_failed_with_error(
+/// The recorded batch of `target_id` can't run (a member is missing, moved on or incompatible).
+/// Waiting members are rejected through the legal path (`Probing -> Rejected`); members that
+/// already ended keep their state and just show the reason.
+fn reject_recorded_batch(
     store: &mut [JobRecord],
     target_id: i32,
     recorded_ids: &[i32],
@@ -652,14 +677,58 @@ fn mark_jobs_failed_with_error(
     for j in store.iter_mut() {
         let belongs_to_same_recorded_batch = !recorded_ids.is_empty()
             && recorded_ids.contains(&j.id)
-            && j.last_batch_member_ids == recorded_ids
-            && !matches!(j.status, JobStatus::Done | JobStatus::Working);
-        if j.id == target_id || belongs_to_same_recorded_batch {
-            j.status = JobStatus::Failed;
+            && j.last_batch_member_ids == recorded_ids;
+        if j.id != target_id && !belongs_to_same_recorded_batch {
+            continue;
+        }
+        if matches!(j.status, JobState::Queued | JobState::NeedsPassword) {
+            set_state(j, JobState::Probing);
+            set_state(j, JobState::Rejected);
+        }
+        if !j.status.is_active() && j.status != JobState::Saved {
             j.error = err.to_string();
+            j.awaiting_password = false;
             j.progress = -1.0;
         }
     }
+}
+
+/// Mark `ids` as starting a run: `Queued`/`NeedsPassword` -> `Probing`.
+fn begin_probing(store: &mut [JobRecord], ids: &[i32]) {
+    for j in store.iter_mut().filter(|j| ids.contains(&j.id)) {
+        set_state(j, JobState::Probing);
+        j.progress = 0.0;
+        j.error.clear();
+    }
+}
+
+/// Run one unit of work for `ids` (already in `Probing`). Stages reported by the work (`Running`,
+/// `Verifying`) are applied to the jobs as they happen; the final state comes from the furthest
+/// stage reached plus the result (see `final_state`).
+fn run_unit(
+    jobs_store: &Arc<Mutex<Vec<JobRecord>>>,
+    ids: &[i32],
+    cancel: &CancelToken,
+    ui_tx: Option<&mpsc::Sender<UiEvent>>,
+    work: impl FnOnce(&RunCtx<'_>) -> Result<PathBuf, RefractError>,
+) -> Result<PathBuf, RefractError> {
+    let on_stage = |stage: JobState| {
+        let mut store = jobs_store.lock().unwrap();
+        for j in store.iter_mut().filter(|j| ids.contains(&j.id)) {
+            set_state(j, stage);
+        }
+        if let Some(tx) = ui_tx {
+            push_ui_event(tx, UiEvent::JobsUpdated(store.clone()));
+        }
+    };
+    let ctx = RunCtx::new(cancel, &on_stage);
+    let result = work(&ctx);
+    let mut store = jobs_store.lock().unwrap();
+    apply_result_to_jobs(&mut store, ids, &result);
+    if let Some(tx) = ui_tx {
+        push_ui_event(tx, UiEvent::JobsUpdated(store.clone()));
+    }
+    result
 }
 
 fn try_claim_password_unlock(
@@ -680,7 +749,7 @@ fn try_claim_password_unlock(
         };
         let target = store[target_idx].clone();
 
-        if target.status != JobStatus::NeedsPassword {
+        if target.status != JobState::NeedsPassword {
             is_busy.store(false, Ordering::SeqCst);
             return Some(Err(RefractError::new(
                 ErrorCode::InvalidOption,
@@ -698,14 +767,13 @@ fn try_claim_password_unlock(
                 &target.last_batch_member_ids,
                 |j| j.id,
                 |j| &j.request,
-                |j| j.status == JobStatus::NeedsPassword,
+                |j| j.status == JobState::NeedsPassword,
             ) {
                 Ok(indices) => {
                     let mut members = Vec::with_capacity(indices.len());
                     for idx in indices {
-                        store[idx].status = JobStatus::Working;
-                        store[idx].progress = 0.0;
-                        store[idx].error.clear();
+                        let id = store[idx].id;
+                        begin_probing(&mut store, &[id]);
                         members.push(store[idx].clone());
                     }
                     if let Some(tx) = ui_tx {
@@ -717,12 +785,7 @@ fn try_claim_password_unlock(
                     })
                 }
                 Err(err) => {
-                    mark_jobs_failed_with_error(
-                        &mut store,
-                        job_id,
-                        &target.last_batch_member_ids,
-                        &err,
-                    );
+                    reject_recorded_batch(&mut store, job_id, &target.last_batch_member_ids, &err);
                     if let Some(tx) = ui_tx {
                         push_ui_event(tx, UiEvent::JobsUpdated(store.clone()));
                     }
@@ -731,9 +794,7 @@ fn try_claim_password_unlock(
                 }
             }
         } else {
-            store[target_idx].status = JobStatus::Working;
-            store[target_idx].progress = 0.0;
-            store[target_idx].error.clear();
+            begin_probing(&mut store, &[job_id]);
             let claimed = store[target_idx].clone();
             if let Some(tx) = ui_tx {
                 push_ui_event(tx, UiEvent::JobsUpdated(store.clone()));
@@ -757,6 +818,7 @@ fn complete_password_unlock_claim(
     secret_store: &Mutex<JobSecretStore>,
     claim: PasswordUnlockClaim,
     entered: SecretPassword,
+    cancel: &CancelToken,
     ui_tx: Option<&mpsc::Sender<UiEvent>>,
 ) -> Result<PathBuf, RefractError> {
     let (ids, result, taken) = match claim {
@@ -785,20 +847,24 @@ fn complete_password_unlock_claim(
                 per_input: &per_input,
                 guesses: &guesses,
             };
-            let res = execute_batch_merge_pdf_with_passwords(&members, &request, passwords);
+            let res = run_unit(jobs_store, &ids, cancel, ui_tx, |ctx| {
+                execute_batch_merge_pdf_with_passwords(&members, &request, passwords, ctx)
+            });
             drop(guesses);
             drop(per_input);
             (ids, res, taken)
         }
         PasswordUnlockClaim::Single(job) => {
-            let res = process_job_with_password(&job, &entered);
+            let ids = vec![job.id];
+            let res = run_unit(jobs_store, &ids, cancel, ui_tx, |ctx| {
+                process_job_with_password_in(&job, &entered, ctx)
+            });
             drop(entered);
-            (vec![job.id], res, Vec::new())
+            (ids, res, Vec::new())
         }
     };
 
-    let mut store = jobs_store.lock().unwrap();
-    apply_result_to_jobs(&mut store, &ids, &result);
+    let store = jobs_store.lock().unwrap();
     {
         // Lock order everywhere: jobs, then secrets.
         let wrong_index = match &result {
@@ -885,6 +951,7 @@ fn setup_password_handlers(
                 &worker_secrets,
                 claim,
                 entered,
+                &CancelToken::new(),
                 Some(&worker_ui_tx),
             );
 
@@ -936,7 +1003,7 @@ fn setup_start_processing(
                 let store = worker_jobs.lock().unwrap();
                 store
                     .iter()
-                    .filter(|j| j.status == JobStatus::Waiting)
+                    .filter(|j| j.status == JobState::Queued)
                     .cloned()
                     .collect()
             };
@@ -958,6 +1025,8 @@ fn setup_start_processing(
                 return;
             }
 
+            // Per-run cancel token (wired to the Cancel controls in the next step of 2.3.6).
+            let cancel = CancelToken::new();
             let planned_units = plan_execution_units(waiting_jobs, |j| &j.request);
             let total_units = planned_units.len();
 
@@ -972,10 +1041,9 @@ fn setup_start_processing(
                         {
                             let mut store = worker_jobs.lock().unwrap();
                             for j in store.iter_mut().filter(|j| ids.contains(&j.id)) {
-                                j.status = JobStatus::Working;
-                                j.progress = 0.0;
                                 j.last_batch_member_ids = ids.clone();
                             }
+                            begin_probing(&mut store, &ids);
                             push_ui_event(&worker_ui_tx, UiEvent::JobsUpdated(store.clone()));
                         }
                         push_ui_event(
@@ -986,8 +1054,9 @@ fn setup_start_processing(
                             ),
                         );
 
-                        let merge_result = execute_batch_merge_pdf(&items, &request);
-                        apply_batch_result(&worker_jobs, &ids, merge_result, &worker_ui_tx);
+                        let _ = run_unit(&worker_jobs, &ids, &cancel, Some(&worker_ui_tx), |ctx| {
+                            execute_batch_merge_pdf_in(&items, &request, ctx)
+                        });
                     }
                     PlannedUnit::Batch {
                         tool: ToolId::ImagesToPdf,
@@ -998,10 +1067,9 @@ fn setup_start_processing(
                         {
                             let mut store = worker_jobs.lock().unwrap();
                             for j in store.iter_mut().filter(|j| ids.contains(&j.id)) {
-                                j.status = JobStatus::Working;
-                                j.progress = 0.0;
                                 j.last_batch_member_ids = ids.clone();
                             }
+                            begin_probing(&mut store, &ids);
                             push_ui_event(&worker_ui_tx, UiEvent::JobsUpdated(store.clone()));
                         }
                         push_ui_event(
@@ -1012,8 +1080,9 @@ fn setup_start_processing(
                             ),
                         );
 
-                        let compile_result = execute_batch_images_to_pdf(&items, &request);
-                        apply_batch_result(&worker_jobs, &ids, compile_result, &worker_ui_tx);
+                        let _ = run_unit(&worker_jobs, &ids, &cancel, Some(&worker_ui_tx), |ctx| {
+                            execute_batch_images_to_pdf_in(&items, &request, ctx)
+                        });
                     }
                     PlannedUnit::Batch { items, .. } => {
                         for job in items {
@@ -1022,6 +1091,7 @@ fn setup_start_processing(
                                 &job,
                                 completed,
                                 total_units,
+                                &cancel,
                                 &worker_ui_tx,
                             );
                         }
@@ -1032,6 +1102,7 @@ fn setup_start_processing(
                             &job,
                             completed,
                             total_units,
+                            &cancel,
                             &worker_ui_tx,
                         );
                     }
@@ -1060,21 +1131,11 @@ fn setup_start_processing(
     });
 }
 
-fn apply_batch_result(
-    jobs_store: &Arc<Mutex<Vec<JobRecord>>>,
-    ids: &[i32],
-    result: Result<PathBuf, RefractError>,
-    ui_tx: &mpsc::Sender<UiEvent>,
-) {
-    let mut store = jobs_store.lock().unwrap();
-    apply_result_to_jobs(&mut store, ids, &result);
-    push_ui_event(ui_tx, UiEvent::JobsUpdated(store.clone()));
-}
-
-/// Record a run's result on the jobs it covered. `ids` are in input order, so a password error's
-/// `input_index` names the member whose file is locked. Every member then waits for a password
-/// with the same prompt (naming that file), and only that member is marked `awaiting_password`.
-/// This is the only place job results are applied, so first runs, retries and unlocks agree.
+/// Record a run's result on the jobs it covered. The final state comes from the furthest stage
+/// each job reached plus the result (`final_state`), through the checked `set_state`.
+/// `ids` are in input order, so a password error's `input_index` names the member whose file is
+/// locked: every member then waits for a password with the same prompt (naming that file), and
+/// only that member is marked `awaiting_password`. This is the only place results are applied.
 fn apply_result_to_jobs(
     store: &mut [JobRecord],
     ids: &[i32],
@@ -1088,22 +1149,19 @@ fn apply_result_to_jobs(
         _ => None,
     };
     for j in store.iter_mut().filter(|j| ids.contains(&j.id)) {
+        let next = final_state(j.status, result);
+        set_state(j, next);
         j.awaiting_password = false;
         match result {
             Ok(path) => {
-                j.status = JobStatus::Done;
                 j.output_path = path.clone();
                 j.error.clear();
             }
-            Err(e) if e.code.is_password_error() => {
-                j.status = JobStatus::NeedsPassword;
+            Err(e) if next == JobState::NeedsPassword => {
                 j.error = e.message.clone();
                 j.awaiting_password = Some(j.id) == locked_id;
             }
-            Err(e) => {
-                j.status = JobStatus::Failed;
-                j.error = e.to_string();
-            }
+            Err(e) => j.error = e.to_string(),
         }
         j.progress = -1.0;
     }
@@ -1114,7 +1172,7 @@ fn prune_secrets(store: &[JobRecord], secrets: &Mutex<JobSecretStore>) {
     secrets.lock().unwrap().retain_jobs(|id| {
         store
             .iter()
-            .any(|j| j.id == id && j.status == JobStatus::NeedsPassword)
+            .any(|j| j.id == id && j.status == JobState::NeedsPassword)
     });
 }
 
@@ -1123,14 +1181,12 @@ fn run_single_job_in_store(
     job: &JobRecord,
     completed: usize,
     total_units: usize,
+    cancel: &CancelToken,
     ui_tx: &mpsc::Sender<UiEvent>,
 ) {
     {
         let mut store = jobs_store.lock().unwrap();
-        if let Some(j) = store.iter_mut().find(|j| j.id == job.id) {
-            j.status = JobStatus::Working;
-            j.progress = 0.0;
-        }
+        begin_probing(&mut store, &[job.id]);
         push_ui_event(ui_tx, UiEvent::JobsUpdated(store.clone()));
     }
 
@@ -1147,18 +1203,15 @@ fn run_single_job_in_store(
         ),
     );
 
-    let result = process_job(job);
-
-    {
-        let mut store = jobs_store.lock().unwrap();
-        apply_result_to_jobs(&mut store, &[job.id], &result);
-        push_ui_event(ui_tx, UiEvent::JobsUpdated(store.clone()));
-    }
+    let _ = run_unit(jobs_store, &[job.id], cancel, Some(ui_tx), |ctx| {
+        process_job_in(job, ctx)
+    });
 }
 
 fn execute_retry_in_store(
     jobs_store: &Arc<Mutex<Vec<JobRecord>>>,
     job_id: i32,
+    cancel: &CancelToken,
     ui_tx: Option<&mpsc::Sender<UiEvent>>,
 ) {
     let members: Vec<JobRecord> = {
@@ -1173,11 +1226,16 @@ fn execute_retry_in_store(
             &recorded_ids,
             |j| j.id,
             |j| &j.request,
-            |j| matches!(j.status, JobStatus::Failed | JobStatus::Waiting),
+            |j| {
+                matches!(
+                    j.status,
+                    JobState::Failed | JobState::Canceled | JobState::Queued
+                )
+            },
         ) {
             Ok(indices) => indices.into_iter().map(|i| store[i].clone()).collect(),
             Err(err) => {
-                mark_jobs_failed_with_error(&mut store, job_id, &recorded_ids, &err);
+                reject_recorded_batch(&mut store, job_id, &recorded_ids, &err);
                 if let Some(tx) = ui_tx {
                     push_ui_event(tx, UiEvent::JobsUpdated(store.clone()));
                 }
@@ -1195,13 +1253,15 @@ fn execute_retry_in_store(
     {
         let mut store = jobs_store.lock().unwrap();
         for j in store.iter_mut().filter(|j| ids.contains(&j.id)) {
-            j.status = JobStatus::Working;
-            j.progress = 0.0;
-            j.error.clear();
+            // A retry is a fresh attempt from `Queued` with the same immutable request.
+            if j.status.is_terminal() {
+                start_new_attempt(j);
+            }
             if request.tool().spec().batch {
                 j.last_batch_member_ids = ids.clone();
             }
         }
+        begin_probing(&mut store, &ids);
         if let Some(tx) = ui_tx {
             push_ui_event(tx, UiEvent::JobsUpdated(store.clone()));
         }
@@ -1214,19 +1274,13 @@ fn execute_retry_in_store(
         );
     }
 
-    let result = match request.tool() {
-        ToolId::MergePdf => execute_batch_merge_pdf(&members, &request),
-        ToolId::ImagesToPdf => execute_batch_images_to_pdf(&members, &request),
-        _ => process_job(&primary),
-    };
-
-    {
-        let mut store = jobs_store.lock().unwrap();
-        apply_result_to_jobs(&mut store, &ids, &result);
-        if let Some(tx) = ui_tx {
-            push_ui_event(tx, UiEvent::JobsUpdated(store.clone()));
+    let _ = run_unit(jobs_store, &ids, cancel, ui_tx, |ctx| {
+        match request.tool() {
+            ToolId::MergePdf => execute_batch_merge_pdf_in(&members, &request, ctx),
+            ToolId::ImagesToPdf => execute_batch_images_to_pdf_in(&members, &request, ctx),
+            _ => process_job_in(&primary, ctx),
         }
-    }
+    });
 }
 
 fn setup_retry_job(
@@ -1258,7 +1312,12 @@ fn setup_retry_job(
 
         thread::spawn(move || {
             // Re-runs with the job's original immutable `JobRequest` (and compatible batch peers).
-            execute_retry_in_store(&worker_jobs, job_id, Some(&worker_ui_tx));
+            execute_retry_in_store(
+                &worker_jobs,
+                job_id,
+                &CancelToken::new(),
+                Some(&worker_ui_tx),
+            );
 
             worker_busy.store(false, Ordering::SeqCst);
             push_ui_event(&worker_ui_tx, UiEvent::StatusUpdate("Ready".into(), -1.0));
@@ -1350,19 +1409,22 @@ fn output_dir(job: &JobRecord) -> PathBuf {
 
 /// Check every output against its expectation, then save them all together or none.
 /// Names are numbered if taken; nothing is ever overwritten. Returns saved paths in order.
-/// This is the only path by which Desktop saves image and PDF outputs.
+/// This is the only path by which Desktop saves image and PDF outputs. Reports `Verifying` first;
+/// a cancel before or during the save leaves no output (the commit rolls back what it moved).
 fn save_checked_outputs(
     job: &JobRecord,
     outputs: &[(String, &[u8])],
     expects: &[Expect],
+    ctx: &RunCtx<'_>,
 ) -> Result<Vec<PathBuf>, RefractError> {
+    ctx.begin_verify()?;
     let bytes: Vec<&[u8]> = outputs.iter().map(|(_, b)| *b).collect();
     verify::verify_all(&bytes, expects)?;
     let mut batch = persist::StagedOutputBatch::new(&output_dir(job));
     for (name, bytes) in outputs {
         batch.stage(name, bytes)?;
     }
-    batch.commit(&CancelToken::none())
+    batch.commit(ctx.cancel)
 }
 
 /// Check and save one output under the canonical manifest name.
@@ -1371,10 +1433,31 @@ fn save_single_output(
     extension: &str,
     bytes: &[u8],
     expect: Expect,
+    ctx: &RunCtx<'_>,
 ) -> Result<PathBuf, RefractError> {
     let name = output_file_name(job, extension);
-    let mut saved = save_checked_outputs(job, &[(name, bytes)], &[expect])?;
+    let mut saved = save_checked_outputs(job, &[(name, bytes)], &[expect], ctx)?;
     Ok(saved.remove(0))
+}
+
+/// Preflight every input, then report `Running` (or stop if the run was canceled meanwhile).
+/// All execution paths go through here, so the stage is reported in exactly one place.
+fn preflight_then_work(
+    request: &JobRequest,
+    paths: &[&Path],
+    passwords: PdfPasswords<'_>,
+    ctx: &RunCtx<'_>,
+) -> Result<pipeline::preflight::PreflightReport, RefractError> {
+    let report = preflight_inputs_with_passwords(request, paths, passwords)?;
+    ctx.begin_work()?;
+    Ok(report)
+}
+
+fn single_password(password: Option<&str>) -> PdfPasswords<'_> {
+    PdfPasswords {
+        all: password,
+        ..Default::default()
+    }
 }
 
 fn ensure_batch_compatible(jobs: &[JobRecord], request: &JobRequest) -> Result<(), RefractError> {
@@ -1402,10 +1485,11 @@ fn execute_batch_merge_pdf_with_passwords(
     jobs: &[JobRecord],
     request: &JobRequest,
     passwords: PdfPasswords<'_>,
+    ctx: &RunCtx<'_>,
 ) -> Result<PathBuf, RefractError> {
     ensure_batch_compatible(jobs, request)?;
     let paths: Vec<&Path> = jobs.iter().map(|j| j.input_path.as_path()).collect();
-    let report = preflight_inputs_with_passwords(request, &paths, passwords)?;
+    let report = preflight_then_work(request, &paths, passwords, ctx)?;
     let inputs: Vec<(Vec<u8>, u32, Option<&str>)> = report
         .inputs
         .into_iter()
@@ -1423,26 +1507,29 @@ fn execute_batch_merge_pdf_with_passwords(
             password: *password,
         })
         .collect();
-    let out_bytes = pdf::merge_pdfs_with_inputs(&merge_inputs, &CancelToken::none())?;
+    let out_bytes = pdf::merge_pdfs_with_inputs(&merge_inputs, ctx.cancel)?;
     // Name comes from the first recorded member; destination is shared (checked by ensure_batch_compatible).
     save_single_output(
         &jobs[0],
         "pdf",
         &out_bytes,
         Expect::format(Format::Pdf).pages(total_pages),
+        ctx,
     )
 }
 
-fn execute_batch_merge_pdf(
+fn execute_batch_merge_pdf_in(
     jobs: &[JobRecord],
     request: &JobRequest,
+    ctx: &RunCtx<'_>,
 ) -> Result<PathBuf, RefractError> {
-    execute_batch_merge_pdf_with_passwords(jobs, request, PdfPasswords::default())
+    execute_batch_merge_pdf_with_passwords(jobs, request, PdfPasswords::default(), ctx)
 }
 
-fn execute_batch_images_to_pdf(
+fn execute_batch_images_to_pdf_in(
     jobs: &[JobRecord],
     request: &JobRequest,
+    ctx: &RunCtx<'_>,
 ) -> Result<PathBuf, RefractError> {
     ensure_batch_compatible(jobs, request)?;
     let DesktopToolOptions::ImagesToPdf { dpi, quality } = *request.options() else {
@@ -1452,18 +1539,20 @@ fn execute_batch_images_to_pdf(
         ));
     };
     let paths: Vec<&Path> = jobs.iter().map(|j| j.input_path.as_path()).collect();
-    preflight_inputs(request, &paths, None)?;
+    preflight_then_work(request, &paths, PdfPasswords::default(), ctx)?;
     let buffers: Vec<Vec<u8>> = jobs
         .iter()
         .map(|j| std::fs::read(&j.input_path).map_err(to_refract_err))
         .collect::<Result<_, _>>()?;
-    let out_bytes = pdf::images_to_pdf(&buffers, dpi, quality)?;
+    let out_bytes =
+        pdf::images_to_pdf_with_options(&buffers, pdf::PdfPageSize::Fit, dpi, quality, ctx.cancel)?;
     let pages = u32::try_from(buffers.len()).unwrap_or(u32::MAX);
     save_single_output(
         &jobs[0],
         "pdf",
         &out_bytes,
         Expect::format(Format::Pdf).pages(pages),
+        ctx,
     )
 }
 
@@ -1474,6 +1563,7 @@ fn render_or_extract_pdf_images(
     target: Format,
     dpi: u32,
     password: Option<&str>,
+    ctx: &RunCtx<'_>,
 ) -> Result<PathBuf, RefractError> {
     let format = format_primary_extension(target);
     let input_name = input_file_name(job);
@@ -1482,11 +1572,7 @@ fn render_or_extract_pdf_images(
     // Entry names follow the manifest's pdf-to-images `entryTemplate` (`{name}-p{page}.{ext}`).
     let (outputs, expects): (Vec<(String, Vec<u8>)>, Vec<Expect>) =
         match render::render_pdf_to_images_with_password_cancellable(
-            bytes,
-            password,
-            dpi,
-            format,
-            &CancelToken::none(),
+            bytes, password, dpi, format, ctx.cancel,
         ) {
             Ok(pages) => {
                 let outputs: Vec<(String, Vec<u8>)> = pages
@@ -1499,14 +1585,11 @@ fn render_or_extract_pdf_images(
                 (outputs, vec![Expect::format(target); page_count as usize])
             }
             Err(render_err) => {
-                if render_err.code.is_password_error() {
+                if render_err.code.is_password_error() || render_err.code.is_cancellation() {
                     return Err(render_err);
                 }
-                let embedded = pdf::extract_embedded_images_with_password(
-                    bytes,
-                    password,
-                    &CancelToken::none(),
-                )?;
+                let embedded =
+                    pdf::extract_embedded_images_with_password(bytes, password, ctx.cancel)?;
                 if embedded.is_empty() {
                     return Err(render_err);
                 }
@@ -1528,7 +1611,7 @@ fn render_or_extract_pdf_images(
         .iter()
         .map(|(name, b)| (name.clone(), b.as_slice()))
         .collect();
-    let mut saved = save_checked_outputs(job, &refs, &expects)?;
+    let mut saved = save_checked_outputs(job, &refs, &expects, ctx)?;
     Ok(saved.remove(0))
 }
 
@@ -1539,6 +1622,7 @@ fn save_split_parts(
     ranges: &str,
     page_count: u32,
     parts: Vec<(String, Vec<u8>)>,
+    ctx: &RunCtx<'_>,
 ) -> Result<PathBuf, RefractError> {
     let expects: Vec<Expect> = pdf::parse_ranges(ranges, page_count)?
         .iter()
@@ -1550,7 +1634,7 @@ fn save_split_parts(
         .iter()
         .map(|(label, b)| (format!("{}-{}.pdf", stem, label), b.as_slice()))
         .collect();
-    let saved = save_checked_outputs(job, &refs, &expects)?;
+    let saved = save_checked_outputs(job, &refs, &expects, ctx)?;
     Ok(saved
         .into_iter()
         .last()
@@ -1581,10 +1665,10 @@ fn take_preflight_pdf(
     pdf_input_bytes_and_pages(input)
 }
 
-fn process_job(job: &JobRecord) -> Result<PathBuf, RefractError> {
+fn process_job_in(job: &JobRecord, ctx: &RunCtx<'_>) -> Result<PathBuf, RefractError> {
     match job.request.options() {
         DesktopToolOptions::ImagesToPdf { .. } => {
-            return execute_batch_images_to_pdf(std::slice::from_ref(job), &job.request);
+            return execute_batch_images_to_pdf_in(std::slice::from_ref(job), &job.request, ctx);
         }
         DesktopToolOptions::MergePdf => {
             return Err(RefractError::new(
@@ -1595,25 +1679,33 @@ fn process_job(job: &JobRecord) -> Result<PathBuf, RefractError> {
         _ => {}
     }
 
-    let report = preflight_inputs(&job.request, &[job.input_path.as_path()], None)?;
+    let report = preflight_then_work(
+        &job.request,
+        &[job.input_path.as_path()],
+        PdfPasswords::default(),
+        ctx,
+    )?;
     let detected_format = report.inputs[0].format;
+    let cancel = ctx.cancel;
 
     match job.request.options() {
         DesktopToolOptions::ConvertImage { target, quality } => {
             let bytes = std::fs::read(&job.input_path).map_err(to_refract_err)?;
             // Displayed size (EXIF orientation applied), which the converted image keeps.
             let (w, h) = image::probe_dimensions(&bytes)?;
-            let out_bytes = image::convert_image(&bytes, *target, Some(*quality))?;
+            let out_bytes =
+                image::convert_image_cancellable(&bytes, *target, Some(*quality), cancel)?;
             save_single_output(
                 job,
                 format_primary_extension(*target),
                 &out_bytes,
                 Expect::format(*target).dimensions(w, h),
+                ctx,
             )
         }
         DesktopToolOptions::CompressImage { target_kb } => {
             let bytes = std::fs::read(&job.input_path).map_err(to_refract_err)?;
-            let out_bytes = image::compress_image(&bytes, *target_kb)?;
+            let out_bytes = image::compress_image_cancellable(&bytes, *target_kb, cancel)?;
             // The engine may scale the image down to reach the target, so only size is fixed.
             let max_bytes = u64::from(*target_kb) * 1024;
             save_single_output(
@@ -1621,6 +1713,7 @@ fn process_job(job: &JobRecord) -> Result<PathBuf, RefractError> {
                 "jpg",
                 &out_bytes,
                 Expect::format(Format::Jpeg).max_bytes(max_bytes),
+                ctx,
             )
         }
         opts @ DesktopToolOptions::ResizeImage { .. } => {
@@ -1630,41 +1723,45 @@ fn process_job(job: &JobRecord) -> Result<PathBuf, RefractError> {
             let bytes = std::fs::read(&job.input_path).map_err(to_refract_err)?;
             let (src_w, src_h) = image::probe_dimensions(&bytes)?;
             let (w, h) = image::resolve_resize_dimensions(src_w, src_h, &engine_opts)?;
-            let (out_bytes, out_fmt) = image::resize_image_with_options(&bytes, &engine_opts)?;
+            let (out_bytes, out_fmt) =
+                image::resize_image_with_options_cancellable(&bytes, &engine_opts, cancel)?;
             save_single_output(
                 job,
                 format_primary_extension(out_fmt),
                 &out_bytes,
                 Expect::format(out_fmt).dimensions(w, h),
+                ctx,
             )
         }
         DesktopToolOptions::PdfToImages { target, dpi } => {
             let (bytes, pages) = take_preflight_pdf(report)?;
-            render_or_extract_pdf_images(job, &bytes, pages, *target, *dpi, None)
+            render_or_extract_pdf_images(job, &bytes, pages, *target, *dpi, None, ctx)
         }
         DesktopToolOptions::CompressPdf => {
             let (bytes, pages) = take_preflight_pdf(report)?;
-            let out_bytes = pdf::compress_pdf(&bytes)?;
+            let out_bytes = pdf::compress_pdf_cancellable(&bytes, None, cancel)?;
             save_single_output(
                 job,
                 "pdf",
                 &out_bytes,
                 Expect::format(Format::Pdf).pages(pages),
+                ctx,
             )
         }
         DesktopToolOptions::SplitPdf { ranges } => {
             let (bytes, pages) = take_preflight_pdf(report)?;
-            let parts = pdf::split_pdf(&bytes, ranges)?;
-            save_split_parts(job, ranges, pages, parts)
+            let parts = pdf::split_pdf_with_password(&bytes, ranges, None, cancel)?;
+            save_split_parts(job, ranges, pages, parts, ctx)
         }
         DesktopToolOptions::ReorderPdf { order } => {
             let (bytes, pages) = take_preflight_pdf(report)?;
-            let out_bytes = pdf::reorder_pdf(&bytes, order)?;
+            let out_bytes = pdf::reorder_pdf_with_password(&bytes, order, None, cancel)?;
             save_single_output(
                 job,
                 "pdf",
                 &out_bytes,
                 Expect::format(Format::Pdf).pages(pages),
+                ctx,
             )
         }
         DesktopToolOptions::ConvertAudio {
@@ -1686,6 +1783,7 @@ fn process_job(job: &JobRecord) -> Result<PathBuf, RefractError> {
             }
             let probe: verify::DurationProbe = &audio::probe_duration;
             let check = |out: &Path| {
+                ctx.begin_verify()?;
                 verify::verify_audio_file(out, &expect, input_secs.is_some().then_some(probe))
             };
             audio::convert_audio_to(
@@ -1696,7 +1794,7 @@ fn process_job(job: &JobRecord) -> Result<PathBuf, RefractError> {
                 },
                 *target,
                 *bitrate_kbps,
-                &CancelToken::none(),
+                cancel,
                 &check,
             )
         }
@@ -1713,11 +1811,14 @@ fn process_job(job: &JobRecord) -> Result<PathBuf, RefractError> {
             let range = audio::resolve_trim_range(
                 Some(start_arg.as_str()),
                 end_arg.as_deref(),
-                audio::probe_duration(&job.input_path)?,
+                audio::probe_duration_cancellable(&job.input_path, cancel)?,
             )?;
             let expect = Expect::format(detected_format).duration(range.expected_duration_secs);
             let probe: verify::DurationProbe = &audio::probe_duration;
-            let check = |out: &Path| verify::verify_audio_file(out, &expect, Some(probe));
+            let check = |out: &Path| {
+                ctx.begin_verify()?;
+                verify::verify_audio_file(out, &expect, Some(probe))
+            };
             audio::trim_audio_to(
                 &job.input_path,
                 audio::AudioOutput::Unique {
@@ -1727,7 +1828,7 @@ fn process_job(job: &JobRecord) -> Result<PathBuf, RefractError> {
                 Some(start_arg.as_str()),
                 end_arg.as_deref(),
                 Some(*bitrate_kbps),
-                &CancelToken::none(),
+                cancel,
                 &check,
             )
         }
@@ -1735,9 +1836,10 @@ fn process_job(job: &JobRecord) -> Result<PathBuf, RefractError> {
     }
 }
 
-fn process_job_with_password(
+fn process_job_with_password_in(
     job: &JobRecord,
     password: &SecretPassword,
+    ctx: &RunCtx<'_>,
 ) -> Result<PathBuf, RefractError> {
     let password = password.as_str();
     match job.request.options() {
@@ -1759,34 +1861,68 @@ fn process_job_with_password(
         }
     }
 
-    let report = preflight_inputs(&job.request, &[job.input_path.as_path()], Some(password))?;
+    let report = preflight_then_work(
+        &job.request,
+        &[job.input_path.as_path()],
+        single_password(Some(password)),
+        ctx,
+    )?;
     let (bytes, pages) = take_preflight_pdf(report)?;
     let same_pages = Expect::format(Format::Pdf).pages(pages);
+    let cancel = ctx.cancel;
 
     match job.request.options() {
         DesktopToolOptions::CompressPdf => {
-            let out_bytes = pdf::compress_pdf_with_password(&bytes, password)?;
-            save_single_output(job, "pdf", &out_bytes, same_pages)
+            let out_bytes = pdf::compress_pdf_cancellable(&bytes, Some(password), cancel)?;
+            save_single_output(job, "pdf", &out_bytes, same_pages, ctx)
         }
         DesktopToolOptions::PdfToImages { target, dpi } => {
-            render_or_extract_pdf_images(job, &bytes, pages, *target, *dpi, Some(password))
+            render_or_extract_pdf_images(job, &bytes, pages, *target, *dpi, Some(password), ctx)
         }
         DesktopToolOptions::SplitPdf { ranges } => {
-            let parts =
-                pdf::split_pdf_with_password(&bytes, ranges, Some(password), &CancelToken::none())?;
-            save_split_parts(job, ranges, pages, parts)
+            let parts = pdf::split_pdf_with_password(&bytes, ranges, Some(password), cancel)?;
+            save_split_parts(job, ranges, pages, parts, ctx)
         }
         DesktopToolOptions::ReorderPdf { order } => {
-            let out_bytes = pdf::reorder_pdf_with_password(
-                &bytes,
-                order,
-                Some(password),
-                &CancelToken::none(),
-            )?;
-            save_single_output(job, "pdf", &out_bytes, same_pages)
+            let out_bytes = pdf::reorder_pdf_with_password(&bytes, order, Some(password), cancel)?;
+            save_single_output(job, "pdf", &out_bytes, same_pages, ctx)
         }
         _ => unreachable!(),
     }
+}
+
+/// Test helpers: run without a store, a cancel request or stage reporting.
+#[cfg(test)]
+fn process_job(job: &JobRecord) -> Result<PathBuf, RefractError> {
+    let cancel = CancelToken::none();
+    process_job_in(job, &RunCtx::new(&cancel, &|_| {}))
+}
+
+#[cfg(test)]
+fn process_job_with_password(
+    job: &JobRecord,
+    password: &SecretPassword,
+) -> Result<PathBuf, RefractError> {
+    let cancel = CancelToken::none();
+    process_job_with_password_in(job, password, &RunCtx::new(&cancel, &|_| {}))
+}
+
+#[cfg(test)]
+fn execute_batch_merge_pdf(
+    jobs: &[JobRecord],
+    request: &JobRequest,
+) -> Result<PathBuf, RefractError> {
+    let cancel = CancelToken::none();
+    execute_batch_merge_pdf_in(jobs, request, &RunCtx::new(&cancel, &|_| {}))
+}
+
+#[cfg(test)]
+fn execute_batch_images_to_pdf(
+    jobs: &[JobRecord],
+    request: &JobRequest,
+) -> Result<PathBuf, RefractError> {
+    let cancel = CancelToken::none();
+    execute_batch_images_to_pdf_in(jobs, request, &RunCtx::new(&cancel, &|_| {}))
 }
 
 #[cfg(test)]
@@ -1844,7 +1980,7 @@ mod tests {
             request: JobRequest::new(tool, options, destination).unwrap(),
             last_batch_member_ids: Vec::new(),
             awaiting_password: false,
-            status: JobStatus::Waiting,
+            status: JobState::Queued,
             error: String::new(),
             output_path: PathBuf::new(),
             progress: 0.0,
@@ -1970,14 +2106,102 @@ mod tests {
     }
 
     #[test]
+    fn final_state_follows_the_state_table() {
+        let ok: Result<PathBuf, RefractError> = Ok(PathBuf::from("out.png"));
+        let err = |code| -> Result<PathBuf, RefractError> { Err(RefractError::new(code, "x")) };
+        assert_eq!(final_state(JobState::Verifying, &ok), JobState::Saved);
+        for reached in [JobState::Probing, JobState::Running, JobState::Verifying] {
+            assert_eq!(
+                final_state(reached, &err(ErrorCode::Canceled)),
+                JobState::Canceled
+            );
+        }
+        assert_eq!(
+            final_state(JobState::Probing, &err(ErrorCode::NeedsPassword)),
+            JobState::NeedsPassword
+        );
+        assert_eq!(
+            final_state(JobState::Probing, &err(ErrorCode::LimitExceeded)),
+            JobState::Rejected
+        );
+        assert_eq!(
+            final_state(JobState::Running, &err(ErrorCode::EngineFailed)),
+            JobState::Failed
+        );
+        assert_eq!(
+            final_state(JobState::Verifying, &err(ErrorCode::VerificationFailed)),
+            JobState::Failed
+        );
+        // Every result is reachable through a legal transition from the stage it comes from.
+        for (reached, result) in [
+            (JobState::Verifying, ok.clone()),
+            (JobState::Probing, err(ErrorCode::WrongPassword)),
+            (JobState::Probing, err(ErrorCode::DamagedFile)),
+            (JobState::Running, err(ErrorCode::Canceled)),
+            (JobState::Running, err(ErrorCode::LimitExceeded)),
+        ] {
+            assert!(reached.can_transition(final_state(reached, &result)));
+        }
+    }
+
+    #[test]
+    fn cancel_at_running_or_verifying_ends_canceled_with_no_output() {
+        for cancel_at in [JobState::Running, JobState::Verifying] {
+            let dir = tempfile::tempdir().unwrap();
+            let input = dir.path().join("plain.png");
+            std::fs::copy(fixture_path("plain.png"), &input).unwrap();
+            let job = record_for(
+                input,
+                ToolId::ConvertImage,
+                DesktopToolOptions::ConvertImage {
+                    target: Format::Webp,
+                    quality: 80,
+                },
+                OutputDestination::NextToSource,
+            );
+            let store = Arc::new(Mutex::new(vec![job.clone()]));
+            begin_probing(&mut store.lock().unwrap(), &[job.id]);
+
+            let cancel = CancelToken::new();
+            let seen = std::cell::RefCell::new(Vec::new());
+            let res = {
+                let on_stage = |s: JobState| {
+                    seen.borrow_mut().push(s);
+                    // The user presses Cancel the moment the run reaches this stage.
+                    if s == cancel_at {
+                        cancel.cancel();
+                    }
+                };
+                let ctx = RunCtx::new(&cancel, &on_stage);
+                process_job_in(&job, &ctx)
+            };
+            assert_eq!(res.as_ref().unwrap_err().code, ErrorCode::Canceled);
+            {
+                let mut guard = store.lock().unwrap();
+                // Apply as the runner does, from the stage the run reached.
+                let reached = *seen.borrow().last().unwrap();
+                set_state(&mut guard[0], JobState::Running);
+                if reached == JobState::Verifying {
+                    set_state(&mut guard[0], JobState::Verifying);
+                }
+                apply_result_to_jobs(&mut guard, &[job.id], &res);
+                assert_eq!(guard[0].status, JobState::Canceled);
+            }
+            assert_eq!(dir_names(dir.path()), vec!["plain.png"], "{:?}", cancel_at);
+        }
+    }
+
+    #[test]
     fn rejected_output_is_never_saved() {
         let dir = tempfile::tempdir().unwrap();
         let job = pdf_job_in(dir.path());
+        let cancel = CancelToken::none();
         let err = save_single_output(
             &job,
             "pdf",
             b"%PDF-1.7 truncated",
             Expect::format(Format::Pdf),
+            &RunCtx::new(&cancel, &|_| {}),
         )
         .unwrap_err();
         assert_eq!(err.code, ErrorCode::VerificationFailed);
@@ -1994,8 +2218,13 @@ mod tests {
             ("b.pdf".to_string(), b"not a pdf".as_slice()),
             ("c.pdf".to_string(), good.as_slice()),
         ];
-        let err =
-            save_checked_outputs(&job, &outputs, &[Expect::format(Format::Pdf); 3]).unwrap_err();
+        let err = save_checked_outputs(
+            &job,
+            &outputs,
+            &[Expect::format(Format::Pdf); 3],
+            &RunCtx::new(&CancelToken::none(), &|_| {}),
+        )
+        .unwrap_err();
         assert_eq!(err.code, ErrorCode::VerificationFailed);
         assert_eq!(
             err.details.as_deref(),
@@ -2267,14 +2496,14 @@ mod tests {
                 vec![fixture_path("plain.png")],
                 &req_single,
             );
-            guard[0].status = JobStatus::Failed;
+            guard[0].status = JobState::Failed;
             guard[0].error = "simulated transient failure".into();
         }
 
-        execute_retry_in_store(&store, 1, None);
+        execute_retry_in_store(&store, 1, &CancelToken::none(), None);
         {
             let guard = store.lock().unwrap();
-            assert_eq!(guard[0].status, JobStatus::Done);
+            assert_eq!(guard[0].status, JobState::Saved);
             assert_eq!(guard[0].output_path.parent(), Some(out_dir.path()));
             assert_eq!(
                 refract_core::detect(&std::fs::read(&guard[0].output_path).unwrap()),
@@ -2297,17 +2526,17 @@ mod tests {
                 vec![fixture_path("plain.pdf"), fixture_path("5pages.pdf")],
                 &req_merge,
             );
-            guard[1].status = JobStatus::Failed;
-            guard[2].status = JobStatus::Failed;
+            guard[1].status = JobState::Failed;
+            guard[2].status = JobState::Failed;
             guard[1].last_batch_member_ids = vec![2, 3];
             guard[2].last_batch_member_ids = vec![2, 3];
         }
 
-        execute_retry_in_store(&store, 2, None);
+        execute_retry_in_store(&store, 2, &CancelToken::none(), None);
         {
             let guard = store.lock().unwrap();
-            assert_eq!(guard[1].status, JobStatus::Done);
-            assert_eq!(guard[2].status, JobStatus::Done);
+            assert_eq!(guard[1].status, JobState::Saved);
+            assert_eq!(guard[2].status, JobState::Saved);
             assert_eq!(guard[1].output_path, guard[2].output_path);
             let merged_bytes = std::fs::read(&guard[1].output_path).unwrap();
             assert_eq!(pdf::probe_pdf(&merged_bytes).unwrap().page_count, 8);
@@ -2331,17 +2560,17 @@ mod tests {
                 vec![fixture_path("plain.png"), fixture_path("plain.jpg")],
                 &req_imgs,
             );
-            guard[3].status = JobStatus::Failed;
-            guard[4].status = JobStatus::Failed;
+            guard[3].status = JobState::Failed;
+            guard[4].status = JobState::Failed;
             guard[3].last_batch_member_ids = vec![4, 5];
             guard[4].last_batch_member_ids = vec![4, 5];
         }
 
-        execute_retry_in_store(&store, 4, None);
+        execute_retry_in_store(&store, 4, &CancelToken::none(), None);
         {
             let guard = store.lock().unwrap();
-            assert_eq!(guard[3].status, JobStatus::Done);
-            assert_eq!(guard[4].status, JobStatus::Done);
+            assert_eq!(guard[3].status, JobState::Saved);
+            assert_eq!(guard[4].status, JobState::Saved);
             assert_eq!(guard[3].output_path, guard[4].output_path);
             let pdf_bytes = std::fs::read(&guard[3].output_path).unwrap();
             assert_eq!(pdf::probe_pdf(&pdf_bytes).unwrap().page_count, 2);
@@ -2672,7 +2901,7 @@ mod tests {
                 vec![fixture_path("locked.pdf")],
                 &req,
             );
-            guard[0].status = JobStatus::NeedsPassword;
+            guard[0].status = JobState::NeedsPassword;
         }
 
         // Unknown job releases busy flag cleanly
@@ -2720,7 +2949,7 @@ mod tests {
             );
             // Record original batch order [1, 2, 3] and simulate failed batch
             for j in guard.iter_mut() {
-                j.status = JobStatus::Failed;
+                j.status = JobState::Failed;
                 j.last_batch_member_ids = vec![1, 2, 3];
             }
             // Reorder the job store in UI to [3, 1, 2]
@@ -2732,10 +2961,10 @@ mod tests {
         }
 
         // Retry via job 2 (now last in UI order)
-        execute_retry_in_store(&store, 2, None);
+        execute_retry_in_store(&store, 2, &CancelToken::none(), None);
 
         let guard = store.lock().unwrap();
-        assert!(guard.iter().all(|j| j.status == JobStatus::Done));
+        assert!(guard.iter().all(|j| j.status == JobState::Saved));
         let out_path = guard[0].output_path.clone();
         assert!(guard.iter().all(|j| j.output_path == out_path));
         assert_eq!(out_path.parent(), Some(out_dir.path()));
@@ -2774,19 +3003,19 @@ mod tests {
                 &merge_req,
             );
             for j in guard.iter_mut() {
-                j.status = JobStatus::Failed;
+                j.status = JobState::Failed;
                 j.last_batch_member_ids = vec![1, 2, 3];
             }
             // Delete member 2 before retrying
             guard.retain(|j| j.id != 2);
         }
 
-        execute_retry_in_store(&store, 1, None);
+        execute_retry_in_store(&store, 1, &CancelToken::none(), None);
 
         let guard = store.lock().unwrap();
         assert_eq!(guard.len(), 2);
         for j in guard.iter() {
-            assert_eq!(j.status, JobStatus::Failed);
+            assert_eq!(j.status, JobState::Failed);
             assert!(
                 j.error.contains("missing") || j.error.contains("removed"),
                 "unexpected error: {}",
@@ -2833,7 +3062,7 @@ mod tests {
             assert_eq!(err.code, ErrorCode::NeedsPassword);
             let mut guard = store.lock().unwrap();
             for j in guard.iter_mut() {
-                j.status = JobStatus::NeedsPassword;
+                j.status = JobState::NeedsPassword;
                 j.error = err.message.clone();
             }
             // Reorder the UI store to [2, 1] before unlocking
@@ -2850,6 +3079,7 @@ mod tests {
             &Mutex::new(JobSecretStore::new()),
             wrong_claim,
             SecretPassword::new("wrong-pw"),
+            &CancelToken::none(),
             None,
         );
         is_busy.store(false, Ordering::SeqCst);
@@ -2857,7 +3087,7 @@ mod tests {
         {
             let guard = store.lock().unwrap();
             for j in guard.iter() {
-                assert_eq!(j.status, JobStatus::NeedsPassword);
+                assert_eq!(j.status, JobState::NeedsPassword);
                 // The message names the file the wrong password was entered for.
                 assert!(
                     j.error.contains("did not unlock 'enc_first.pdf'"),
@@ -2878,6 +3108,7 @@ mod tests {
             &Mutex::new(JobSecretStore::new()),
             right_claim,
             SecretPassword::new("user-pw-123"),
+            &CancelToken::none(),
             None,
         )
         .unwrap();
@@ -2891,7 +3122,7 @@ mod tests {
 
         let guard = store.lock().unwrap();
         for j in guard.iter() {
-            assert_eq!(j.status, JobStatus::Done);
+            assert_eq!(j.status, JobState::Saved);
             assert_eq!(j.output_path, out_path);
             assert!(j.error.is_empty());
         }
@@ -2929,7 +3160,7 @@ mod tests {
                 &merge_req,
             );
             for j in guard.iter_mut() {
-                j.status = JobStatus::NeedsPassword;
+                j.status = JobState::NeedsPassword;
                 j.last_batch_member_ids = vec![1, 2, 3, 4];
             }
             // Reverse UI store to [4, 3, 2, 1]
@@ -2944,6 +3175,7 @@ mod tests {
             &Mutex::new(JobSecretStore::new()),
             claim,
             SecretPassword::new("user-pw-123"),
+            &CancelToken::none(),
             None,
         )
         .unwrap();
@@ -2956,7 +3188,7 @@ mod tests {
         assert_eq!(page_embedded_image_dims(&merged_bytes, 8), (128, 48));
 
         let guard = store.lock().unwrap();
-        assert!(guard.iter().all(|j| j.status == JobStatus::Done));
+        assert!(guard.iter().all(|j| j.status == JobState::Saved));
         assert!(guard.iter().all(|j| j.output_path == out_path));
     }
 
@@ -3021,12 +3253,17 @@ mod tests {
             for j in jobs.iter_mut() {
                 j.last_batch_member_ids = ids.clone();
             }
-            let result = execute_batch_merge_pdf(&jobs, &request);
-            apply_result_to_jobs(&mut jobs, &ids, &result);
+            // Same path as "Process all": Probing, then the run reports stages and the result.
+            begin_probing(&mut jobs, &ids);
+            let members = jobs.clone();
+            let store = Arc::new(Mutex::new(jobs));
+            let result = run_unit(&store, &ids, &CancelToken::none(), None, |ctx| {
+                execute_batch_merge_pdf_in(&members, &request, ctx)
+            });
             let fixture = Self {
                 _work: work,
                 out,
-                store: Arc::new(Mutex::new(jobs)),
+                store,
                 secrets: Mutex::new(JobSecretStore::new()),
                 busy: AtomicBool::new(false),
             };
@@ -3043,6 +3280,7 @@ mod tests {
                 &self.secrets,
                 claim,
                 SecretPassword::new(password),
+                &CancelToken::none(),
                 None,
             );
             self.busy.store(false, Ordering::SeqCst);
@@ -3246,10 +3484,10 @@ mod tests {
                 &unrelated_req,
             );
             for j in &mut guard[..2] {
-                j.status = JobStatus::NeedsPassword;
+                j.status = JobState::NeedsPassword;
                 j.last_batch_member_ids = vec![1, 2];
             }
-            guard[2].status = JobStatus::NeedsPassword;
+            guard[2].status = JobState::NeedsPassword;
         }
 
         let err = try_claim_password_unlock(&store_incompat, &is_busy, 1, None)
@@ -3260,12 +3498,12 @@ mod tests {
         assert!(!is_busy.load(Ordering::SeqCst));
         {
             let guard = store_incompat.lock().unwrap();
-            assert_eq!(guard[0].status, JobStatus::Failed);
+            assert_eq!(guard[0].status, JobState::Rejected);
             assert!(guard[0].error.contains("incompatible"));
-            assert_eq!(guard[1].status, JobStatus::Failed);
+            assert_eq!(guard[1].status, JobState::Rejected);
             assert!(guard[1].error.contains("incompatible"));
             // Unrelated job 3 must stay untouched in NeedsPassword
-            assert_eq!(guard[2].status, JobStatus::NeedsPassword);
+            assert_eq!(guard[2].status, JobState::NeedsPassword);
             assert!(guard[2].error.is_empty());
         }
 
@@ -3281,7 +3519,7 @@ mod tests {
                 &req_a,
             );
             for j in guard.iter_mut() {
-                j.status = JobStatus::NeedsPassword;
+                j.status = JobState::NeedsPassword;
                 j.last_batch_member_ids = vec![1, 2];
             }
             guard.retain(|j| j.id != 2);
@@ -3295,7 +3533,7 @@ mod tests {
         assert!(!is_busy.load(Ordering::SeqCst));
         {
             let guard = store_missing.lock().unwrap();
-            assert_eq!(guard[0].status, JobStatus::Failed);
+            assert_eq!(guard[0].status, JobState::Rejected);
             assert!(
                 guard[0].error.contains("missing") || guard[0].error.contains("removed"),
                 "unexpected error: {}",
@@ -3306,10 +3544,10 @@ mod tests {
 
         // 3. Password unlock refuses targets not in NeedsPassword without mutating their status
         for non_unlock_status in [
-            JobStatus::Waiting,
-            JobStatus::Working,
-            JobStatus::Done,
-            JobStatus::Failed,
+            JobState::Queued,
+            JobState::Running,
+            JobState::Saved,
+            JobState::Failed,
         ] {
             let store_state = Arc::new(Mutex::new(Vec::new()));
             let mut next_id_3 = 1;
@@ -3321,7 +3559,7 @@ mod tests {
                     vec![fixture_path("locked.pdf")],
                     &unrelated_req,
                 );
-                guard[0].status = non_unlock_status.clone();
+                guard[0].status = non_unlock_status;
             }
             let status_err = try_claim_password_unlock(&store_state, &is_busy, 1, None)
                 .unwrap()

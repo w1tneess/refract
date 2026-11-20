@@ -299,25 +299,8 @@ fn detect_and_validate_format(
     Ok(format)
 }
 
-/// Run Desktop input limits & resource preflight using canonical `refract-core` Desktop limits.
-pub fn preflight_inputs(
-    request: &JobRequest,
-    paths: &[&Path],
-    password: Option<&str>,
-) -> Result<PreflightReport, RefractError> {
-    let limits = limits_for_tool(request.tool(), Platform::Desktop);
-    let budget = memory_budget_bytes(Platform::Desktop);
-    preflight_inputs_with(
-        request,
-        paths,
-        password,
-        &limits,
-        budget,
-        &NativePreflightProbe,
-    )
-}
-
-/// Like [`preflight_inputs`], with a password per PDF input (merge-pdf unlock).
+/// Run Desktop input limits & resource preflight (canonical `refract-core` Desktop limits), with
+/// the passwords available for PDF inputs (one for all, per input, and guesses for merge-pdf).
 pub fn preflight_inputs_with_passwords(
     request: &JobRequest,
     paths: &[&Path],
@@ -335,7 +318,25 @@ pub fn preflight_inputs_with_passwords(
     )
 }
 
-/// Run preflight with explicit limits, memory budget, and injectable [`PreflightProbe`].
+/// [`preflight_inputs_with_passwords`] with one optional password for every input (tests).
+#[cfg(test)]
+pub fn preflight_inputs(
+    request: &JobRequest,
+    paths: &[&Path],
+    password: Option<&str>,
+) -> Result<PreflightReport, RefractError> {
+    preflight_inputs_with_passwords(
+        request,
+        paths,
+        PdfPasswords {
+            all: password,
+            ..Default::default()
+        },
+    )
+}
+
+/// Run preflight with explicit limits, memory budget, and injectable [`PreflightProbe`] (tests).
+#[cfg(test)]
 pub fn preflight_inputs_with<P: PreflightProbe>(
     request: &JobRequest,
     paths: &[&Path],

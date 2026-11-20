@@ -553,6 +553,8 @@ pub fn convert_audio_to_with_binary(
     }
 
     check(temp_file.as_ref())?;
+    // A cancel during the check (finalization) must still leave no output.
+    cancel.check()?;
     output.persist(temp_file)
 }
 
@@ -680,6 +682,8 @@ pub fn trim_audio_to_with_binaries(
     }
 
     check(temp_file.as_ref())?;
+    // A cancel during the check (finalization) must still leave no output.
+    cancel.check()?;
     output.persist(temp_file)
 }
 
