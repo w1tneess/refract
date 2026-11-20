@@ -21,14 +21,14 @@ impl OutputDestination {
         if next_to_source {
             return Ok(Self::NextToSource);
         }
-        let trimmed = folder.trim();
-        if trimmed.is_empty() {
+        // Trim only to detect a blank entry: folder names may legitimately end in spaces.
+        if folder.trim().is_empty() {
             return Err(RefractError::new(
                 ErrorCode::InvalidOption,
                 "Choose an output folder or enable 'Save next to source file'.",
             ));
         }
-        Ok(Self::Directory(PathBuf::from(trimmed)))
+        Ok(Self::Directory(PathBuf::from(folder)))
     }
 
     /// Validate that the destination is well-formed.
@@ -85,7 +85,9 @@ impl TrimEnd {
     pub fn to_engine_arg(self) -> Option<String> {
         match self {
             Self::EndOfFile => None,
-            Self::AtSeconds(secs) => Some(format!("{:.3}", secs)),
+            // Round-trippable (not rounded to ms), so a tiny positive end never becomes "0"
+            // (end of file); the engine does its own FFmpeg argument formatting.
+            Self::AtSeconds(secs) => Some(secs.to_string()),
         }
     }
 }
@@ -350,8 +352,11 @@ fn validate_reorder_syntax(raw: &str) -> Result<(), RefractError> {
         ));
     }
     let mut seen = HashSet::new();
-    for part in trimmed.split(',') {
-        let token = part.trim();
+    // Same tokenization as `pdf::parse_order`: commas and/or whitespace ("3 1 2", "3, 1, 2").
+    for token in trimmed
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|t| !t.is_empty())
+    {
         let page: u32 = token.parse().map_err(|_| {
             RefractError::new(
                 ErrorCode::InvalidOption,
@@ -995,6 +1000,32 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn output_folder_keeps_trailing_spaces_and_rejects_blank() {
+        assert_eq!(
+            OutputDestination::from_ui(false, "C:/Exports ").unwrap(),
+            OutputDestination::Directory(PathBuf::from("C:/Exports "))
+        );
+        assert!(OutputDestination::from_ui(false, "   ").is_err());
+    }
+
+    #[test]
+    fn tiny_trim_end_stays_distinct_from_end_of_file() {
+        let end = TrimEnd::parse("0.0004").unwrap();
+        assert_eq!(end, TrimEnd::AtSeconds(0.0004));
+        let arg = end.to_engine_arg().unwrap();
+        assert!(audio::parse_timestamp(&arg).unwrap() > 0.0, "{arg}");
+        assert_eq!(TrimEnd::parse("0").unwrap().to_engine_arg(), None);
+    }
+
+    #[test]
+    fn page_order_accepts_spaces_like_the_engine() {
+        validate_reorder_syntax("3 1 2").unwrap();
+        validate_reorder_syntax("3, 1,2").unwrap();
+        assert!(validate_reorder_syntax("3 0 1").is_err());
+        assert!(validate_reorder_syntax("1 1").is_err());
+    }
 
     #[test]
     fn all_eleven_tools_have_manifest_derived_defaults() {

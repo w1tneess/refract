@@ -361,7 +361,7 @@ export component MainWindow inherits Window {
                                     background: root.ffmpeg_available ? Palette.success : Palette.text-faint;
                                 }
                                 Text {
-                                    text: root.ffmpeg_available ? "FFmpeg ready" : "No FFmpeg";
+                                    text: root.ffmpeg_available ? "FFmpeg ready" : "FFmpeg or ffprobe missing";
                                     font-size: 11px;
                                     color: Palette.text-soft;
                                     vertical-alignment: center;
@@ -842,13 +842,13 @@ export component MainWindow inherits Window {
                                                         }
                                                     }
 
-                                                    if root.current_tool_batch && job.can_remove : Button {
+                                                    if root.current_tool_batch && job.can_remove && !root.is_running : Button {
                                                         text: "↑";
                                                         width: 28px;
                                                         clicked => { root.move_job_up(job.id); }
                                                     }
 
-                                                    if root.current_tool_batch && job.can_remove : Button {
+                                                    if root.current_tool_batch && job.can_remove && !root.is_running : Button {
                                                         text: "↓";
                                                         width: 28px;
                                                         clicked => { root.move_job_down(job.id); }

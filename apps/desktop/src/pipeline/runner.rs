@@ -33,6 +33,7 @@ pub fn can_remove_or_move(state: JobState) -> bool {
 pub struct ActiveRun {
     current: Option<(Vec<i32>, CancelToken)>,
     pending_cancel: HashSet<i32>,
+    busy: bool,
 }
 
 impl ActiveRun {
@@ -49,6 +50,15 @@ impl ActiveRun {
         }
         self.current = Some((ids.to_vec(), token.clone()));
         token
+    }
+
+    /// Whether the worker is running a command (set around each command).
+    pub fn set_busy(&mut self, busy: bool) {
+        self.busy = busy;
+    }
+
+    pub fn is_busy(&self) -> bool {
+        self.busy
     }
 
     pub fn finish(&mut self, ids: &[i32]) {
