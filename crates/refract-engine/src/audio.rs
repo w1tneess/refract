@@ -419,6 +419,14 @@ impl AudioOutput<'_> {
     }
 }
 
+/// Check run on a finished audio temp file before it is saved (see [`convert_audio_to_with_binary`]).
+pub type AudioCheck<'a> = &'a dyn Fn(&Path) -> Result<(), RefractError>;
+
+/// The check used by the exact-path functions, which keep their original behavior.
+pub fn no_check(_: &Path) -> Result<(), RefractError> {
+    Ok(())
+}
+
 fn resolve_ffmpeg(action: &str) -> Result<PathBuf, RefractError> {
     which::which("ffmpeg").map_err(|_| {
         RefractError::new(
@@ -512,11 +520,14 @@ pub fn convert_audio_with_binary(
         target,
         bitrate_kbps,
         cancel,
+        &no_check,
     )
     .map(drop)
 }
 
 /// Like [`convert_audio_with_binary`], saving to `output` and returning the path written.
+/// `check` runs on the finished temp file before it is moved into place; if it fails,
+/// the temp file is removed and nothing is saved.
 pub fn convert_audio_to_with_binary(
     ffmpeg_bin: &Path,
     input: &Path,
@@ -524,6 +535,7 @@ pub fn convert_audio_to_with_binary(
     target: Format,
     bitrate_kbps: Option<u32>,
     cancel: &CancelToken,
+    check: AudioCheck<'_>,
 ) -> Result<PathBuf, RefractError> {
     cancel.check()?;
     output.reject_if_taken()?;
@@ -540,20 +552,31 @@ pub fn convert_audio_to_with_binary(
         return Err(RefractError::canceled());
     }
 
+    check(temp_file.as_ref())?;
     output.persist(temp_file)
 }
 
 /// Convert an audio file using system `ffmpeg`, saving to `output` and returning the path written.
+/// See [`convert_audio_to_with_binary`] for `check`.
 pub fn convert_audio_to(
     input: &Path,
     output: AudioOutput<'_>,
     target: Format,
     bitrate_kbps: Option<u32>,
     cancel: &CancelToken,
+    check: AudioCheck<'_>,
 ) -> Result<PathBuf, RefractError> {
     cancel.check()?;
     let ffmpeg_bin = resolve_ffmpeg("convert")?;
-    convert_audio_to_with_binary(&ffmpeg_bin, input, output, target, bitrate_kbps, cancel)
+    convert_audio_to_with_binary(
+        &ffmpeg_bin,
+        input,
+        output,
+        target,
+        bitrate_kbps,
+        cancel,
+        check,
+    )
 }
 
 /// Convert an audio file using system `ffmpeg` with cooperative cancellation.
@@ -570,6 +593,7 @@ pub fn convert_audio_cancellable(
         target,
         bitrate_kbps,
         cancel,
+        &no_check,
     )
     .map(drop)
 }
@@ -607,11 +631,13 @@ pub fn trim_audio_with_binaries(
         end,
         bitrate_kbps,
         cancel,
+        &no_check,
     )
     .map(drop)
 }
 
 /// Like [`trim_audio_with_binaries`], saving to `output` and returning the path written.
+/// See [`convert_audio_to_with_binary`] for `check`.
 #[allow(clippy::too_many_arguments)]
 pub fn trim_audio_to_with_binaries(
     ffmpeg_bin: &Path,
@@ -622,6 +648,7 @@ pub fn trim_audio_to_with_binaries(
     end: Option<&str>,
     bitrate_kbps: Option<u32>,
     cancel: &CancelToken,
+    check: AudioCheck<'_>,
 ) -> Result<PathBuf, RefractError> {
     cancel.check()?;
     output.reject_if_taken()?;
@@ -652,6 +679,7 @@ pub fn trim_audio_to_with_binaries(
         return Err(RefractError::canceled());
     }
 
+    check(temp_file.as_ref())?;
     output.persist(temp_file)
 }
 
@@ -671,12 +699,13 @@ pub fn trim_audio_cancellable(
         end,
         bitrate_kbps,
         cancel,
+        &no_check,
     )
     .map(drop)
 }
 
 /// Trim an audio file using system `ffmpeg` and `ffprobe`, saving to `output` and returning
-/// the path written.
+/// the path written. See [`convert_audio_to_with_binary`] for `check`.
 pub fn trim_audio_to(
     input: &Path,
     output: AudioOutput<'_>,
@@ -684,6 +713,7 @@ pub fn trim_audio_to(
     end: Option<&str>,
     bitrate_kbps: Option<u32>,
     cancel: &CancelToken,
+    check: AudioCheck<'_>,
 ) -> Result<PathBuf, RefractError> {
     cancel.check()?;
     let deps = detect_audio_dependencies();
@@ -708,6 +738,7 @@ pub fn trim_audio_to(
         end,
         bitrate_kbps,
         cancel,
+        check,
     )
 }
 

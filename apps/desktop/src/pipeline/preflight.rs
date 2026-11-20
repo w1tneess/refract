@@ -28,6 +28,8 @@ pub struct ValidatedInput {
     /// Already-read PDF bytes populated only after metadata, size, magic-byte, and byte-memory
     /// checks pass, avoiding redundant second disk reads.
     pub pdf_bytes: Option<Vec<u8>>,
+    /// Page count measured during preflight (PDF inputs only), reused by output verification.
+    pub page_count: Option<u32>,
 }
 
 /// Result of preflight validation for a single job or batch execution unit.
@@ -341,6 +343,7 @@ pub fn preflight_inputs_with<P: PreflightProbe>(
                 validated.push(ValidatedInput {
                     format,
                     pdf_bytes: None,
+                    page_count: None,
                 });
             }
 
@@ -433,6 +436,7 @@ pub fn preflight_inputs_with<P: PreflightProbe>(
                 validated.push(ValidatedInput {
                     format,
                     pdf_bytes: Some(bytes),
+                    page_count: Some(info.page_count),
                 });
             }
 
@@ -464,6 +468,7 @@ pub fn preflight_inputs_with<P: PreflightProbe>(
                 .map(|format| ValidatedInput {
                     format,
                     pdf_bytes: None,
+                    page_count: None,
                 })
                 .collect();
 

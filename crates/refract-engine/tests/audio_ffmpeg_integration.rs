@@ -270,6 +270,7 @@ fn live_unique_audio_output_numbers_taken_names_without_overwriting() {
         Format::Mp3,
         Some(192),
         &CancelToken::none(),
+        &audio::no_check,
     )
     .expect("convert into numbered name");
     assert_eq!(out, dir.path().join("sound (converted) (2).mp3"));
@@ -291,6 +292,7 @@ fn live_unique_audio_output_numbers_taken_names_without_overwriting() {
         Some("1.5"),
         None,
         &CancelToken::none(),
+        &audio::no_check,
     )
     .expect("trim into numbered name");
     assert_eq!(trimmed, dir.path().join("sound_trimmed (2).wav"));
@@ -307,4 +309,55 @@ fn live_unique_audio_output_numbers_taken_names_without_overwriting() {
         })
         .count();
     assert_eq!(leftovers, 0);
+}
+
+#[test]
+#[ignore = "requires ffmpeg and ffprobe on PATH"]
+fn live_failed_audio_check_saves_nothing() {
+    require_audio_toolchain();
+    let dir = tempfile::tempdir().unwrap();
+    let reject = |_: &std::path::Path| {
+        Err(refract_core::error::RefractError::new(
+            ErrorCode::VerificationFailed,
+            "rejected by test",
+        ))
+    };
+    let seen = std::cell::Cell::new(false);
+    let inspect = |p: &std::path::Path| {
+        // The check sees FFmpeg's finished temp file, before anything is saved.
+        assert!(std::fs::metadata(p).unwrap().len() > 0);
+        seen.set(true);
+        reject(p)
+    };
+
+    let err = audio::convert_audio_to(
+        &fixture_path("sound.wav"),
+        audio::AudioOutput::Unique {
+            dir: dir.path(),
+            name: "out.mp3",
+        },
+        Format::Mp3,
+        None,
+        &CancelToken::none(),
+        &inspect,
+    )
+    .unwrap_err();
+    assert_eq!(err.code, ErrorCode::VerificationFailed);
+    assert!(seen.get());
+
+    let err = audio::trim_audio_to(
+        &fixture_path("sound.wav"),
+        audio::AudioOutput::Unique {
+            dir: dir.path(),
+            name: "out.wav",
+        },
+        Some("0.5"),
+        None,
+        None,
+        &CancelToken::none(),
+        &reject,
+    )
+    .unwrap_err();
+    assert_eq!(err.code, ErrorCode::VerificationFailed);
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
 }

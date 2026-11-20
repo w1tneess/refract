@@ -1,5 +1,6 @@
 pub mod options;
 pub mod preflight;
+pub mod verify;
 
 pub use options::{
     plan_execution_units, resolve_recorded_batch_indices, select_batch_retry_indices,

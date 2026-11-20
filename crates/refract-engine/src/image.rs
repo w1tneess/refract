@@ -258,9 +258,44 @@ fn is_heic(bytes: &[u8]) -> bool {
     refract_core::detect(bytes) == Some(Format::Heic)
 }
 
+/// Whether a JPEG still carries an EXIF block (an APP1 segment starting `Exif\0\0`) before its
+/// first scan. Mirrors `readJpegInfo` in `packages/core/src/verify/verify.ts`.
+pub fn jpeg_has_exif(bytes: &[u8]) -> bool {
+    if bytes.len() < 4 || bytes[0] != 0xFF || bytes[1] != 0xD8 {
+        return false;
+    }
+    let mut p = 2usize;
+    while p + 4 <= bytes.len() {
+        if bytes[p] != 0xFF {
+            return false;
+        }
+        let marker = bytes[p + 1];
+        if marker == 0xFF {
+            p += 1;
+            continue;
+        }
+        if marker == 0x01 || (0xD0..=0xD8).contains(&marker) {
+            p += 2;
+            continue;
+        }
+        if marker == 0xDA {
+            return false;
+        }
+        let len = u16::from_be_bytes([bytes[p + 2], bytes[p + 3]]) as usize;
+        if len < 2 {
+            return false;
+        }
+        if marker == 0xE1 && bytes.get(p + 4..p + 10) == Some(b"Exif\0\0".as_slice()) {
+            return true;
+        }
+        p += 2 + len;
+    }
+    false
+}
+
 /// Verify that a JPEG byte stream reaches an authentic End-Of-Image (`0xFF 0xD9`) marker
 /// rather than ending mid-header or mid-scan (since `zune-jpeg` permits truncated scans by default).
-fn jpeg_has_complete_eoi(bytes: &[u8]) -> bool {
+pub fn jpeg_has_complete_eoi(bytes: &[u8]) -> bool {
     if bytes.len() < 4 || bytes[0] != 0xFF || bytes[1] != 0xD8 {
         return false;
     }

@@ -91,6 +91,25 @@ mod tests {
     }
 
     #[test]
+    fn jpeg_output_checks_pass_engine_outputs_and_flag_exif_sources() {
+        let plain_png = std::fs::read(fixture_path("plain.png")).unwrap();
+        let rotated = std::fs::read(fixture_path("rotated.jpg")).unwrap();
+        let outputs = [
+            image::convert_image(&plain_png, Format::Jpeg, Some(85)).unwrap(),
+            image::convert_image(&rotated, Format::Jpeg, Some(85)).unwrap(),
+            image::compress_image(&rotated, 20).unwrap(),
+        ];
+        for out in &outputs {
+            assert!(image::jpeg_has_complete_eoi(out));
+            assert!(!image::jpeg_has_exif(out));
+        }
+        assert!(image::jpeg_has_exif(&rotated));
+        assert!(!image::jpeg_has_complete_eoi(
+            &outputs[0][..outputs[0].len() - 2]
+        ));
+    }
+
+    #[test]
     fn test_audio_parse_timestamp() {
         assert_eq!(audio::parse_timestamp("90").unwrap(), 90.0);
         assert_eq!(audio::parse_timestamp("1:30").unwrap(), 90.0);
