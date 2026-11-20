@@ -9,6 +9,13 @@ export struct JobEntry {
     error: string,
     output_path: string,
     progress: float,
+    // Computed in Rust from the job's state so the UI never compares status text.
+    tone: string,
+    can_retry: bool,
+    can_cancel: bool,
+    can_unlock: bool,
+    can_remove: bool,
+    can_open: bool,
 }
 
 export struct ToolSpec {
@@ -725,6 +732,11 @@ export component MainWindow inherits Window {
                                         clicked => { root.start_processing(); }
                                     }
 
+                                    if root.is_running : Button {
+                                        text: "Cancel all";
+                                        clicked => { root.cancel_all(); }
+                                    }
+
                                     Button {
                                         text: "Clear queue";
                                         enabled: !root.is_running;
@@ -811,54 +823,59 @@ export component MainWindow inherits Window {
                                                                 height: 6px;
                                                                 y: (parent.height - self.height) / 2;
                                                                 border-radius: 3px;
-                                                                background: job.status == "Done" ? Palette.success
-                                                                    : (job.status == "Failed" ? Palette.error
-                                                                    : (job.status == "Needs Password" ? Palette.warning
-                                                                    : (job.status == "Working…" ? Palette.accent : Palette.text-faint)));
+                                                                background: job.tone == "success" ? Palette.success
+                                                                    : (job.tone == "error" ? Palette.error
+                                                                    : (job.tone == "warning" ? Palette.warning
+                                                                    : (job.tone == "active" ? Palette.accent : Palette.text-faint)));
                                                             }
 
                                                             Text {
                                                                 text: job.status;
                                                                 font-size: 12px;
                                                                 font-weight: 500;
-                                                                color: job.status == "Done" ? Palette.success
-                                                                    : (job.status == "Failed" ? Palette.error
-                                                                    : (job.status == "Needs Password" ? Palette.warning
-                                                                    : (job.status == "Working…" ? Palette.accent-ink : Palette.text-soft)));
+                                                                color: job.tone == "success" ? Palette.success
+                                                                    : (job.tone == "error" ? Palette.error
+                                                                    : (job.tone == "warning" ? Palette.warning
+                                                                    : (job.tone == "active" ? Palette.accent-ink : Palette.text-soft)));
                                                                 vertical-alignment: center;
                                                             }
                                                         }
                                                     }
 
-                                                    if root.current_tool_batch && !root.is_running : Button {
+                                                    if root.current_tool_batch && job.can_remove : Button {
                                                         text: "↑";
                                                         width: 28px;
                                                         clicked => { root.move_job_up(job.id); }
                                                     }
 
-                                                    if root.current_tool_batch && !root.is_running : Button {
+                                                    if root.current_tool_batch && job.can_remove : Button {
                                                         text: "↓";
                                                         width: 28px;
                                                         clicked => { root.move_job_down(job.id); }
                                                     }
 
-                                                    if job.status == "Done" && job.output_path != "" : Button {
+                                                    if job.can_open : Button {
                                                         text: "Show in folder";
                                                         clicked => { root.open_output_folder(job.output_path); }
                                                     }
 
-                                                    if job.status == "Failed" : Button {
+                                                    if job.can_retry : Button {
                                                         text: "Retry";
                                                         clicked => { root.retry_job(job.id); }
                                                     }
 
-                                                    if job.status == "Needs Password" : Button {
+                                                    if job.can_unlock : Button {
                                                         text: "Unlock…";
                                                         primary: true;
                                                         clicked => { root.show_password_dialog_cb(job.id, job.error); }
                                                     }
 
-                                                    if job.status != "Working…" : Button {
+                                                    if job.can_cancel : Button {
+                                                        text: "Cancel";
+                                                        clicked => { root.cancel_job(job.id); }
+                                                    }
+
+                                                    if job.can_remove : Button {
                                                         text: "×";
                                                         width: 28px;
                                                         clicked => { root.remove_job(job.id); }
@@ -869,7 +886,8 @@ export component MainWindow inherits Window {
                                             if job.error != "" : Text {
                                                 text: job.error;
                                                 font-size: 12px;
-                                                color: job.status == "Needs Password" ? Palette.warning : Palette.error;
+                                                color: job.tone == "warning" ? Palette.warning
+                                                    : (job.tone == "muted" ? Palette.text-soft : Palette.error);
                                                 wrap: word-wrap;
                                             }
                                         }

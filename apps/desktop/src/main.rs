@@ -423,17 +423,28 @@ fn job_record_to_entry(job: &JobRecord) -> slint_generatedMainWindow::JobEntry {
         name: job.name.clone().into(),
         size_text: format_size(job.size_bytes).into(),
         tool_label: job.tool_label.clone().into(),
-        status: match job.status {
-            JobState::Queued => "Waiting".into(),
-            JobState::Probing | JobState::Running | JobState::Verifying => "Working…".into(),
-            JobState::Saved => "Done".into(),
-            JobState::Failed | JobState::Rejected => "Failed".into(),
-            JobState::NeedsPassword => "Needs Password".into(),
-            JobState::Canceled => "Canceled".into(),
-        },
+        status: job.status.label().into(),
         error: job.error.clone().into(),
         output_path: job.output_path.to_string_lossy().to_string().into(),
         progress: job.progress,
+        tone: state_tone(job.status).into(),
+        can_retry: runner::can_retry(job.status),
+        can_cancel: runner::can_cancel(job.status),
+        can_unlock: job.status == JobState::NeedsPassword,
+        can_remove: runner::can_remove_or_move(job.status),
+        can_open: job.status == JobState::Saved && !job.output_path.as_os_str().is_empty(),
+    }
+}
+
+/// Colour group for a job's status badge.
+fn state_tone(state: JobState) -> &'static str {
+    match state {
+        JobState::Saved => "success",
+        JobState::Failed | JobState::Rejected => "error",
+        JobState::NeedsPassword => "warning",
+        JobState::Probing | JobState::Running | JobState::Verifying => "active",
+        JobState::Queued => "idle",
+        JobState::Canceled => "muted",
     }
 }
 
@@ -2204,6 +2215,38 @@ mod tests {
             },
             OutputDestination::Directory(dir.to_path_buf()),
         )
+    }
+
+    #[test]
+    fn job_rows_show_the_right_label_tone_and_buttons_for_every_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut job = convert_job_in(dir.path(), 1);
+        for &state in JobState::ALL {
+            job.status = state;
+            job.output_path = if state == JobState::Saved {
+                PathBuf::from("out.webp")
+            } else {
+                PathBuf::new()
+            };
+            let row = job_record_to_entry(&job);
+            assert_eq!(row.status.as_str(), state.label());
+            assert_eq!(row.tone.as_str(), state_tone(state));
+            assert_eq!(
+                row.can_retry,
+                matches!(state, JobState::Failed | JobState::Canceled),
+                "{state:?}"
+            );
+            assert_eq!(row.can_unlock, state == JobState::NeedsPassword);
+            assert_eq!(row.can_open, state == JobState::Saved);
+            assert_eq!(row.can_remove, !state.is_active());
+            // A running row offers Cancel, never Remove; finished rows never offer Cancel.
+            if state.is_active() {
+                assert!(row.can_cancel && !row.can_remove);
+            }
+            if state.is_terminal() {
+                assert!(!row.can_cancel);
+            }
+        }
     }
 
     #[test]
