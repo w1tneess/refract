@@ -214,7 +214,7 @@ fn validate_manifest_number_bounds(
         ));
     }
     let spec = manifest_option(tool, key)?;
-    if let Some(min) = spec.min {
+    if let Some(min) = spec.desktop_min {
         if value < min {
             return Err(RefractError::new(
                 ErrorCode::InvalidOption,
@@ -225,7 +225,7 @@ fn validate_manifest_number_bounds(
             ));
         }
     }
-    if let Some(max) = spec.max {
+    if let Some(max) = spec.desktop_max {
         if value > max {
             return Err(RefractError::new(
                 ErrorCode::InvalidOption,
@@ -644,9 +644,8 @@ impl DesktopToolOptions {
             }
             Self::PdfToImages { target, dpi } => {
                 validate_desktop_output_format(ToolId::PdfToImages, *target)?;
-                // Native Desktop rendering supports 36..=600 DPI (`render::validate_render_dpi`
-                // and `app.slint` SpinBox up to 600), whereas the shared manifest entry lists 300
-                // as the Web-safe ceiling.
+                // Bounds come from the manifest's Desktop entry (`platformBounds.desktop`),
+                // which raises the shared Web ceiling of 300 to 600.
                 render::validate_render_dpi(*dpi)?;
                 Ok(())
             }

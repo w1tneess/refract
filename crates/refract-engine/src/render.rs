@@ -2,6 +2,8 @@ use crate::process::run_command_cancellable;
 use refract_core::cancel::CancelToken;
 use refract_core::error::{ErrorCode, RefractError};
 use refract_core::format::Format;
+use refract_core::generated_manifest::manifest_for;
+use refract_core::ToolId;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use tempfile::tempdir;
@@ -312,18 +314,30 @@ fn render_page(
     }
 }
 
-/// Minimum and maximum supported DPI for PDF rasterization.
-pub const MIN_RENDER_DPI: u32 = 36;
-pub const MAX_RENDER_DPI: u32 = 600;
+/// Desktop PDF rasterization DPI bounds, read from the canonical manifest
+/// (`pdf-to-images` → `dpi`, with its `platformBounds.desktop` override).
+pub fn render_dpi_bounds() -> (u32, u32) {
+    let dpi = manifest_for(ToolId::PdfToImages)
+        .options
+        .iter()
+        .find(|opt| opt.key == "dpi")
+        .expect("manifest declares pdf-to-images dpi");
+    // The manifest generator requires min/max on every number option.
+    (
+        dpi.desktop_min.expect("dpi has a desktop min") as u32,
+        dpi.desktop_max.expect("dpi has a desktop max") as u32,
+    )
+}
 
 /// Validate requested PDF rasterization DPI explicitly (never silently clamping).
 pub fn validate_render_dpi(dpi: u32) -> Result<u32, RefractError> {
-    if !(MIN_RENDER_DPI..=MAX_RENDER_DPI).contains(&dpi) {
+    let (min, max) = render_dpi_bounds();
+    if !(min..=max).contains(&dpi) {
         return Err(RefractError::new(
             ErrorCode::InvalidOption,
             format!(
                 "Invalid PDF render DPI {}. Must be between {} and {}.",
-                dpi, MIN_RENDER_DPI, MAX_RENDER_DPI
+                dpi, min, max
             ),
         ));
     }
@@ -818,6 +832,9 @@ mod tests {
     fn path_based_renderer_validates_dpi_range_without_clamping() {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let plain_path = manifest_dir.join("../../fixtures/plain.pdf");
+
+        // Desktop bounds come from the manifest: shared min 36, Desktop override max 600.
+        assert_eq!(render_dpi_bounds(), (36, 600));
 
         // Boundary validation helper
         assert_eq!(

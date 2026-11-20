@@ -130,6 +130,15 @@
         }
       }
     },
+    "numberBounds": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "min": { "type": "number" },
+        "max": { "type": "number" }
+      }
+    },
     "optionSpec": {
       "type": "object",
       "additionalProperties": false,
@@ -147,6 +156,15 @@
         "default": { "type": ["string", "number"] },
         "min": { "type": "number" },
         "max": { "type": "number" },
+        "platformBounds": {
+          "type": "object",
+          "additionalProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "web": { "$ref": "#/$defs/numberBounds" },
+            "desktop": { "$ref": "#/$defs/numberBounds" }
+          }
+        },
         "step": { "type": "number", "exclusiveMinimum": 0 },
         "unit": { "type": "string", "minLength": 1 },
         "placeholder": { "type": "string" },

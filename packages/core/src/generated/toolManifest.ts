@@ -46,7 +46,7 @@ type ManifestOptionBase = {
 };
 
 export type ManifestOptionSpec =
-  | (ManifestOptionBase & { type: 'number'; min: number; max: number; step?: number; unit?: string; default: number })
+  | (ManifestOptionBase & { type: 'number'; min: number; max: number; platformBounds?: Partial<Record<Platform, { min?: number; max?: number }>>; step?: number; unit?: string; default: number })
   | (ManifestOptionBase & { type: 'select'; choices: readonly ManifestOptionChoice[]; default: string })
   | (ManifestOptionBase & { type: 'text'; placeholder?: string; default: string });
 
@@ -1280,6 +1280,11 @@ export const TOOL_MANIFEST: Record<ToolId, ManifestToolSpec> = {
         ],
         "min": 36,
         "max": 300,
+        "platformBounds": {
+          "desktop": {
+            "max": 600
+          }
+        },
         "default": 150,
         "unit": "DPI"
       }
@@ -1700,6 +1705,10 @@ export function manifestOptionsForPlatform(id: ToolId, platform: Platform): Mani
           ...opt,
           choices: opt.choices.filter((c) => !c.platforms || c.platforms.includes(platform)),
         };
+      }
+      if (opt.type === 'number' && opt.platformBounds?.[platform]) {
+        const bounds = opt.platformBounds[platform];
+        return { ...opt, min: bounds?.min ?? opt.min, max: bounds?.max ?? opt.max };
       }
       return opt;
     });
