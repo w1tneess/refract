@@ -292,6 +292,34 @@ mod tests {
         ("cmd", vec!["/C".to_string(), script.to_string()])
     }
 
+    // Keep redirection syntax out of Command's Windows argument quoting.
+    #[cfg(windows)]
+    fn batch_command(dir: &Path, script: &str) -> (&'static str, Vec<String>) {
+        let path = dir.join("test command.cmd");
+        std::fs::write(&path, format!("@echo off\r\n{script}\r\n")).unwrap();
+        (
+            "cmd",
+            vec![
+                "/D".into(),
+                "/C".into(),
+                path.to_string_lossy().into_owned(),
+            ],
+        )
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn batch_command_creates_nonempty_output_at_path_with_spaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("ready marker.out");
+        let (prog, args) = batch_command(
+            dir.path(),
+            &format!("echo ready > \"{}\"\r\nexit /b 0", marker.display()),
+        );
+        run_command_cancellable(prog, args, &CancelToken::none(), &[], "batch-test").unwrap();
+        assert_eq!(std::fs::read_to_string(marker).unwrap().trim(), "ready");
+    }
+
     #[cfg(unix)]
     fn shell_command(script: &str) -> (&'static str, Vec<String>) {
         ("sh", vec!["-c".to_string(), script.to_string()])
@@ -340,12 +368,16 @@ mod tests {
         });
         #[cfg(unix)]
         let script = format!("echo ready > '{}'; sleep 30", partial.display());
-        #[cfg(windows)]
-        let script = format!(
-            "echo ready > \"{}\" & ping -n 30 127.0.0.1",
-            partial.display()
-        );
+        #[cfg(unix)]
         let (prog, args) = shell_command(&script);
+        #[cfg(windows)]
+        let (prog, args) = batch_command(
+            dir.path(),
+            &format!(
+                "echo ready > \"{}\"\r\nping -n 30 127.0.0.1",
+                partial.display()
+            ),
+        );
 
         let started = Instant::now();
         let err = run_command_cancellable(
