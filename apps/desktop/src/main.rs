@@ -1328,16 +1328,6 @@ fn save_single_output(
     )
 }
 
-/// First free canonical output path for engine calls that write the file themselves (audio).
-/// The engine still persists with strict no-clobber, so a file created after this check is kept.
-fn resolve_new_output_path(job: &JobRecord, extension: &str) -> Result<PathBuf, RefractError> {
-    naming::resolve_unique_path(
-        &output_dir(job),
-        &output_file_name(job, extension),
-        persist::DEFAULT_MAX_SUFFIX_ATTEMPTS,
-    )
-}
-
 fn ensure_batch_compatible(jobs: &[JobRecord], request: &JobRequest) -> Result<(), RefractError> {
     if jobs.is_empty() {
         return Err(RefractError::new(
@@ -1558,28 +1548,39 @@ fn process_job(job: &JobRecord) -> Result<PathBuf, RefractError> {
             target,
             bitrate_kbps,
         } => {
-            let out_path = resolve_new_output_path(job, format_primary_extension(*target))?;
-            audio::convert_audio(&job.input_path, &out_path, *target, *bitrate_kbps)?;
-            Ok(out_path)
+            let dir = output_dir(job);
+            let name = output_file_name(job, format_primary_extension(*target));
+            audio::convert_audio_to(
+                &job.input_path,
+                audio::AudioOutput::Unique {
+                    dir: &dir,
+                    name: &name,
+                },
+                *target,
+                *bitrate_kbps,
+                &CancelToken::none(),
+            )
         }
         DesktopToolOptions::TrimAudio {
             start_secs,
             end,
             bitrate_kbps,
         } => {
-            let ext = format_primary_extension(detected_format);
-            let out_path = resolve_new_output_path(job, ext)?;
+            let dir = output_dir(job);
+            let name = output_file_name(job, format_primary_extension(detected_format));
             let start_arg = format!("{:.3}", start_secs);
             let end_arg = end.to_engine_arg();
-            audio::trim_audio_cancellable(
+            audio::trim_audio_to(
                 &job.input_path,
-                &out_path,
+                audio::AudioOutput::Unique {
+                    dir: &dir,
+                    name: &name,
+                },
                 Some(start_arg.as_str()),
                 end_arg.as_deref(),
                 Some(*bitrate_kbps),
                 &CancelToken::none(),
-            )?;
-            Ok(out_path)
+            )
         }
         DesktopToolOptions::ImagesToPdf { .. } | DesktopToolOptions::MergePdf => unreachable!(),
     }

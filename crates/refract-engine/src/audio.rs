@@ -360,12 +360,8 @@ fn detect_audio_format_from_file(path: &Path) -> Option<Format> {
         .filter(|fmt| fmt.kind() == refract_core::format::Kind::Audio)
 }
 
-/// Exclusively allocate a uniquely named temporary file in `output`'s parent directory
-/// using OS-level `O_CREAT | O_EXCL` / `CREATE_NEW` semantics via `tempfile::Builder`,
-/// preserving `.ext` so FFmpeg selects the intended muxer.
-///
-/// Converting immediately to [`TempPath`] closes the file handle on Windows before spawning
-/// FFmpeg while retaining exclusive RAII ownership so dropping always removes only this file.
+/// Test helper: the temp file the audio tools create beside `output` (see [`persist::create_sibling_temp`]).
+#[cfg(test)]
 fn create_sibling_temp_audio_file(output: &Path, ext: &str) -> Result<TempPath, RefractError> {
     let parent = output.parent().unwrap_or_else(|| Path::new("."));
     persist::create_sibling_temp(parent, ".refract-audio-", ext)
@@ -376,6 +372,63 @@ fn create_sibling_temp_audio_file(output: &Path, ext: &str) -> Result<TempPath, 
 /// error, only this operation's temporary file is removed.
 pub fn persist_audio_temp_noclobber(temp: TempPath, output: &Path) -> Result<(), RefractError> {
     persist::persist_noclobber(temp, output)
+}
+
+/// Where a finished audio file is saved.
+#[derive(Debug, Clone, Copy)]
+pub enum AudioOutput<'a> {
+    /// Exactly this path; fails without overwriting if it already exists.
+    Exact(&'a Path),
+    /// `name` inside `dir`, or the first free `name (2)`, `name (3)`, ... chosen at the moment
+    /// of saving (after FFmpeg finishes), so a file created during encoding is never overwritten.
+    Unique { dir: &'a Path, name: &'a str },
+}
+
+impl AudioOutput<'_> {
+    fn dir(&self) -> &Path {
+        match self {
+            AudioOutput::Exact(path) => path.parent().unwrap_or_else(|| Path::new(".")),
+            AudioOutput::Unique { dir, .. } => dir,
+        }
+    }
+
+    fn extension(&self) -> Option<&str> {
+        let path = match self {
+            AudioOutput::Exact(path) => *path,
+            AudioOutput::Unique { name, .. } => Path::new(*name),
+        };
+        path.extension().and_then(|e| e.to_str())
+    }
+
+    fn reject_if_taken(&self) -> Result<(), RefractError> {
+        match self {
+            AudioOutput::Exact(path) => reject_if_destination_exists(path),
+            AudioOutput::Unique { .. } => Ok(()),
+        }
+    }
+
+    fn persist(self, temp: TempPath) -> Result<PathBuf, RefractError> {
+        match self {
+            AudioOutput::Exact(path) => {
+                persist_audio_temp_noclobber(temp, path).map(|()| path.to_path_buf())
+            }
+            AudioOutput::Unique { dir, name } => {
+                persist::persist_unique(temp, dir, name, persist::DEFAULT_MAX_SUFFIX_ATTEMPTS)
+            }
+        }
+    }
+}
+
+fn resolve_ffmpeg(action: &str) -> Result<PathBuf, RefractError> {
+    which::which("ffmpeg").map_err(|_| {
+        RefractError::new(
+            ErrorCode::MissingDependency,
+            format!(
+                "ffmpeg was not found on PATH. Install FFmpeg to {} audio.",
+                action
+            ),
+        )
+    })
 }
 
 fn reject_if_destination_exists(output: &Path) -> Result<(), RefractError> {
@@ -452,10 +505,31 @@ pub fn convert_audio_with_binary(
     bitrate_kbps: Option<u32>,
     cancel: &CancelToken,
 ) -> Result<(), RefractError> {
-    cancel.check()?;
-    reject_if_destination_exists(output)?;
+    convert_audio_to_with_binary(
+        ffmpeg_bin,
+        input,
+        AudioOutput::Exact(output),
+        target,
+        bitrate_kbps,
+        cancel,
+    )
+    .map(drop)
+}
 
-    let temp_file = create_sibling_temp_audio_file(output, target.primary_extension())?;
+/// Like [`convert_audio_with_binary`], saving to `output` and returning the path written.
+pub fn convert_audio_to_with_binary(
+    ffmpeg_bin: &Path,
+    input: &Path,
+    output: AudioOutput<'_>,
+    target: Format,
+    bitrate_kbps: Option<u32>,
+    cancel: &CancelToken,
+) -> Result<PathBuf, RefractError> {
+    cancel.check()?;
+    output.reject_if_taken()?;
+
+    let temp_file =
+        persist::create_sibling_temp(output.dir(), ".refract-audio-", target.primary_extension())?;
     let args = build_convert_audio_args(input, temp_file.as_ref(), target, bitrate_kbps)?;
 
     // `temp_file` owns cleanup via `Drop` on error or cancellation, so cleanup never touches unrelated files.
@@ -466,7 +540,20 @@ pub fn convert_audio_with_binary(
         return Err(RefractError::canceled());
     }
 
-    persist_audio_temp_noclobber(temp_file, output)
+    output.persist(temp_file)
+}
+
+/// Convert an audio file using system `ffmpeg`, saving to `output` and returning the path written.
+pub fn convert_audio_to(
+    input: &Path,
+    output: AudioOutput<'_>,
+    target: Format,
+    bitrate_kbps: Option<u32>,
+    cancel: &CancelToken,
+) -> Result<PathBuf, RefractError> {
+    cancel.check()?;
+    let ffmpeg_bin = resolve_ffmpeg("convert")?;
+    convert_audio_to_with_binary(&ffmpeg_bin, input, output, target, bitrate_kbps, cancel)
 }
 
 /// Convert an audio file using system `ffmpeg` with cooperative cancellation.
@@ -477,14 +564,14 @@ pub fn convert_audio_cancellable(
     bitrate_kbps: Option<u32>,
     cancel: &CancelToken,
 ) -> Result<(), RefractError> {
-    cancel.check()?;
-    let ffmpeg_bin = which::which("ffmpeg").map_err(|_| {
-        RefractError::new(
-            ErrorCode::MissingDependency,
-            "ffmpeg was not found on PATH. Install FFmpeg to convert audio.",
-        )
-    })?;
-    convert_audio_with_binary(&ffmpeg_bin, input, output, target, bitrate_kbps, cancel)
+    convert_audio_to(
+        input,
+        AudioOutput::Exact(output),
+        target,
+        bitrate_kbps,
+        cancel,
+    )
+    .map(drop)
 }
 
 /// Convert an audio file using native FFmpeg.
@@ -511,8 +598,33 @@ pub fn trim_audio_with_binaries(
     bitrate_kbps: Option<u32>,
     cancel: &CancelToken,
 ) -> Result<(), RefractError> {
+    trim_audio_to_with_binaries(
+        ffmpeg_bin,
+        ffprobe_bin,
+        input,
+        AudioOutput::Exact(output),
+        start,
+        end,
+        bitrate_kbps,
+        cancel,
+    )
+    .map(drop)
+}
+
+/// Like [`trim_audio_with_binaries`], saving to `output` and returning the path written.
+#[allow(clippy::too_many_arguments)]
+pub fn trim_audio_to_with_binaries(
+    ffmpeg_bin: &Path,
+    ffprobe_bin: &Path,
+    input: &Path,
+    output: AudioOutput<'_>,
+    start: Option<&str>,
+    end: Option<&str>,
+    bitrate_kbps: Option<u32>,
+    cancel: &CancelToken,
+) -> Result<PathBuf, RefractError> {
     cancel.check()?;
-    reject_if_destination_exists(output)?;
+    output.reject_if_taken()?;
 
     let duration_secs = probe_duration_with_binary(ffprobe_bin, input, cancel)?;
     let range = resolve_trim_range(start, end, duration_secs)?;
@@ -520,10 +632,9 @@ pub fn trim_audio_with_binaries(
     let target_format = detect_audio_format_from_file(input);
     let ext = output
         .extension()
-        .and_then(|e| e.to_str())
         .or_else(|| target_format.map(|f| f.primary_extension()))
         .unwrap_or("mp3");
-    let temp_file = create_sibling_temp_audio_file(output, ext)?;
+    let temp_file = persist::create_sibling_temp(output.dir(), ".refract-audio-", ext)?;
 
     let args = build_trim_audio_args(
         input,
@@ -541,7 +652,7 @@ pub fn trim_audio_with_binaries(
         return Err(RefractError::canceled());
     }
 
-    persist_audio_temp_noclobber(temp_file, output)
+    output.persist(temp_file)
 }
 
 /// Trim an audio file using system `ffmpeg` and `ffprobe` with bitrate and cancellation support.
@@ -553,6 +664,27 @@ pub fn trim_audio_cancellable(
     bitrate_kbps: Option<u32>,
     cancel: &CancelToken,
 ) -> Result<(), RefractError> {
+    trim_audio_to(
+        input,
+        AudioOutput::Exact(output),
+        start,
+        end,
+        bitrate_kbps,
+        cancel,
+    )
+    .map(drop)
+}
+
+/// Trim an audio file using system `ffmpeg` and `ffprobe`, saving to `output` and returning
+/// the path written.
+pub fn trim_audio_to(
+    input: &Path,
+    output: AudioOutput<'_>,
+    start: Option<&str>,
+    end: Option<&str>,
+    bitrate_kbps: Option<u32>,
+    cancel: &CancelToken,
+) -> Result<PathBuf, RefractError> {
     cancel.check()?;
     let deps = detect_audio_dependencies();
     let ffmpeg_bin = deps.ffmpeg.ok_or_else(|| {
@@ -567,7 +699,7 @@ pub fn trim_audio_cancellable(
             "ffprobe was not found on PATH. Install FFmpeg (including ffprobe) to trim audio.",
         )
     })?;
-    trim_audio_with_binaries(
+    trim_audio_to_with_binaries(
         &ffmpeg_bin,
         &ffprobe_bin,
         input,

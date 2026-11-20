@@ -252,3 +252,59 @@ fn live_ffmpeg_mid_process_cancellation_kills_process_and_cleans_temp_files() {
         "unrelated temp files must remain untouched"
     );
 }
+
+#[test]
+#[ignore = "requires ffmpeg and ffprobe on PATH"]
+fn live_unique_audio_output_numbers_taken_names_without_overwriting() {
+    require_audio_toolchain();
+    let dir = tempfile::tempdir().unwrap();
+    let taken = dir.path().join("sound (converted).mp3");
+    std::fs::write(&taken, b"user file").unwrap();
+
+    let out = audio::convert_audio_to(
+        &fixture_path("sound.wav"),
+        audio::AudioOutput::Unique {
+            dir: dir.path(),
+            name: "sound (converted).mp3",
+        },
+        Format::Mp3,
+        Some(192),
+        &CancelToken::none(),
+    )
+    .expect("convert into numbered name");
+    assert_eq!(out, dir.path().join("sound (converted) (2).mp3"));
+    assert_eq!(std::fs::read(&taken).unwrap(), b"user file");
+    assert_eq!(
+        refract_core::detect(&std::fs::read(&out).unwrap()),
+        Some(Format::Mp3)
+    );
+
+    let trimmed_taken = dir.path().join("sound_trimmed.wav");
+    std::fs::write(&trimmed_taken, b"user file").unwrap();
+    let trimmed = audio::trim_audio_to(
+        &fixture_path("sound.wav"),
+        audio::AudioOutput::Unique {
+            dir: dir.path(),
+            name: "sound_trimmed.wav",
+        },
+        Some("0.5"),
+        Some("1.5"),
+        None,
+        &CancelToken::none(),
+    )
+    .expect("trim into numbered name");
+    assert_eq!(trimmed, dir.path().join("sound_trimmed (2).wav"));
+    assert_eq!(std::fs::read(&trimmed_taken).unwrap(), b"user file");
+
+    let leftovers = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter(|e| {
+            e.as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".refract-")
+        })
+        .count();
+    assert_eq!(leftovers, 0);
+}
