@@ -1855,6 +1855,80 @@ mod tests {
     }
 
     #[test]
+    fn aes_locked_pdfs_still_prompt_for_a_password() {
+        use lopdf::encryption::crypt_filters::{Aes128CryptFilter, Aes256CryptFilter, CryptFilter};
+        use std::collections::BTreeMap;
+        use std::sync::Arc;
+
+        let file_key = [7u8; 32];
+        for aes256 in [false, true] {
+            let mut doc = Document::load_mem(&make_sized_pdf(&[300, 400])).unwrap();
+            let id = b"refract-aes-test".to_vec();
+            doc.trailer.set(
+                "ID",
+                vec![
+                    Object::String(id.clone(), lopdf::StringFormat::Hexadecimal),
+                    Object::String(id, lopdf::StringFormat::Hexadecimal),
+                ],
+            );
+            let filter: Arc<dyn CryptFilter> = if aes256 {
+                Arc::new(Aes256CryptFilter)
+            } else {
+                Arc::new(Aes128CryptFilter)
+            };
+            let crypt_filters = BTreeMap::from([(b"StdCF".to_vec(), filter)]);
+            let version = if aes256 {
+                EncryptionVersion::V5 {
+                    encrypt_metadata: true,
+                    crypt_filters,
+                    file_encryption_key: &file_key,
+                    stream_filter: b"StdCF".to_vec(),
+                    string_filter: b"StdCF".to_vec(),
+                    owner_password: "owner",
+                    user_password: "user",
+                    permissions: Permissions::all(),
+                }
+            } else {
+                EncryptionVersion::V4 {
+                    document: &doc,
+                    encrypt_metadata: true,
+                    crypt_filters,
+                    stream_filter: b"StdCF".to_vec(),
+                    string_filter: b"StdCF".to_vec(),
+                    owner_password: "owner",
+                    user_password: "user",
+                    permissions: Permissions::all(),
+                }
+            };
+            let state = EncryptionState::try_from(version).expect("AES encryption state");
+            doc.encrypt(&state).expect("encrypt");
+            let mut locked = Vec::new();
+            doc.save_to(&mut locked).expect("save");
+
+            let label = if aes256 { "AES-256" } else { "AES-128" };
+            assert!(probe_pdf(&locked).unwrap().requires_password, "{label}");
+            assert_eq!(
+                load_document(&locked, None).unwrap_err().code,
+                ErrorCode::NeedsPassword,
+                "{label}"
+            );
+            assert_eq!(
+                load_document(&locked, Some("nope")).unwrap_err().code,
+                ErrorCode::WrongPassword,
+                "{label}"
+            );
+            assert_eq!(
+                load_document(&locked, Some("user"))
+                    .unwrap()
+                    .get_pages()
+                    .len(),
+                2,
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
     fn inherited_images_are_extracted_only_from_pages_that_draw_them() {
         let jpeg = fixture_bytes("plain.jpg");
         let mut doc = Document::with_version("1.5");

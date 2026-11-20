@@ -214,7 +214,7 @@ fn validate_manifest_number_bounds(
         ));
     }
     let spec = manifest_option(tool, key)?;
-    if let Some(min) = spec.min {
+    if let Some(min) = spec.desktop_min {
         if value < min {
             return Err(RefractError::new(
                 ErrorCode::InvalidOption,
@@ -225,7 +225,7 @@ fn validate_manifest_number_bounds(
             ));
         }
     }
-    if let Some(max) = spec.max {
+    if let Some(max) = spec.desktop_max {
         if value > max {
             return Err(RefractError::new(
                 ErrorCode::InvalidOption,
