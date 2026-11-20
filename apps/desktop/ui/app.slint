@@ -192,6 +192,8 @@ export component MainWindow inherits Window {
     callback tool_changed(string);
     callback show_password_dialog_cb(int, string);
     callback password_entered(int, string);
+    callback cancel_job(int);
+    callback cancel_all();
 
     in-out property<[ToolSpec]> tool_specs: [];
     in-out property<[ToolGroup]> tool_groups: [];

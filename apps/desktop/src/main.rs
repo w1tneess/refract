@@ -3,7 +3,7 @@ slint::include_modules!();
 mod pipeline;
 
 use pipeline::preflight::{preflight_inputs_with_passwords, PdfPasswords};
-use pipeline::runner::RunCtx;
+use pipeline::runner::{self, ActiveRun, RunCtx};
 use pipeline::secrets::{self, JobSecretStore};
 use pipeline::verify::{self, Expect};
 use pipeline::{
@@ -22,7 +22,6 @@ use slint::{ComponentHandle, Model, SharedString, VecModel};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 
@@ -364,8 +363,12 @@ fn main() -> Result<(), slint::PlatformError> {
     // Passwords for locked PDFs live here, never in `JobRecord` (which is cloned into UI updates).
     let secret_store = Arc::new(Mutex::new(JobSecretStore::new()));
     let next_id = Arc::new(Mutex::new(1i32));
-    let is_busy = Arc::new(AtomicBool::new(false));
     let (ui_tx, ui_rx) = mpsc::channel::<UiEvent>();
+    let shared = Shared {
+        jobs: Arc::clone(&jobs_store),
+        secrets: Arc::clone(&secret_store),
+        active: Arc::new(Mutex::new(ActiveRun::default())),
+    };
 
     // UI event loop to handle progress updates from worker thread
     let ui_weak = main_window.as_weak();
@@ -392,15 +395,16 @@ fn main() -> Result<(), slint::PlatformError> {
     // Callbacks
     setup_pick_files(&main_window, &jobs_store, &next_id, &ui_tx);
     setup_pick_output_folder(&main_window, &ui_tx);
-    setup_clear_jobs(&main_window, &jobs_store, &secret_store, &ui_tx);
+    // One worker runs every job command (Process all, retry, unlock) in order.
+    let worker = spawn_worker(shared.clone(), main_window.as_weak(), ui_tx.clone());
+    setup_clear_jobs(&main_window, &shared, &ui_tx);
     setup_open_output_folder(&main_window);
-    setup_start_processing(&main_window, &jobs_store, &is_busy, &ui_tx);
-    setup_retry_job(&main_window, &jobs_store, &is_busy, &ui_tx);
-    setup_remove_job(&main_window, &jobs_store, &secret_store, &ui_tx);
-    setup_move_job(&main_window, &jobs_store, &ui_tx);
+    setup_run_controls(&main_window, &shared, &worker, &ui_tx);
+    setup_remove_job(&main_window, &shared, &ui_tx);
+    setup_move_job(&main_window, &shared, &ui_tx);
     setup_toggle_theme(&main_window);
     setup_tool_changed(&main_window, &tool_specs);
-    setup_password_handlers(&main_window, &jobs_store, &secret_store, &is_busy, &ui_tx);
+    setup_password_handlers(&main_window, &worker);
 
     main_window.run()
 }
@@ -594,22 +598,31 @@ fn setup_pick_output_folder(window: &MainWindow, ui_tx: &mpsc::Sender<UiEvent>) 
     });
 }
 
-fn setup_clear_jobs(
-    window: &MainWindow,
-    jobs_store: &Arc<Mutex<Vec<JobRecord>>>,
-    secret_store: &Arc<Mutex<JobSecretStore>>,
-    ui_tx: &mpsc::Sender<UiEvent>,
-) {
-    let jobs_store = Arc::clone(jobs_store);
-    let secret_store = Arc::clone(secret_store);
-    let ui_tx = ui_tx.clone();
+/// Clear the queue, keeping jobs that are running (cancel them first to remove them).
+fn clear_jobs_guarded(shared: &Shared) -> usize {
+    let mut store = shared.jobs.lock().unwrap();
+    let active = shared.active.lock().unwrap();
+    store.retain(|j| !runner::can_remove_or_move(j.status) || active.is_running(j.id));
+    drop(active);
+    prune_secrets(&store, &shared.secrets);
+    store.len()
+}
 
+fn setup_clear_jobs(window: &MainWindow, shared: &Shared, ui_tx: &mpsc::Sender<UiEvent>) {
+    let shared = shared.clone();
+    let ui_tx = ui_tx.clone();
     window.on_clear_jobs(move || {
-        let mut store = jobs_store.lock().unwrap();
-        store.clear();
-        prune_secrets(&store, &secret_store);
-        push_ui_event(&ui_tx, UiEvent::JobsUpdated(store.clone()));
-        push_ui_event(&ui_tx, UiEvent::StatusUpdate("Ready".into(), -1.0));
+        let kept = clear_jobs_guarded(&shared);
+        push_ui_event(
+            &ui_tx,
+            UiEvent::JobsUpdated(shared.jobs.lock().unwrap().clone()),
+        );
+        let text = if kept == 0 {
+            "Ready".to_string()
+        } else {
+            format!("Kept {kept} running job(s); cancel them to remove them.")
+        };
+        push_ui_event(&ui_tx, UiEvent::StatusUpdate(text, -1.0));
     });
 }
 
@@ -663,6 +676,17 @@ enum PasswordUnlockClaim {
         request: JobRequest,
         members: Vec<JobRecord>,
     },
+}
+
+impl PasswordUnlockClaim {
+    fn ids(&self) -> Vec<i32> {
+        match self {
+            PasswordUnlockClaim::Single(job) => vec![job.id],
+            PasswordUnlockClaim::MergeBatch { members, .. } => {
+                members.iter().map(|j| j.id).collect()
+            }
+        }
+    }
 }
 
 /// The recorded batch of `target_id` can't run (a member is missing, moved on or incompatible).
@@ -731,26 +755,20 @@ fn run_unit(
     result
 }
 
+/// Claim a password-waiting job (or its whole recorded merge batch) for an unlock attempt,
+/// moving it to `Probing`. Runs on the single worker, so two unlocks of the same job can't race:
+/// the second finds the job no longer in `NeedsPassword` and is refused.
 fn try_claim_password_unlock(
     jobs_store: &Arc<Mutex<Vec<JobRecord>>>,
-    is_busy: &AtomicBool,
     job_id: i32,
     ui_tx: Option<&mpsc::Sender<UiEvent>>,
 ) -> Option<Result<PasswordUnlockClaim, RefractError>> {
-    if is_busy.swap(true, Ordering::SeqCst) {
-        return None;
-    }
-
     let outcome = {
         let mut store = jobs_store.lock().unwrap();
-        let Some(target_idx) = store.iter().position(|j| j.id == job_id) else {
-            is_busy.store(false, Ordering::SeqCst);
-            return None;
-        };
+        let target_idx = store.iter().position(|j| j.id == job_id)?;
         let target = store[target_idx].clone();
 
         if target.status != JobState::NeedsPassword {
-            is_busy.store(false, Ordering::SeqCst);
             return Some(Err(RefractError::new(
                 ErrorCode::InvalidOption,
                 format!(
@@ -789,7 +807,6 @@ fn try_claim_password_unlock(
                     if let Some(tx) = ui_tx {
                         push_ui_event(tx, UiEvent::JobsUpdated(store.clone()));
                     }
-                    is_busy.store(false, Ordering::SeqCst);
                     Err(err)
                 }
             }
@@ -888,13 +905,444 @@ fn complete_password_unlock_claim(
     result
 }
 
-fn setup_password_handlers(
-    window: &MainWindow,
+/// Work for the single job worker, run one command at a time.
+enum Command {
+    /// "Process all": every waiting job, in queue order, grouped where the tool combines files.
+    ProcessAll,
+    /// A retry prepared on the UI thread: these jobs were moved to a fresh `Queued` attempt.
+    Retry(Vec<i32>),
+    /// The password the user entered for a job (zeroed when the command is dropped).
+    Unlock {
+        job_id: i32,
+        password: SecretPassword,
+    },
+}
+
+/// State shared by the UI handlers and the worker.
+#[derive(Clone)]
+struct Shared {
+    jobs: Arc<Mutex<Vec<JobRecord>>>,
+    secrets: Arc<Mutex<JobSecretStore>>,
+    active: Arc<Mutex<ActiveRun>>,
+}
+
+impl Shared {
+    #[cfg(test)]
+    fn for_store(jobs: &Arc<Mutex<Vec<JobRecord>>>) -> Self {
+        Self {
+            jobs: Arc::clone(jobs),
+            secrets: Arc::new(Mutex::new(JobSecretStore::new())),
+            active: Arc::new(Mutex::new(ActiveRun::default())),
+        }
+    }
+}
+
+fn set_running(window: &slint::Weak<MainWindow>, running: bool) {
+    let window = window.clone();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(w) = window.upgrade() {
+            w.set_is_running(running);
+        }
+    });
+}
+
+/// Start the single worker thread. Every run (Process all, retry, unlock) goes through it, so runs
+/// never overlap, and each unit's cancel token is registered before its jobs start.
+fn spawn_worker(
+    shared: Shared,
+    window: slint::Weak<MainWindow>,
+    ui_tx: mpsc::Sender<UiEvent>,
+) -> mpsc::Sender<Command> {
+    let (tx, rx) = mpsc::channel::<Command>();
+    thread::spawn(move || {
+        while let Ok(command) = rx.recv() {
+            set_running(&window, true);
+            execute_command(&shared, command, Some(&ui_tx));
+            set_running(&window, false);
+        }
+    });
+    tx
+}
+
+fn execute_command(shared: &Shared, command: Command, ui_tx: Option<&mpsc::Sender<UiEvent>>) {
+    match command {
+        Command::ProcessAll => run_all_waiting(shared, ui_tx),
+        Command::Retry(ids) => run_retry(shared, &ids, ui_tx),
+        Command::Unlock { job_id, password } => run_unlock(shared, job_id, password, ui_tx),
+    }
+}
+
+fn status(ui_tx: Option<&mpsc::Sender<UiEvent>>, text: impl Into<String>, progress: f32) {
+    if let Some(tx) = ui_tx {
+        push_ui_event(tx, UiEvent::StatusUpdate(text.into(), progress));
+    }
+}
+
+/// Register `ids` as the running unit, run `work` with its cancel token, then unregister.
+fn run_registered(shared: &Shared, ids: &[i32], work: impl FnOnce(&CancelToken)) {
+    let token = shared.active.lock().unwrap().start(ids);
+    work(&token);
+    shared.active.lock().unwrap().finish(ids);
+}
+
+/// Fresh copies of `ids` that still exist and are still `Queued` (in `ids` order). Jobs canceled
+/// or removed after a run was planned are left out.
+fn still_queued(shared: &Shared, ids: &[i32]) -> Vec<JobRecord> {
+    let store = shared.jobs.lock().unwrap();
+    ids.iter()
+        .filter_map(|id| {
+            store
+                .iter()
+                .find(|j| j.id == *id && j.status == JobState::Queued)
+                .cloned()
+        })
+        .collect()
+}
+
+fn run_all_waiting(shared: &Shared, ui_tx: Option<&mpsc::Sender<UiEvent>>) {
+    let waiting: Vec<JobRecord> = {
+        let store = shared.jobs.lock().unwrap();
+        store
+            .iter()
+            .filter(|j| j.status == JobState::Queued)
+            .cloned()
+            .collect()
+    };
+    if waiting.is_empty() {
+        status(ui_tx, "No pending jobs", -1.0);
+        return;
+    }
+    status(ui_tx, "Starting…", 0.0);
+
+    let planned_units = plan_execution_units(waiting, |j| &j.request);
+    let total_units = planned_units.len();
+
+    for (completed, unit) in planned_units.into_iter().enumerate() {
+        let progress = completed as f32 / total_units as f32;
+        match unit {
+            PlannedUnit::Batch {
+                tool: tool @ (ToolId::MergePdf | ToolId::ImagesToPdf),
+                request,
+                items,
+            } => {
+                let ids: Vec<i32> = items.iter().map(|j| j.id).collect();
+                let members = still_queued(shared, &ids);
+                if members.is_empty() {
+                    continue;
+                }
+                let ids: Vec<i32> = members.iter().map(|j| j.id).collect();
+                let message = if tool == ToolId::MergePdf {
+                    format!("Merging {} PDFs…", members.len())
+                } else {
+                    format!("Compiling {} images into PDF…", members.len())
+                };
+                run_registered(shared, &ids, |cancel| {
+                    {
+                        let mut store = shared.jobs.lock().unwrap();
+                        for j in store.iter_mut().filter(|j| ids.contains(&j.id)) {
+                            j.last_batch_member_ids = ids.clone();
+                        }
+                        begin_probing(&mut store, &ids);
+                        if let Some(tx) = ui_tx {
+                            push_ui_event(tx, UiEvent::JobsUpdated(store.clone()));
+                        }
+                    }
+                    status(ui_tx, message, progress);
+                    let _ = run_unit(&shared.jobs, &ids, cancel, ui_tx, |ctx| {
+                        if tool == ToolId::MergePdf {
+                            execute_batch_merge_pdf_in(&members, &request, ctx)
+                        } else {
+                            execute_batch_images_to_pdf_in(&members, &request, ctx)
+                        }
+                    });
+                });
+            }
+            PlannedUnit::Batch { items, .. } => {
+                for job in items {
+                    run_single(shared, job.id, completed, total_units, ui_tx);
+                }
+            }
+            PlannedUnit::Single(job) => run_single(shared, job.id, completed, total_units, ui_tx),
+        }
+        status(
+            ui_tx,
+            format!("Completed {} of {}", completed + 1, total_units),
+            (completed + 1) as f32 / total_units as f32,
+        );
+    }
+    status(ui_tx, "All done", 1.0);
+}
+
+fn run_single(
+    shared: &Shared,
+    id: i32,
+    completed: usize,
+    total_units: usize,
+    ui_tx: Option<&mpsc::Sender<UiEvent>>,
+) {
+    let Some(job) = still_queued(shared, &[id]).pop() else {
+        return;
+    };
+    run_registered(shared, &[id], |cancel| {
+        run_single_job_in_store(&shared.jobs, &job, completed, total_units, cancel, ui_tx);
+    });
+}
+
+fn run_single_job_in_store(
     jobs_store: &Arc<Mutex<Vec<JobRecord>>>,
-    secret_store: &Arc<Mutex<JobSecretStore>>,
-    is_busy: &Arc<AtomicBool>,
+    job: &JobRecord,
+    completed: usize,
+    total_units: usize,
+    cancel: &CancelToken,
+    ui_tx: Option<&mpsc::Sender<UiEvent>>,
+) {
+    {
+        let mut store = jobs_store.lock().unwrap();
+        begin_probing(&mut store, &[job.id]);
+        if let Some(tx) = ui_tx {
+            push_ui_event(tx, UiEvent::JobsUpdated(store.clone()));
+        }
+    }
+    status(
+        ui_tx,
+        format!(
+            "Processing {} of {}: {}",
+            completed + 1,
+            total_units,
+            job.name
+        ),
+        completed as f32 / total_units as f32,
+    );
+    let _ = run_unit(jobs_store, &[job.id], cancel, ui_tx, |ctx| {
+        process_job_in(job, ctx)
+    });
+}
+
+/// Prepare a retry on the UI thread: the job (and, for merge/images-to-pdf, its recorded batch)
+/// starts a fresh `Queued` attempt with its original immutable request. Only `Failed` and
+/// `Canceled` jobs can be retried (`can_retry`); returns the ids for `Command::Retry`.
+fn prepare_retry(store: &mut [JobRecord], job_id: i32) -> Result<Vec<i32>, RefractError> {
+    let target = store
+        .iter()
+        .find(|j| j.id == job_id)
+        .cloned()
+        .ok_or_else(|| RefractError::new(ErrorCode::InvalidOption, "That job no longer exists."))?;
+    if !runner::can_retry(target.status) {
+        return Err(RefractError::new(
+            ErrorCode::InvalidOption,
+            format!(
+                "'{}' can't be retried ({}).",
+                target.name,
+                target.status.label()
+            ),
+        ));
+    }
+    let recorded_ids = target.last_batch_member_ids.clone();
+    let indices = match select_batch_retry_indices(
+        store,
+        job_id,
+        &recorded_ids,
+        |j| j.id,
+        |j| &j.request,
+        |j| runner::can_retry(j.status),
+    ) {
+        Ok(indices) => indices,
+        Err(err) => {
+            reject_recorded_batch(store, job_id, &recorded_ids, &err);
+            return Err(err);
+        }
+    };
+    let ids: Vec<i32> = indices.iter().map(|&i| store[i].id).collect();
+    let batch = target.request.tool().spec().batch;
+    for &i in &indices {
+        start_new_attempt(&mut store[i]);
+        if batch {
+            store[i].last_batch_member_ids = ids.clone();
+        }
+    }
+    Ok(ids)
+}
+
+fn run_retry(shared: &Shared, ids: &[i32], ui_tx: Option<&mpsc::Sender<UiEvent>>) {
+    let members = still_queued(shared, ids);
+    let Some(primary) = members.first().cloned() else {
+        return;
+    };
+    let request = primary.request.clone();
+    let member_ids: Vec<i32> = members.iter().map(|j| j.id).collect();
+
+    // A merge/images-to-pdf retry runs exactly its recorded files or not at all.
+    if request.tool().spec().batch && member_ids.len() != ids.len() {
+        let err = RefractError::new(
+            ErrorCode::InvalidOption,
+            "Some files of this batch were canceled or removed before it could run.",
+        );
+        let mut store = shared.jobs.lock().unwrap();
+        begin_probing(&mut store, &member_ids);
+        apply_result_to_jobs(&mut store, &member_ids, &Err(err));
+        if let Some(tx) = ui_tx {
+            push_ui_event(tx, UiEvent::JobsUpdated(store.clone()));
+        }
+        return;
+    }
+
+    run_registered(shared, &member_ids, |cancel| {
+        {
+            let mut store = shared.jobs.lock().unwrap();
+            begin_probing(&mut store, &member_ids);
+            if let Some(tx) = ui_tx {
+                push_ui_event(tx, UiEvent::JobsUpdated(store.clone()));
+            }
+        }
+        status(ui_tx, format!("Retrying: {}", primary.name), 0.0);
+        let _ = run_unit(
+            &shared.jobs,
+            &member_ids,
+            cancel,
+            ui_tx,
+            |ctx| match request.tool() {
+                ToolId::MergePdf => execute_batch_merge_pdf_in(&members, &request, ctx),
+                ToolId::ImagesToPdf => execute_batch_images_to_pdf_in(&members, &request, ctx),
+                _ => process_job_in(&primary, ctx),
+            },
+        );
+    });
+    status(ui_tx, "Ready", -1.0);
+}
+
+/// Test helper: prepare and run a retry in one step, as clicking Retry then the worker would.
+#[cfg(test)]
+fn execute_retry_in_store(jobs_store: &Arc<Mutex<Vec<JobRecord>>>, job_id: i32) {
+    let shared = Shared::for_store(jobs_store);
+    let prepared = prepare_retry(&mut jobs_store.lock().unwrap(), job_id);
+    if let Ok(ids) = prepared {
+        execute_command(&shared, Command::Retry(ids), None);
+    }
+}
+
+fn run_unlock(
+    shared: &Shared,
+    job_id: i32,
+    password: SecretPassword,
+    ui_tx: Option<&mpsc::Sender<UiEvent>>,
+) {
+    let claim = match try_claim_password_unlock(&shared.jobs, job_id, ui_tx) {
+        Some(Ok(claim)) => claim,
+        Some(Err(err)) => {
+            let store = shared.jobs.lock().unwrap();
+            prune_secrets(&store, &shared.secrets);
+            status(ui_tx, err.to_string(), -1.0);
+            return;
+        }
+        None => return,
+    };
+    let ids = claim.ids();
+    status(ui_tx, "Unlocking PDF…", 0.0);
+    // The claim already moved the jobs to Probing; a cancel in that moment is kept by
+    // `ActiveRun` and applied as soon as the unit registers here.
+    run_registered(shared, &ids, |cancel| {
+        // Uses the job's original immutable `JobRequest` (and recorded batch members for
+        // `merge-pdf`) — never recaptures UI options.
+        let _ = complete_password_unlock_claim(
+            &shared.jobs,
+            &shared.secrets,
+            claim,
+            password,
+            cancel,
+            ui_tx,
+        );
+    });
+    status(ui_tx, "Ready", -1.0);
+}
+
+/// Cancel a job. Waiting and password-waiting jobs (with their recorded batch) end `Canceled` at
+/// once; a running job's unit is stopped through its cancel token and ends `Canceled`, leaving no
+/// output. Passwords of canceled jobs are dropped.
+fn cancel_job(shared: &Shared, job_id: i32, ui_tx: Option<&mpsc::Sender<UiEvent>>) {
+    let mut store = shared.jobs.lock().unwrap();
+    let Some(job) = store.iter().find(|j| j.id == job_id).cloned() else {
+        return;
+    };
+    if !runner::can_cancel(job.status) {
+        return;
+    }
+    match job.status {
+        JobState::Queued | JobState::NeedsPassword => {
+            let recorded = &job.last_batch_member_ids;
+            let in_same_batch = |j: &JobRecord| {
+                j.id == job_id
+                    || (job.request.tool().spec().batch
+                        && !recorded.is_empty()
+                        && &j.last_batch_member_ids == recorded
+                        && matches!(j.status, JobState::Queued | JobState::NeedsPassword))
+            };
+            for j in store.iter_mut().filter(|j| in_same_batch(j)) {
+                set_state(j, JobState::Canceled);
+                j.error = "Canceled.".into();
+                j.awaiting_password = false;
+                j.progress = -1.0;
+            }
+            prune_secrets(&store, &shared.secrets);
+        }
+        _ => shared.active.lock().unwrap().cancel(job_id),
+    }
+    if let Some(tx) = ui_tx {
+        push_ui_event(tx, UiEvent::JobsUpdated(store.clone()));
+    }
+}
+
+/// Stop the running unit and cancel every waiting job. Password-waiting jobs are left alone.
+fn cancel_all(shared: &Shared, ui_tx: Option<&mpsc::Sender<UiEvent>>) {
+    let mut store = shared.jobs.lock().unwrap();
+    for j in store.iter_mut().filter(|j| j.status == JobState::Queued) {
+        set_state(j, JobState::Canceled);
+        j.error = "Canceled.".into();
+        j.progress = -1.0;
+    }
+    shared.active.lock().unwrap().cancel_current();
+    if let Some(tx) = ui_tx {
+        push_ui_event(tx, UiEvent::JobsUpdated(store.clone()));
+    }
+}
+
+fn setup_run_controls(
+    window: &MainWindow,
+    shared: &Shared,
+    worker: &mpsc::Sender<Command>,
     ui_tx: &mpsc::Sender<UiEvent>,
 ) {
+    let tx = worker.clone();
+    window.on_start_processing(move || {
+        tx.send(Command::ProcessAll).ok();
+    });
+
+    let tx = worker.clone();
+    let retry_shared = shared.clone();
+    let retry_ui = ui_tx.clone();
+    window.on_retry_job(move |job_id| {
+        let mut store = retry_shared.jobs.lock().unwrap();
+        match prepare_retry(&mut store, job_id) {
+            Ok(ids) => {
+                push_ui_event(&retry_ui, UiEvent::JobsUpdated(store.clone()));
+                tx.send(Command::Retry(ids)).ok();
+            }
+            Err(err) => {
+                push_ui_event(&retry_ui, UiEvent::JobsUpdated(store.clone()));
+                push_ui_event(&retry_ui, UiEvent::StatusUpdate(err.to_string(), -1.0));
+            }
+        }
+    });
+
+    let cancel_shared = shared.clone();
+    let cancel_ui = ui_tx.clone();
+    window.on_cancel_job(move |job_id| cancel_job(&cancel_shared, job_id, Some(&cancel_ui)));
+
+    let cancel_all_shared = shared.clone();
+    let cancel_all_ui = ui_tx.clone();
+    window.on_cancel_all(move || cancel_all(&cancel_all_shared, Some(&cancel_all_ui)));
+}
+
+fn setup_password_handlers(window: &MainWindow, worker: &mpsc::Sender<Command>) {
     let window_weak_show = window.as_weak();
     window.on_show_password_dialog_cb(move |job_id, prompt| {
         if let Some(window) = window_weak_show.upgrade() {
@@ -905,229 +1353,17 @@ fn setup_password_handlers(
         }
     });
 
-    let window_weak = window.as_weak();
-    let jobs_store = Arc::clone(jobs_store);
-    let secret_store = Arc::clone(secret_store);
-    let is_busy = Arc::clone(is_busy);
-    let ui_tx = ui_tx.clone();
-
+    let tx = worker.clone();
     window.on_password_entered(move |job_id, password| {
         // Copy out of the UI string at once; from here on it is only a zeroed-on-drop secret.
         // The UI toolkit's own copy of the typed text is outside Refract's control.
-        let entered = SecretPassword::new(password.as_str());
+        let password_secret = SecretPassword::new(password.as_str());
         drop(password);
-        let Some(window) = window_weak.upgrade() else {
-            return;
-        };
-
-        let claim = match try_claim_password_unlock(&jobs_store, &is_busy, job_id, Some(&ui_tx)) {
-            Some(Ok(claim)) => claim,
-            Some(Err(err)) => {
-                let store = jobs_store.lock().unwrap();
-                prune_secrets(&store, &secret_store);
-                push_ui_event(&ui_tx, UiEvent::StatusUpdate(err.to_string(), -1.0));
-                return;
-            }
-            None => return,
-        };
-
-        window.set_is_running(true);
-        let worker_window = window_weak.clone();
-        let worker_jobs = Arc::clone(&jobs_store);
-        let worker_secrets = Arc::clone(&secret_store);
-        let worker_busy = Arc::clone(&is_busy);
-        let worker_ui_tx = ui_tx.clone();
-
-        thread::spawn(move || {
-            push_ui_event(
-                &worker_ui_tx,
-                UiEvent::StatusUpdate("Unlocking PDF…".into(), 0.0),
-            );
-
-            // Uses the job's original immutable `JobRequest` (and recorded batch members for
-            // `merge-pdf`) — never recaptures UI options.
-            let _ = complete_password_unlock_claim(
-                &worker_jobs,
-                &worker_secrets,
-                claim,
-                entered,
-                &CancelToken::new(),
-                Some(&worker_ui_tx),
-            );
-
-            worker_busy.store(false, Ordering::SeqCst);
-            push_ui_event(&worker_ui_tx, UiEvent::StatusUpdate("Ready".into(), -1.0));
-            let _ = slint::invoke_from_event_loop({
-                let worker_window = worker_window.clone();
-                move || {
-                    if let Some(w) = worker_window.upgrade() {
-                        w.set_is_running(false);
-                    }
-                }
-            });
-        });
-    });
-}
-
-fn setup_start_processing(
-    window: &MainWindow,
-    jobs_store: &Arc<Mutex<Vec<JobRecord>>>,
-    is_busy: &Arc<AtomicBool>,
-    ui_tx: &mpsc::Sender<UiEvent>,
-) {
-    let window_weak = window.as_weak();
-    let jobs_store = Arc::clone(jobs_store);
-    let is_busy = Arc::clone(is_busy);
-    let ui_tx = ui_tx.clone();
-
-    window.on_start_processing(move || {
-        if is_busy.swap(true, Ordering::SeqCst) {
-            return;
-        }
-
-        let Some(window) = window_weak.upgrade() else {
-            is_busy.store(false, Ordering::SeqCst);
-            return;
-        };
-
-        window.set_is_running(true);
-        push_ui_event(&ui_tx, UiEvent::StatusUpdate("Starting…".into(), 0.0));
-
-        let worker_window = window_weak.clone();
-        let worker_jobs = Arc::clone(&jobs_store);
-        let worker_busy = Arc::clone(&is_busy);
-        let worker_ui_tx = ui_tx.clone();
-
-        thread::spawn(move || {
-            let waiting_jobs: Vec<JobRecord> = {
-                let store = worker_jobs.lock().unwrap();
-                store
-                    .iter()
-                    .filter(|j| j.status == JobState::Queued)
-                    .cloned()
-                    .collect()
-            };
-
-            if waiting_jobs.is_empty() {
-                worker_busy.store(false, Ordering::SeqCst);
-                push_ui_event(
-                    &worker_ui_tx,
-                    UiEvent::StatusUpdate("No pending jobs".into(), -1.0),
-                );
-                let _ = slint::invoke_from_event_loop({
-                    let worker_window = worker_window.clone();
-                    move || {
-                        if let Some(w) = worker_window.upgrade() {
-                            w.set_is_running(false);
-                        }
-                    }
-                });
-                return;
-            }
-
-            // Per-run cancel token (wired to the Cancel controls in the next step of 2.3.6).
-            let cancel = CancelToken::new();
-            let planned_units = plan_execution_units(waiting_jobs, |j| &j.request);
-            let total_units = planned_units.len();
-
-            for (completed, unit) in planned_units.into_iter().enumerate() {
-                match unit {
-                    PlannedUnit::Batch {
-                        tool: ToolId::MergePdf,
-                        request,
-                        items,
-                    } => {
-                        let ids: Vec<i32> = items.iter().map(|j| j.id).collect();
-                        {
-                            let mut store = worker_jobs.lock().unwrap();
-                            for j in store.iter_mut().filter(|j| ids.contains(&j.id)) {
-                                j.last_batch_member_ids = ids.clone();
-                            }
-                            begin_probing(&mut store, &ids);
-                            push_ui_event(&worker_ui_tx, UiEvent::JobsUpdated(store.clone()));
-                        }
-                        push_ui_event(
-                            &worker_ui_tx,
-                            UiEvent::StatusUpdate(
-                                format!("Merging {} PDFs…", items.len()),
-                                completed as f32 / total_units as f32,
-                            ),
-                        );
-
-                        let _ = run_unit(&worker_jobs, &ids, &cancel, Some(&worker_ui_tx), |ctx| {
-                            execute_batch_merge_pdf_in(&items, &request, ctx)
-                        });
-                    }
-                    PlannedUnit::Batch {
-                        tool: ToolId::ImagesToPdf,
-                        request,
-                        items,
-                    } => {
-                        let ids: Vec<i32> = items.iter().map(|j| j.id).collect();
-                        {
-                            let mut store = worker_jobs.lock().unwrap();
-                            for j in store.iter_mut().filter(|j| ids.contains(&j.id)) {
-                                j.last_batch_member_ids = ids.clone();
-                            }
-                            begin_probing(&mut store, &ids);
-                            push_ui_event(&worker_ui_tx, UiEvent::JobsUpdated(store.clone()));
-                        }
-                        push_ui_event(
-                            &worker_ui_tx,
-                            UiEvent::StatusUpdate(
-                                format!("Compiling {} images into PDF…", items.len()),
-                                completed as f32 / total_units as f32,
-                            ),
-                        );
-
-                        let _ = run_unit(&worker_jobs, &ids, &cancel, Some(&worker_ui_tx), |ctx| {
-                            execute_batch_images_to_pdf_in(&items, &request, ctx)
-                        });
-                    }
-                    PlannedUnit::Batch { items, .. } => {
-                        for job in items {
-                            run_single_job_in_store(
-                                &worker_jobs,
-                                &job,
-                                completed,
-                                total_units,
-                                &cancel,
-                                &worker_ui_tx,
-                            );
-                        }
-                    }
-                    PlannedUnit::Single(job) => {
-                        run_single_job_in_store(
-                            &worker_jobs,
-                            &job,
-                            completed,
-                            total_units,
-                            &cancel,
-                            &worker_ui_tx,
-                        );
-                    }
-                }
-
-                push_ui_event(
-                    &worker_ui_tx,
-                    UiEvent::StatusUpdate(
-                        format!("Completed {} of {}", completed + 1, total_units),
-                        (completed + 1) as f32 / total_units as f32,
-                    ),
-                );
-            }
-
-            worker_busy.store(false, Ordering::SeqCst);
-            push_ui_event(&worker_ui_tx, UiEvent::StatusUpdate("All done".into(), 1.0));
-            let _ = slint::invoke_from_event_loop({
-                let worker_window = worker_window.clone();
-                move || {
-                    if let Some(w) = worker_window.upgrade() {
-                        w.set_is_running(false);
-                    }
-                }
-            });
-        });
+        tx.send(Command::Unlock {
+            job_id,
+            password: password_secret,
+        })
+        .ok();
     });
 }
 
@@ -1176,211 +1412,76 @@ fn prune_secrets(store: &[JobRecord], secrets: &Mutex<JobSecretStore>) {
     });
 }
 
-fn run_single_job_in_store(
-    jobs_store: &Arc<Mutex<Vec<JobRecord>>>,
-    job: &JobRecord,
-    completed: usize,
-    total_units: usize,
-    cancel: &CancelToken,
-    ui_tx: &mpsc::Sender<UiEvent>,
-) {
-    {
-        let mut store = jobs_store.lock().unwrap();
-        begin_probing(&mut store, &[job.id]);
-        push_ui_event(ui_tx, UiEvent::JobsUpdated(store.clone()));
+/// Remove a job unless it is running. Returns false (and changes nothing) for a running job.
+fn remove_job_guarded(shared: &Shared, job_id: i32) -> bool {
+    let mut store = shared.jobs.lock().unwrap();
+    let running = store
+        .iter()
+        .any(|j| j.id == job_id && !runner::can_remove_or_move(j.status))
+        || shared.active.lock().unwrap().is_running(job_id);
+    if running {
+        return false;
     }
-
-    push_ui_event(
-        ui_tx,
-        UiEvent::StatusUpdate(
-            format!(
-                "Processing {} of {}: {}",
-                completed + 1,
-                total_units,
-                job.name
-            ),
-            completed as f32 / total_units as f32,
-        ),
-    );
-
-    let _ = run_unit(jobs_store, &[job.id], cancel, Some(ui_tx), |ctx| {
-        process_job_in(job, ctx)
-    });
+    store.retain(|j| j.id != job_id);
+    prune_secrets(&store, &shared.secrets);
+    true
 }
 
-fn execute_retry_in_store(
-    jobs_store: &Arc<Mutex<Vec<JobRecord>>>,
-    job_id: i32,
-    cancel: &CancelToken,
-    ui_tx: Option<&mpsc::Sender<UiEvent>>,
-) {
-    let members: Vec<JobRecord> = {
-        let mut store = jobs_store.lock().unwrap();
-        let Some(target) = store.iter().find(|j| j.id == job_id).cloned() else {
-            return;
-        };
-        let recorded_ids = target.last_batch_member_ids.clone();
-        match select_batch_retry_indices(
-            &store,
-            job_id,
-            &recorded_ids,
-            |j| j.id,
-            |j| &j.request,
-            |j| {
-                matches!(
-                    j.status,
-                    JobState::Failed | JobState::Canceled | JobState::Queued
-                )
-            },
-        ) {
-            Ok(indices) => indices.into_iter().map(|i| store[i].clone()).collect(),
-            Err(err) => {
-                reject_recorded_batch(&mut store, job_id, &recorded_ids, &err);
-                if let Some(tx) = ui_tx {
-                    push_ui_event(tx, UiEvent::JobsUpdated(store.clone()));
-                }
-                return;
-            }
-        }
-    };
-
-    let Some(primary) = members.first().cloned() else {
-        return;
-    };
-    let request = primary.request.clone();
-    let ids: Vec<i32> = members.iter().map(|j| j.id).collect();
-
-    {
-        let mut store = jobs_store.lock().unwrap();
-        for j in store.iter_mut().filter(|j| ids.contains(&j.id)) {
-            // A retry is a fresh attempt from `Queued` with the same immutable request.
-            if j.status.is_terminal() {
-                start_new_attempt(j);
-            }
-            if request.tool().spec().batch {
-                j.last_batch_member_ids = ids.clone();
-            }
-        }
-        begin_probing(&mut store, &ids);
-        if let Some(tx) = ui_tx {
-            push_ui_event(tx, UiEvent::JobsUpdated(store.clone()));
-        }
-    }
-
-    if let Some(tx) = ui_tx {
-        push_ui_event(
-            tx,
-            UiEvent::StatusUpdate(format!("Retrying: {}", primary.name), 0.0),
-        );
-    }
-
-    let _ = run_unit(jobs_store, &ids, cancel, ui_tx, |ctx| {
-        match request.tool() {
-            ToolId::MergePdf => execute_batch_merge_pdf_in(&members, &request, ctx),
-            ToolId::ImagesToPdf => execute_batch_images_to_pdf_in(&members, &request, ctx),
-            _ => process_job_in(&primary, ctx),
-        }
-    });
-}
-
-fn setup_retry_job(
-    window: &MainWindow,
-    jobs_store: &Arc<Mutex<Vec<JobRecord>>>,
-    is_busy: &Arc<AtomicBool>,
-    ui_tx: &mpsc::Sender<UiEvent>,
-) {
-    let window_weak = window.as_weak();
-    let jobs_store = Arc::clone(jobs_store);
-    let is_busy = Arc::clone(is_busy);
+fn setup_remove_job(window: &MainWindow, shared: &Shared, ui_tx: &mpsc::Sender<UiEvent>) {
+    let shared = shared.clone();
     let ui_tx = ui_tx.clone();
-
-    window.on_retry_job(move |job_id| {
-        if is_busy.swap(true, Ordering::SeqCst) {
-            return;
-        }
-
-        let Some(window) = window_weak.upgrade() else {
-            is_busy.store(false, Ordering::SeqCst);
-            return;
-        };
-
-        window.set_is_running(true);
-        let worker_window = window_weak.clone();
-        let worker_jobs = Arc::clone(&jobs_store);
-        let worker_busy = Arc::clone(&is_busy);
-        let worker_ui_tx = ui_tx.clone();
-
-        thread::spawn(move || {
-            // Re-runs with the job's original immutable `JobRequest` (and compatible batch peers).
-            execute_retry_in_store(
-                &worker_jobs,
-                job_id,
-                &CancelToken::new(),
-                Some(&worker_ui_tx),
-            );
-
-            worker_busy.store(false, Ordering::SeqCst);
-            push_ui_event(&worker_ui_tx, UiEvent::StatusUpdate("Ready".into(), -1.0));
-            let _ = slint::invoke_from_event_loop({
-                let worker_window = worker_window.clone();
-                move || {
-                    if let Some(w) = worker_window.upgrade() {
-                        w.set_is_running(false);
-                    }
-                }
-            });
-        });
-    });
-}
-
-fn setup_remove_job(
-    window: &MainWindow,
-    jobs_store: &Arc<Mutex<Vec<JobRecord>>>,
-    secret_store: &Arc<Mutex<JobSecretStore>>,
-    ui_tx: &mpsc::Sender<UiEvent>,
-) {
-    let jobs_store = Arc::clone(jobs_store);
-    let secret_store = Arc::clone(secret_store);
-    let ui_tx = ui_tx.clone();
-
     window.on_remove_job(move |job_id| {
-        let mut store = jobs_store.lock().unwrap();
-        store.retain(|j| j.id != job_id);
-        prune_secrets(&store, &secret_store);
-        push_ui_event(&ui_tx, UiEvent::JobsUpdated(store.clone()));
+        if !remove_job_guarded(&shared, job_id) {
+            push_ui_event(
+                &ui_tx,
+                UiEvent::StatusUpdate("Cancel this job before removing it.".into(), -1.0),
+            );
+            return;
+        }
+        push_ui_event(
+            &ui_tx,
+            UiEvent::JobsUpdated(shared.jobs.lock().unwrap().clone()),
+        );
     });
 }
 
-fn setup_move_job(
-    window: &MainWindow,
-    jobs_store: &Arc<Mutex<Vec<JobRecord>>>,
-    ui_tx: &mpsc::Sender<UiEvent>,
-) {
-    let jobs_store_up = Arc::clone(jobs_store);
-    let ui_tx_up = ui_tx.clone();
-
-    window.on_move_job_up(move |job_id| {
-        let mut store = jobs_store_up.lock().unwrap();
-        if let Some(idx) = store.iter().position(|j| j.id == job_id) {
-            if idx > 0 {
-                store.swap(idx, idx - 1);
-            }
+/// Move a job one place up or down, unless it or its neighbour is running.
+fn move_job_guarded(store: &mut [JobRecord], job_id: i32, up: bool) -> bool {
+    let Some(idx) = store.iter().position(|j| j.id == job_id) else {
+        return false;
+    };
+    let other = if up {
+        idx.checked_sub(1)
+    } else {
+        Some(idx + 1).filter(|&o| o < store.len())
+    };
+    match other {
+        Some(o)
+            if runner::can_remove_or_move(store[idx].status)
+                && runner::can_remove_or_move(store[o].status) =>
+        {
+            store.swap(idx, o);
+            true
         }
-        push_ui_event(&ui_tx_up, UiEvent::JobsUpdated(store.clone()));
-    });
+        _ => false,
+    }
+}
 
-    let jobs_store_down = Arc::clone(jobs_store);
-    let ui_tx_down = ui_tx.clone();
-
-    window.on_move_job_down(move |job_id| {
-        let mut store = jobs_store_down.lock().unwrap();
-        if let Some(idx) = store.iter().position(|j| j.id == job_id) {
-            if idx + 1 < store.len() {
-                store.swap(idx, idx + 1);
-            }
+fn setup_move_job(window: &MainWindow, shared: &Shared, ui_tx: &mpsc::Sender<UiEvent>) {
+    for up in [true, false] {
+        let shared = shared.clone();
+        let ui_tx = ui_tx.clone();
+        let handler = move |job_id: i32| {
+            let mut store = shared.jobs.lock().unwrap();
+            move_job_guarded(&mut store, job_id, up);
+            push_ui_event(&ui_tx, UiEvent::JobsUpdated(store.clone()));
+        };
+        if up {
+            window.on_move_job_up(handler);
+        } else {
+            window.on_move_job_down(handler);
         }
-        push_ui_event(&ui_tx_down, UiEvent::JobsUpdated(store.clone()));
-    });
+    }
 }
 
 fn input_file_name(job: &JobRecord) -> String {
@@ -2500,7 +2601,7 @@ mod tests {
             guard[0].error = "simulated transient failure".into();
         }
 
-        execute_retry_in_store(&store, 1, &CancelToken::none(), None);
+        execute_retry_in_store(&store, 1);
         {
             let guard = store.lock().unwrap();
             assert_eq!(guard[0].status, JobState::Saved);
@@ -2532,7 +2633,7 @@ mod tests {
             guard[2].last_batch_member_ids = vec![2, 3];
         }
 
-        execute_retry_in_store(&store, 2, &CancelToken::none(), None);
+        execute_retry_in_store(&store, 2);
         {
             let guard = store.lock().unwrap();
             assert_eq!(guard[1].status, JobState::Saved);
@@ -2566,7 +2667,7 @@ mod tests {
             guard[4].last_batch_member_ids = vec![4, 5];
         }
 
-        execute_retry_in_store(&store, 4, &CancelToken::none(), None);
+        execute_retry_in_store(&store, 4);
         {
             let guard = store.lock().unwrap();
             assert_eq!(guard[3].status, JobState::Saved);
@@ -2885,7 +2986,6 @@ mod tests {
     #[test]
     fn password_unlock_claim_prevents_concurrent_unlock_races() {
         let store = Arc::new(Mutex::new(Vec::new()));
-        let is_busy = AtomicBool::new(false);
         let req = JobRequest::new(
             ToolId::CompressPdf,
             DesktopToolOptions::CompressPdf,
@@ -2904,22 +3004,200 @@ mod tests {
             guard[0].status = JobState::NeedsPassword;
         }
 
-        // Unknown job releases busy flag cleanly
-        assert!(try_claim_password_unlock(&store, &is_busy, 999, None).is_none());
-        assert!(!is_busy.load(Ordering::SeqCst));
+        // Unknown job: nothing to claim.
+        assert!(try_claim_password_unlock(&store, 999, None).is_none());
 
-        // First unlock claims busy flag and preserves immutable request
-        let claimed = try_claim_password_unlock(&store, &is_busy, 1, None)
-            .unwrap()
-            .unwrap();
+        // First unlock claims the job (now Probing) and preserves the immutable request.
+        let claimed = try_claim_password_unlock(&store, 1, None).unwrap().unwrap();
         match claimed {
             PasswordUnlockClaim::Single(job) => assert_eq!(job.request, req),
             PasswordUnlockClaim::MergeBatch { .. } => panic!("expected Single claim"),
         }
-        assert!(is_busy.load(Ordering::SeqCst));
+        assert_eq!(store.lock().unwrap()[0].status, JobState::Probing);
 
-        // Second concurrent unlock attempt is rejected without racing
-        assert!(try_claim_password_unlock(&store, &is_busy, 1, None).is_none());
+        // A second unlock of the same job (commands run one at a time on the worker) is refused
+        // because the job is no longer waiting for a password, and the job is left as it was.
+        let second = try_claim_password_unlock(&store, 1, None).unwrap();
+        assert_eq!(second.err().unwrap().code, ErrorCode::InvalidOption);
+        assert_eq!(store.lock().unwrap()[0].status, JobState::Probing);
+    }
+
+    fn convert_job_in(dir: &Path, id: i32) -> JobRecord {
+        let input = dir.join(format!("plain-{id}.png"));
+        std::fs::copy(fixture_path("plain.png"), &input).unwrap();
+        let mut job = record_for(
+            input,
+            ToolId::ConvertImage,
+            DesktopToolOptions::ConvertImage {
+                target: Format::Webp,
+                quality: 80,
+            },
+            OutputDestination::NextToSource,
+        );
+        job.id = id;
+        job
+    }
+
+    #[test]
+    fn canceling_a_waiting_job_means_process_all_skips_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(vec![
+            convert_job_in(dir.path(), 1),
+            convert_job_in(dir.path(), 2),
+        ]));
+        let shared = Shared::for_store(&store);
+        cancel_job(&shared, 2, None);
+        assert_eq!(store.lock().unwrap()[1].status, JobState::Canceled);
+
+        execute_command(&shared, Command::ProcessAll, None);
+        let guard = store.lock().unwrap();
+        assert_eq!(guard[0].status, JobState::Saved);
+        assert_eq!(guard[1].status, JobState::Canceled);
+        let outputs: Vec<String> = dir_names(dir.path())
+            .into_iter()
+            .filter(|n| n.contains("converted"))
+            .collect();
+        assert_eq!(outputs, vec!["plain-1 (converted).webp"]);
+    }
+
+    #[test]
+    fn cancel_reaches_a_running_job_through_its_units_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(vec![convert_job_in(dir.path(), 1)]));
+        let shared = Shared::for_store(&store);
+        // The worker has registered the unit and the job is running.
+        let token = shared.active.lock().unwrap().start(&[1]);
+        begin_probing(&mut store.lock().unwrap(), &[1]);
+        cancel_job(&shared, 1, None);
+        assert!(token.is_canceled());
+        // Running jobs can't be removed or moved, and clear-all keeps them.
+        assert!(!remove_job_guarded(&shared, 1));
+        assert_eq!(clear_jobs_guarded(&shared), 1);
+        store.lock().unwrap().push(convert_job_in(dir.path(), 2));
+        assert!(!move_job_guarded(&mut store.lock().unwrap(), 2, true));
+    }
+
+    #[test]
+    fn canceling_a_password_waiting_merge_cancels_the_batch_and_drops_passwords() {
+        let work = tempfile::tempdir().unwrap();
+        let a = write_locked_marker_pdf(work.path(), "a.pdf", 101, 51, "alpha-pw");
+        let b = write_locked_marker_pdf(work.path(), "b.pdf", 103, 53, "bravo-pw");
+        let (fx, _) = MergeFixture::run(vec![a, b], work);
+        fx.unlock(1, "alpha-pw").unwrap_err();
+        assert!(fx.secrets.lock().unwrap().contains(1));
+
+        let shared = Shared {
+            jobs: Arc::clone(&fx.store),
+            secrets: Arc::new(Mutex::new(JobSecretStore::new())),
+            active: Arc::new(Mutex::new(ActiveRun::default())),
+        };
+        // Use the fixture's own secret store so pruning is observable.
+        std::mem::swap(
+            &mut *shared.secrets.lock().unwrap(),
+            &mut *fx.secrets.lock().unwrap(),
+        );
+        cancel_job(&shared, 2, None);
+        assert!(fx
+            .store
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|j| j.status == JobState::Canceled));
+        assert!(shared.secrets.lock().unwrap().is_empty());
+        assert!(dir_names(fx.out.path()).is_empty());
+    }
+
+    #[test]
+    fn only_failed_or_canceled_jobs_can_be_retried_and_retry_is_a_fresh_attempt() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rejected = convert_job_in(dir.path(), 1);
+        rejected.status = JobState::Rejected;
+        rejected.error = "bad input".into();
+        let mut canceled = convert_job_in(dir.path(), 2);
+        canceled.status = JobState::Canceled;
+        canceled.error = "Canceled.".into();
+        let store = Arc::new(Mutex::new(vec![rejected, canceled]));
+
+        let err = prepare_retry(&mut store.lock().unwrap(), 1).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidOption);
+        assert_eq!(store.lock().unwrap()[0].status, JobState::Rejected);
+
+        let ids = prepare_retry(&mut store.lock().unwrap(), 2).unwrap();
+        assert_eq!(ids, vec![2]);
+        {
+            let guard = store.lock().unwrap();
+            assert_eq!(guard[1].status, JobState::Queued);
+            assert!(guard[1].error.is_empty());
+        }
+        execute_command(&Shared::for_store(&store), Command::Retry(ids), None);
+        assert_eq!(store.lock().unwrap()[1].status, JobState::Saved);
+    }
+
+    #[test]
+    fn retry_of_a_batch_whose_member_was_canceled_runs_nothing() {
+        let work = tempfile::tempdir().unwrap();
+        let p1 = write_marker_pdf(work.path(), "one.pdf", 64, 48);
+        let p2 = write_marker_pdf(work.path(), "two.pdf", 96, 48);
+        let out = tempfile::tempdir().unwrap();
+        let request = JobRequest::new(
+            ToolId::MergePdf,
+            DesktopToolOptions::MergePdf,
+            OutputDestination::Directory(out.path().to_path_buf()),
+        )
+        .unwrap();
+        let mut jobs = Vec::new();
+        let mut next_id = 1;
+        enqueue_files(&mut jobs, &mut next_id, vec![p1, p2], &request);
+        for j in jobs.iter_mut() {
+            j.status = JobState::Failed;
+            j.last_batch_member_ids = vec![1, 2];
+        }
+        let store = Arc::new(Mutex::new(jobs));
+        let shared = Shared::for_store(&store);
+        let ids = prepare_retry(&mut store.lock().unwrap(), 1).unwrap();
+        assert_eq!(ids, vec![1, 2]);
+        // Cancel one member after Retry was clicked: the whole recorded batch is canceled.
+        cancel_job(&shared, 2, None);
+        execute_command(&shared, Command::Retry(ids), None);
+        assert!(store
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|j| j.status == JobState::Canceled));
+        assert!(dir_names(out.path()).is_empty());
+    }
+
+    #[test]
+    fn unlock_commands_run_one_after_another_on_the_worker() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("locked.pdf");
+        std::fs::copy(fixture_path("locked.pdf"), &input).unwrap();
+        let job = record_for(
+            input,
+            ToolId::CompressPdf,
+            DesktopToolOptions::CompressPdf,
+            OutputDestination::NextToSource,
+        );
+        let store = Arc::new(Mutex::new(vec![job]));
+        let shared = Shared::for_store(&store);
+        store.lock().unwrap()[0].status = JobState::NeedsPassword;
+
+        // Two unlocks queued back to back: the first succeeds, the second finds nothing to do.
+        let (tx, rx) = mpsc::channel::<Command>();
+        for _ in 0..2 {
+            tx.send(Command::Unlock {
+                job_id: 1,
+                password: SecretPassword::new("user-pw-123"),
+            })
+            .unwrap();
+        }
+        drop(tx);
+        while let Ok(command) = rx.recv() {
+            execute_command(&shared, command, None);
+        }
+        let guard = store.lock().unwrap();
+        assert_eq!(guard[0].status, JobState::Saved);
+        assert_eq!(dir_names(dir.path()).len(), 2, "one output, written once");
     }
 
     #[test]
@@ -2961,7 +3239,7 @@ mod tests {
         }
 
         // Retry via job 2 (now last in UI order)
-        execute_retry_in_store(&store, 2, &CancelToken::none(), None);
+        execute_retry_in_store(&store, 2);
 
         let guard = store.lock().unwrap();
         assert!(guard.iter().all(|j| j.status == JobState::Saved));
@@ -3010,7 +3288,7 @@ mod tests {
             guard.retain(|j| j.id != 2);
         }
 
-        execute_retry_in_store(&store, 1, &CancelToken::none(), None);
+        execute_retry_in_store(&store, 1);
 
         let guard = store.lock().unwrap();
         assert_eq!(guard.len(), 2);
@@ -3045,7 +3323,6 @@ mod tests {
         .unwrap();
 
         let store = Arc::new(Mutex::new(Vec::new()));
-        let is_busy = AtomicBool::new(false);
         let mut next_id = 1;
         {
             let mut guard = store.lock().unwrap();
@@ -3071,9 +3348,7 @@ mod tests {
         }
 
         // 1. Incorrect password keeps all members in NeedsPassword and releases busy flag
-        let wrong_claim = try_claim_password_unlock(&store, &is_busy, 2, None)
-            .unwrap()
-            .unwrap();
+        let wrong_claim = try_claim_password_unlock(&store, 2, None).unwrap().unwrap();
         let wrong_res = complete_password_unlock_claim(
             &store,
             &Mutex::new(JobSecretStore::new()),
@@ -3082,7 +3357,6 @@ mod tests {
             &CancelToken::none(),
             None,
         );
-        is_busy.store(false, Ordering::SeqCst);
         assert_eq!(wrong_res.unwrap_err().code, ErrorCode::WrongPassword);
         {
             let guard = store.lock().unwrap();
@@ -3100,9 +3374,7 @@ mod tests {
         assert!(std::fs::read_dir(out_dir.path()).unwrap().next().is_none());
 
         // 2. Correct password unlocks full batch in recorded order [1, 2] into original destination
-        let right_claim = try_claim_password_unlock(&store, &is_busy, 2, None)
-            .unwrap()
-            .unwrap();
+        let right_claim = try_claim_password_unlock(&store, 2, None).unwrap().unwrap();
         let out_path = complete_password_unlock_claim(
             &store,
             &Mutex::new(JobSecretStore::new()),
@@ -3112,7 +3384,6 @@ mod tests {
             None,
         )
         .unwrap();
-        is_busy.store(false, Ordering::SeqCst);
 
         assert_eq!(out_path.parent(), Some(out_dir.path()));
         // Derived from recorded first member `enc_first.pdf`, NOT reordered `enc_second.pdf`
@@ -3148,7 +3419,6 @@ mod tests {
         .unwrap();
 
         let store = Arc::new(Mutex::new(Vec::new()));
-        let is_busy = AtomicBool::new(false);
         let mut next_id = 1;
         {
             let mut guard = store.lock().unwrap();
@@ -3167,9 +3437,7 @@ mod tests {
             guard.reverse();
         }
 
-        let claim = try_claim_password_unlock(&store, &is_busy, 3, None)
-            .unwrap()
-            .unwrap();
+        let claim = try_claim_password_unlock(&store, 3, None).unwrap().unwrap();
         let out_path = complete_password_unlock_claim(
             &store,
             &Mutex::new(JobSecretStore::new()),
@@ -3179,7 +3447,6 @@ mod tests {
             None,
         )
         .unwrap();
-        is_busy.store(false, Ordering::SeqCst);
 
         let merged_bytes = std::fs::read(&out_path).unwrap();
         assert_eq!(pdf::probe_pdf(&merged_bytes).unwrap().page_count, 8);
@@ -3233,7 +3500,6 @@ mod tests {
         out: tempfile::TempDir,
         store: Arc<Mutex<Vec<JobRecord>>>,
         secrets: Mutex<JobSecretStore>,
-        busy: AtomicBool,
     }
 
     impl MergeFixture {
@@ -3265,26 +3531,23 @@ mod tests {
                 out,
                 store,
                 secrets: Mutex::new(JobSecretStore::new()),
-                busy: AtomicBool::new(false),
             };
             (fixture, result.unwrap_err())
         }
 
         /// Enter `password` from row `clicked`, as the dialog does.
         fn unlock(&self, clicked: i32, password: &str) -> Result<PathBuf, RefractError> {
-            let claim = try_claim_password_unlock(&self.store, &self.busy, clicked, None)
+            let claim = try_claim_password_unlock(&self.store, clicked, None)
                 .unwrap()
                 .unwrap();
-            let res = complete_password_unlock_claim(
+            complete_password_unlock_claim(
                 &self.store,
                 &self.secrets,
                 claim,
                 SecretPassword::new(password),
                 &CancelToken::none(),
                 None,
-            );
-            self.busy.store(false, Ordering::SeqCst);
-            res
+            )
         }
 
         fn awaiting(&self) -> Vec<i32> {
@@ -3455,7 +3718,6 @@ mod tests {
         // 1. Incompatible batch member request fails cleanly, marks BOTH batch members Failed
         //    (neither stays stuck in NeedsPassword), and leaves unrelated jobs untouched.
         let store_incompat = Arc::new(Mutex::new(Vec::new()));
-        let is_busy = AtomicBool::new(false);
         let mut next_id = 1;
         let unrelated_req = JobRequest::new(
             ToolId::CompressPdf,
@@ -3490,12 +3752,11 @@ mod tests {
             guard[2].status = JobState::NeedsPassword;
         }
 
-        let err = try_claim_password_unlock(&store_incompat, &is_busy, 1, None)
+        let err = try_claim_password_unlock(&store_incompat, 1, None)
             .unwrap()
             .err()
             .expect("expected incompatible batch error");
         assert_eq!(err.code, ErrorCode::InvalidOption);
-        assert!(!is_busy.load(Ordering::SeqCst));
         {
             let guard = store_incompat.lock().unwrap();
             assert_eq!(guard[0].status, JobState::Rejected);
@@ -3525,12 +3786,11 @@ mod tests {
             guard.retain(|j| j.id != 2);
         }
 
-        let missing_err = try_claim_password_unlock(&store_missing, &is_busy, 1, None)
+        let missing_err = try_claim_password_unlock(&store_missing, 1, None)
             .unwrap()
             .err()
             .expect("expected missing member error");
         assert_eq!(missing_err.code, ErrorCode::InvalidOption);
-        assert!(!is_busy.load(Ordering::SeqCst));
         {
             let guard = store_missing.lock().unwrap();
             assert_eq!(guard[0].status, JobState::Rejected);
@@ -3561,12 +3821,11 @@ mod tests {
                 );
                 guard[0].status = non_unlock_status;
             }
-            let status_err = try_claim_password_unlock(&store_state, &is_busy, 1, None)
+            let status_err = try_claim_password_unlock(&store_state, 1, None)
                 .unwrap()
                 .err()
                 .expect("expected invalid unlock state error");
             assert_eq!(status_err.code, ErrorCode::InvalidOption);
-            assert!(!is_busy.load(Ordering::SeqCst));
             assert_eq!(store_state.lock().unwrap()[0].status, non_unlock_status);
         }
     }
