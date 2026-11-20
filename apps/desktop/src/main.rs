@@ -1631,15 +1631,21 @@ fn process_job(job: &JobRecord) -> Result<PathBuf, RefractError> {
         } => {
             let dir = output_dir(job);
             let name = output_file_name(job, format_primary_extension(*target));
-            // convert-audio does not require ffprobe; without it only the type checks run.
-            let ffprobe = audio::is_ffprobe_available();
+            // convert-audio does not require ffprobe, and FFmpeg may convert inputs ffprobe can't
+            // measure; in either case the length check is skipped and only the type checks run.
+            let input_secs = if audio::is_ffprobe_available() {
+                audio::probe_duration(&job.input_path).ok()
+            } else {
+                None
+            };
             let mut expect = Expect::format(*target);
-            if ffprobe {
-                expect = expect.duration(audio::probe_duration(&job.input_path)?);
+            if let Some(secs) = input_secs {
+                expect = expect.duration(secs);
             }
             let probe: verify::DurationProbe = &audio::probe_duration;
-            let check =
-                |out: &Path| verify::verify_audio_file(out, &expect, ffprobe.then_some(probe));
+            let check = |out: &Path| {
+                verify::verify_audio_file(out, &expect, input_secs.is_some().then_some(probe))
+            };
             audio::convert_audio_to(
                 &job.input_path,
                 audio::AudioOutput::Unique {
