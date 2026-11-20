@@ -4098,6 +4098,7 @@ name = "refract-desktop"
 version = "1.1.0"
 dependencies = [
  "dirs",
+ "lopdf",
  "open",
  "refract-core",
  "refract-engine",

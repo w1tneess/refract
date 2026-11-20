@@ -706,6 +706,22 @@ pub fn merge_pdfs_with_inputs(
     Ok(out)
 }
 
+const INPUT_INDEX_TAG: &str = "input_index=";
+
+/// Error `details` naming which input (0-based) of a multi-file job a password error is about.
+pub fn input_index_details(index: usize) -> String {
+    format!("{}{}", INPUT_INDEX_TAG, index)
+}
+
+/// Which input (0-based) a password error is about, if it was tagged with [`input_index_details`].
+pub fn input_index_of(err: &RefractError) -> Option<usize> {
+    err.details
+        .as_deref()?
+        .strip_prefix(INPUT_INDEX_TAG)?
+        .parse()
+        .ok()
+}
+
 fn tag_merge_input_error(err: RefractError, index: usize) -> RefractError {
     match err.code {
         ErrorCode::NeedsPassword => RefractError::with_details(
@@ -714,12 +730,12 @@ fn tag_merge_input_error(err: RefractError, index: usize) -> RefractError {
                 "Document #{} is protected. Enter its password to continue.",
                 index + 1
             ),
-            format!("input_index={}", index),
+            input_index_details(index),
         ),
         ErrorCode::WrongPassword => RefractError::with_details(
             ErrorCode::WrongPassword,
             format!("That password did not unlock document #{}.", index + 1),
-            format!("input_index={}", index),
+            input_index_details(index),
         ),
         _ => err,
     }

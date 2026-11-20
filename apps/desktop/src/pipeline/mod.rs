@@ -1,5 +1,6 @@
 pub mod options;
 pub mod preflight;
+pub mod secrets;
 pub mod verify;
 
 pub use options::{

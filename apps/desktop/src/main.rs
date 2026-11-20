@@ -2,6 +2,8 @@ slint::include_modules!();
 
 mod pipeline;
 
+use pipeline::preflight::{preflight_inputs_with_passwords, PdfPasswords};
+use pipeline::secrets::{self, JobSecretStore};
 use pipeline::verify::{self, Expect};
 use pipeline::{
     plan_execution_units, preflight_inputs, resolve_recorded_batch_indices,
@@ -13,6 +15,7 @@ use refract_core::error::{ErrorCode, RefractError};
 use refract_core::format::Format;
 use refract_core::naming;
 use refract_core::tools::ToolId;
+use refract_engine::pdf::SecretPassword;
 use refract_engine::{audio, image, pdf, persist, render};
 use slint::{ComponentHandle, Model, SharedString, VecModel};
 use std::collections::HashSet;
@@ -31,6 +34,8 @@ struct JobRecord {
     tool_label: String,
     request: JobRequest,
     last_batch_member_ids: Vec<i32>,
+    /// This job's own file is the one a merge batch (or single job) is waiting on a password for.
+    awaiting_password: bool,
     status: JobStatus,
     error: String,
     output_path: PathBuf,
@@ -318,6 +323,8 @@ fn main() -> Result<(), slint::PlatformError> {
 
     // Shared state
     let jobs_store: Arc<Mutex<Vec<JobRecord>>> = Arc::new(Mutex::new(Vec::new()));
+    // Passwords for locked PDFs live here, never in `JobRecord` (which is cloned into UI updates).
+    let secret_store = Arc::new(Mutex::new(JobSecretStore::new()));
     let next_id = Arc::new(Mutex::new(1i32));
     let is_busy = Arc::new(AtomicBool::new(false));
     let (ui_tx, ui_rx) = mpsc::channel::<UiEvent>();
@@ -347,15 +354,15 @@ fn main() -> Result<(), slint::PlatformError> {
     // Callbacks
     setup_pick_files(&main_window, &jobs_store, &next_id, &ui_tx);
     setup_pick_output_folder(&main_window, &ui_tx);
-    setup_clear_jobs(&main_window, &jobs_store, &ui_tx);
+    setup_clear_jobs(&main_window, &jobs_store, &secret_store, &ui_tx);
     setup_open_output_folder(&main_window);
     setup_start_processing(&main_window, &jobs_store, &is_busy, &ui_tx);
     setup_retry_job(&main_window, &jobs_store, &is_busy, &ui_tx);
-    setup_remove_job(&main_window, &jobs_store, &ui_tx);
+    setup_remove_job(&main_window, &jobs_store, &secret_store, &ui_tx);
     setup_move_job(&main_window, &jobs_store, &ui_tx);
     setup_toggle_theme(&main_window);
     setup_tool_changed(&main_window, &tool_specs);
-    setup_password_handlers(&main_window, &jobs_store, &is_busy, &ui_tx);
+    setup_password_handlers(&main_window, &jobs_store, &secret_store, &is_busy, &ui_tx);
 
     main_window.run()
 }
@@ -486,6 +493,7 @@ fn enqueue_files(
             tool_label: tool_label.clone(),
             request: request.clone(),
             last_batch_member_ids: Vec::new(),
+            awaiting_password: false,
             status: JobStatus::Waiting,
             error: String::new(),
             output_path: PathBuf::new(),
@@ -567,14 +575,17 @@ fn setup_pick_output_folder(window: &MainWindow, ui_tx: &mpsc::Sender<UiEvent>) 
 fn setup_clear_jobs(
     window: &MainWindow,
     jobs_store: &Arc<Mutex<Vec<JobRecord>>>,
+    secret_store: &Arc<Mutex<JobSecretStore>>,
     ui_tx: &mpsc::Sender<UiEvent>,
 ) {
     let jobs_store = Arc::clone(jobs_store);
+    let secret_store = Arc::clone(secret_store);
     let ui_tx = ui_tx.clone();
 
     window.on_clear_jobs(move || {
         let mut store = jobs_store.lock().unwrap();
         store.clear();
+        prune_secrets(&store, &secret_store);
         push_ui_event(&ui_tx, UiEvent::JobsUpdated(store.clone()));
         push_ui_event(&ui_tx, UiEvent::StatusUpdate("Ready".into(), -1.0));
     });
@@ -734,55 +745,76 @@ fn try_claim_password_unlock(
     Some(outcome)
 }
 
+/// Run an unlock with the password the user just entered.
+///
+/// Single jobs use the password once and drop it (zeroing it). For merge-pdf, the password is
+/// stored for the member whose file is awaiting one, then every stored password for the batch is
+/// taken out of the store for the attempt (no lock is held while the engine runs). Each member
+/// uses its own password; files without one try the others, newest first. Afterwards a password
+/// is put back only if its job still awaits one (a wrong one is dropped), via `prune_secrets`.
 fn complete_password_unlock_claim(
     jobs_store: &Arc<Mutex<Vec<JobRecord>>>,
+    secret_store: &Mutex<JobSecretStore>,
     claim: PasswordUnlockClaim,
-    password: &str,
+    entered: SecretPassword,
     ui_tx: Option<&mpsc::Sender<UiEvent>>,
 ) -> Result<PathBuf, RefractError> {
-    let (ids, result) = match claim {
+    let (ids, result, taken) = match claim {
         PasswordUnlockClaim::MergeBatch { request, members } => {
             let ids: Vec<i32> = members.iter().map(|j| j.id).collect();
-            let res = execute_batch_merge_pdf_with_password(&members, &request, Some(password));
-            (ids, res)
+            let key = members
+                .iter()
+                .find(|j| j.awaiting_password)
+                .unwrap_or(&members[0])
+                .id;
+            let taken = {
+                let mut secrets = secret_store.lock().unwrap();
+                secrets.insert(key, entered);
+                secrets.take(&ids)
+            };
+            let per_input: Vec<Option<&str>> = taken
+                .iter()
+                .map(|e| e.as_ref().map(|(_, pw)| pw.as_str()))
+                .collect();
+            let guesses: Vec<&str> = secrets::newest_first(&taken)
+                .into_iter()
+                .filter_map(|i| per_input[i])
+                .collect();
+            let passwords = PdfPasswords {
+                all: None,
+                per_input: &per_input,
+                guesses: &guesses,
+            };
+            let res = execute_batch_merge_pdf_with_passwords(&members, &request, passwords);
+            drop(guesses);
+            drop(per_input);
+            (ids, res, taken)
         }
         PasswordUnlockClaim::Single(job) => {
-            let id = job.id;
-            let res = process_job_with_password(&job, password);
-            (vec![id], res)
+            let res = process_job_with_password(&job, &entered);
+            drop(entered);
+            (vec![job.id], res, Vec::new())
         }
     };
 
     let mut store = jobs_store.lock().unwrap();
-    for j in store.iter_mut().filter(|j| ids.contains(&j.id)) {
-        match &result {
-            Ok(out_path) => {
-                j.status = JobStatus::Done;
-                j.output_path = out_path.clone();
-                j.error.clear();
-            }
-            Err(RefractError {
-                code: ErrorCode::WrongPassword,
-                ..
-            }) => {
-                j.status = JobStatus::NeedsPassword;
-                j.error = "Wrong password — check it and try again.".to_string();
-            }
-            Err(RefractError {
-                code: ErrorCode::NeedsPassword,
-                message,
-                ..
-            }) => {
-                j.status = JobStatus::NeedsPassword;
-                j.error = message.clone();
-            }
-            Err(e) => {
-                j.status = JobStatus::Failed;
-                j.error = e.to_string();
+    apply_result_to_jobs(&mut store, &ids, &result);
+    {
+        // Lock order everywhere: jobs, then secrets.
+        let wrong_index = match &result {
+            Err(e) if e.code == ErrorCode::WrongPassword => pdf::input_index_of(e),
+            _ => None,
+        };
+        let mut secrets = secret_store.lock().unwrap();
+        for (i, (id, entry)) in ids.iter().zip(taken).enumerate() {
+            if let Some(entry) = entry {
+                if Some(i) != wrong_index {
+                    secrets.restore(*id, entry);
+                }
             }
         }
-        j.progress = -1.0;
     }
+    prune_secrets(&store, secret_store);
 
     if let Some(tx) = ui_tx {
         push_ui_event(tx, UiEvent::JobsUpdated(store.clone()));
@@ -793,6 +825,7 @@ fn complete_password_unlock_claim(
 fn setup_password_handlers(
     window: &MainWindow,
     jobs_store: &Arc<Mutex<Vec<JobRecord>>>,
+    secret_store: &Arc<Mutex<JobSecretStore>>,
     is_busy: &Arc<AtomicBool>,
     ui_tx: &mpsc::Sender<UiEvent>,
 ) {
@@ -808,10 +841,15 @@ fn setup_password_handlers(
 
     let window_weak = window.as_weak();
     let jobs_store = Arc::clone(jobs_store);
+    let secret_store = Arc::clone(secret_store);
     let is_busy = Arc::clone(is_busy);
     let ui_tx = ui_tx.clone();
 
     window.on_password_entered(move |job_id, password| {
+        // Copy out of the UI string at once; from here on it is only a zeroed-on-drop secret.
+        // The UI toolkit's own copy of the typed text is outside Refract's control.
+        let entered = SecretPassword::new(password.as_str());
+        drop(password);
         let Some(window) = window_weak.upgrade() else {
             return;
         };
@@ -819,6 +857,8 @@ fn setup_password_handlers(
         let claim = match try_claim_password_unlock(&jobs_store, &is_busy, job_id, Some(&ui_tx)) {
             Some(Ok(claim)) => claim,
             Some(Err(err)) => {
+                let store = jobs_store.lock().unwrap();
+                prune_secrets(&store, &secret_store);
                 push_ui_event(&ui_tx, UiEvent::StatusUpdate(err.to_string(), -1.0));
                 return;
             }
@@ -828,6 +868,7 @@ fn setup_password_handlers(
         window.set_is_running(true);
         let worker_window = window_weak.clone();
         let worker_jobs = Arc::clone(&jobs_store);
+        let worker_secrets = Arc::clone(&secret_store);
         let worker_busy = Arc::clone(&is_busy);
         let worker_ui_tx = ui_tx.clone();
 
@@ -839,8 +880,13 @@ fn setup_password_handlers(
 
             // Uses the job's original immutable `JobRequest` (and recorded batch members for
             // `merge-pdf`) — never recaptures UI options.
-            let _ =
-                complete_password_unlock_claim(&worker_jobs, claim, &password, Some(&worker_ui_tx));
+            let _ = complete_password_unlock_claim(
+                &worker_jobs,
+                &worker_secrets,
+                claim,
+                entered,
+                Some(&worker_ui_tx),
+            );
 
             worker_busy.store(false, Ordering::SeqCst);
             push_ui_event(&worker_ui_tx, UiEvent::StatusUpdate("Ready".into(), -1.0));
@@ -1021,20 +1067,38 @@ fn apply_batch_result(
     ui_tx: &mpsc::Sender<UiEvent>,
 ) {
     let mut store = jobs_store.lock().unwrap();
+    apply_result_to_jobs(&mut store, ids, &result);
+    push_ui_event(ui_tx, UiEvent::JobsUpdated(store.clone()));
+}
+
+/// Record a run's result on the jobs it covered. `ids` are in input order, so a password error's
+/// `input_index` names the member whose file is locked. Every member then waits for a password
+/// with the same prompt (naming that file), and only that member is marked `awaiting_password`.
+/// This is the only place job results are applied, so first runs, retries and unlocks agree.
+fn apply_result_to_jobs(
+    store: &mut [JobRecord],
+    ids: &[i32],
+    result: &Result<PathBuf, RefractError>,
+) {
+    let locked_id = match result {
+        Err(e) if e.code.is_password_error() => {
+            let index = pdf::input_index_of(e).unwrap_or(0);
+            ids.get(index).or(ids.first()).copied()
+        }
+        _ => None,
+    };
     for j in store.iter_mut().filter(|j| ids.contains(&j.id)) {
-        match &result {
+        j.awaiting_password = false;
+        match result {
             Ok(path) => {
                 j.status = JobStatus::Done;
                 j.output_path = path.clone();
                 j.error.clear();
             }
-            Err(RefractError {
-                code: ErrorCode::NeedsPassword,
-                message,
-                ..
-            }) => {
+            Err(e) if e.code.is_password_error() => {
                 j.status = JobStatus::NeedsPassword;
-                j.error = message.clone();
+                j.error = e.message.clone();
+                j.awaiting_password = Some(j.id) == locked_id;
             }
             Err(e) => {
                 j.status = JobStatus::Failed;
@@ -1043,7 +1107,15 @@ fn apply_batch_result(
         }
         j.progress = -1.0;
     }
-    push_ui_event(ui_tx, UiEvent::JobsUpdated(store.clone()));
+}
+
+/// The secret store's lifetime rule: keep a password only while its job still awaits one.
+fn prune_secrets(store: &[JobRecord], secrets: &Mutex<JobSecretStore>) {
+    secrets.lock().unwrap().retain_jobs(|id| {
+        store
+            .iter()
+            .any(|j| j.id == id && j.status == JobStatus::NeedsPassword)
+    });
 }
 
 fn run_single_job_in_store(
@@ -1079,28 +1151,7 @@ fn run_single_job_in_store(
 
     {
         let mut store = jobs_store.lock().unwrap();
-        if let Some(j) = store.iter_mut().find(|j| j.id == job.id) {
-            match result {
-                Ok(out_path) => {
-                    j.status = JobStatus::Done;
-                    j.output_path = out_path;
-                    j.error.clear();
-                }
-                Err(RefractError {
-                    code: ErrorCode::NeedsPassword,
-                    message,
-                    ..
-                }) => {
-                    j.status = JobStatus::NeedsPassword;
-                    j.error = message;
-                }
-                Err(e) => {
-                    j.status = JobStatus::Failed;
-                    j.error = e.to_string();
-                }
-            }
-            j.progress = -1.0;
-        }
+        apply_result_to_jobs(&mut store, &[job.id], &result);
         push_ui_event(ui_tx, UiEvent::JobsUpdated(store.clone()));
     }
 }
@@ -1171,28 +1222,7 @@ fn execute_retry_in_store(
 
     {
         let mut store = jobs_store.lock().unwrap();
-        for j in store.iter_mut().filter(|j| ids.contains(&j.id)) {
-            match &result {
-                Ok(out_path) => {
-                    j.status = JobStatus::Done;
-                    j.output_path = out_path.clone();
-                    j.error.clear();
-                }
-                Err(RefractError {
-                    code: ErrorCode::NeedsPassword,
-                    message,
-                    ..
-                }) => {
-                    j.status = JobStatus::NeedsPassword;
-                    j.error = message.clone();
-                }
-                Err(e) => {
-                    j.status = JobStatus::Failed;
-                    j.error = e.to_string();
-                }
-            }
-            j.progress = -1.0;
-        }
+        apply_result_to_jobs(&mut store, &ids, &result);
         if let Some(tx) = ui_tx {
             push_ui_event(tx, UiEvent::JobsUpdated(store.clone()));
         }
@@ -1247,14 +1277,17 @@ fn setup_retry_job(
 fn setup_remove_job(
     window: &MainWindow,
     jobs_store: &Arc<Mutex<Vec<JobRecord>>>,
+    secret_store: &Arc<Mutex<JobSecretStore>>,
     ui_tx: &mpsc::Sender<UiEvent>,
 ) {
     let jobs_store = Arc::clone(jobs_store);
+    let secret_store = Arc::clone(secret_store);
     let ui_tx = ui_tx.clone();
 
     window.on_remove_job(move |job_id| {
         let mut store = jobs_store.lock().unwrap();
         store.retain(|j| j.id != job_id);
+        prune_secrets(&store, &secret_store);
         push_ui_event(&ui_tx, UiEvent::JobsUpdated(store.clone()));
     });
 }
@@ -1363,25 +1396,34 @@ fn ensure_batch_compatible(jobs: &[JobRecord], request: &JobRequest) -> Result<(
     Ok(())
 }
 
-fn execute_batch_merge_pdf_with_password(
+/// Merge `jobs` in order. Each locked file is opened with exactly the password preflight found
+/// for it (its own, or another one entered for the batch); open files get no password at all.
+fn execute_batch_merge_pdf_with_passwords(
     jobs: &[JobRecord],
     request: &JobRequest,
-    password: Option<&str>,
+    passwords: PdfPasswords<'_>,
 ) -> Result<PathBuf, RefractError> {
     ensure_batch_compatible(jobs, request)?;
     let paths: Vec<&Path> = jobs.iter().map(|j| j.input_path.as_path()).collect();
-    let report = preflight_inputs(request, &paths, password)?;
-    let inputs: Vec<(Vec<u8>, u32)> = report
+    let report = preflight_inputs_with_passwords(request, &paths, passwords)?;
+    let inputs: Vec<(Vec<u8>, u32, Option<&str>)> = report
         .inputs
         .into_iter()
-        .map(pdf_input_bytes_and_pages)
+        .enumerate()
+        .map(|(i, input)| {
+            let password = passwords.for_source(i, input.unlocked_with);
+            pdf_input_bytes_and_pages(input).map(|(bytes, pages)| (bytes, pages, password))
+        })
         .collect::<Result<_, _>>()?;
-    let total_pages: u32 = inputs.iter().map(|(_, pages)| pages).sum();
-    let slices: Vec<&[u8]> = inputs.iter().map(|(b, _)| b.as_slice()).collect();
-    let out_bytes = match password {
-        Some(pw) => pdf::merge_pdfs_with_password(&slices, pw)?,
-        None => pdf::merge_pdfs(&slices)?,
-    };
+    let total_pages: u32 = inputs.iter().map(|(_, pages, _)| pages).sum();
+    let merge_inputs: Vec<pdf::PdfMergeInput<'_>> = inputs
+        .iter()
+        .map(|(bytes, _, password)| pdf::PdfMergeInput {
+            bytes,
+            password: *password,
+        })
+        .collect();
+    let out_bytes = pdf::merge_pdfs_with_inputs(&merge_inputs, &CancelToken::none())?;
     // Name comes from the first recorded member; destination is shared (checked by ensure_batch_compatible).
     save_single_output(
         &jobs[0],
@@ -1395,7 +1437,7 @@ fn execute_batch_merge_pdf(
     jobs: &[JobRecord],
     request: &JobRequest,
 ) -> Result<PathBuf, RefractError> {
-    execute_batch_merge_pdf_with_password(jobs, request, None)
+    execute_batch_merge_pdf_with_passwords(jobs, request, PdfPasswords::default())
 }
 
 fn execute_batch_images_to_pdf(
@@ -1693,7 +1735,11 @@ fn process_job(job: &JobRecord) -> Result<PathBuf, RefractError> {
     }
 }
 
-fn process_job_with_password(job: &JobRecord, password: &str) -> Result<PathBuf, RefractError> {
+fn process_job_with_password(
+    job: &JobRecord,
+    password: &SecretPassword,
+) -> Result<PathBuf, RefractError> {
+    let password = password.as_str();
     match job.request.options() {
         DesktopToolOptions::MergePdf => {
             return Err(RefractError::new(
@@ -1797,6 +1843,7 @@ mod tests {
             tool_label: String::new(),
             request: JobRequest::new(tool, options, destination).unwrap(),
             last_batch_member_ids: Vec::new(),
+            awaiting_password: false,
             status: JobStatus::Waiting,
             error: String::new(),
             output_path: PathBuf::new(),
@@ -2327,12 +2374,13 @@ mod tests {
             ErrorCode::NeedsPassword
         );
         assert_eq!(
-            process_job_with_password(&store[0], "wrong-pw")
+            process_job_with_password(&store[0], &SecretPassword::new("wrong-pw"))
                 .unwrap_err()
                 .code,
             ErrorCode::WrongPassword
         );
-        let compressed_out = process_job_with_password(&store[0], "user-pw-123").unwrap();
+        let compressed_out =
+            process_job_with_password(&store[0], &SecretPassword::new("user-pw-123")).unwrap();
         assert_eq!(compressed_out.parent(), Some(out_dir.path()));
         assert_eq!(
             refract_core::detect(&std::fs::read(&compressed_out).unwrap()),
@@ -2354,7 +2402,8 @@ mod tests {
             vec![locked_pdf.clone()],
             &split_req,
         );
-        let split_out = process_job_with_password(&store[1], "user-pw-123").unwrap();
+        let split_out =
+            process_job_with_password(&store[1], &SecretPassword::new("user-pw-123")).unwrap();
         assert_eq!(split_out.parent(), Some(out_dir.path()));
         assert!(out_dir.path().join("locked-p1-2.pdf").exists());
         assert!(out_dir.path().join("locked-p3.pdf").exists());
@@ -2374,7 +2423,8 @@ mod tests {
             vec![locked_pdf.clone()],
             &reorder_req,
         );
-        let reorder_out = process_job_with_password(&store[2], "user-pw-123").unwrap();
+        let reorder_out =
+            process_job_with_password(&store[2], &SecretPassword::new("user-pw-123")).unwrap();
         assert_eq!(reorder_out.parent(), Some(out_dir.path()));
         assert_eq!(
             pdf::probe_pdf(&std::fs::read(&reorder_out).unwrap())
@@ -2404,12 +2454,12 @@ mod tests {
             }
         );
         assert_eq!(
-            process_job_with_password(&store[3], "wrong-pw")
+            process_job_with_password(&store[3], &SecretPassword::new("wrong-pw"))
                 .unwrap_err()
                 .code,
             ErrorCode::WrongPassword
         );
-        match process_job_with_password(&store[3], "user-pw-123") {
+        match process_job_with_password(&store[3], &SecretPassword::new("user-pw-123")) {
             Ok(first_page) => {
                 assert_eq!(first_page.parent(), Some(out_dir.path()));
                 assert_eq!(first_page.extension().and_then(|e| e.to_str()), Some("jpg"));
@@ -2795,14 +2845,25 @@ mod tests {
         let wrong_claim = try_claim_password_unlock(&store, &is_busy, 2, None)
             .unwrap()
             .unwrap();
-        let wrong_res = complete_password_unlock_claim(&store, wrong_claim, "wrong-pw", None);
+        let wrong_res = complete_password_unlock_claim(
+            &store,
+            &Mutex::new(JobSecretStore::new()),
+            wrong_claim,
+            SecretPassword::new("wrong-pw"),
+            None,
+        );
         is_busy.store(false, Ordering::SeqCst);
         assert_eq!(wrong_res.unwrap_err().code, ErrorCode::WrongPassword);
         {
             let guard = store.lock().unwrap();
             for j in guard.iter() {
                 assert_eq!(j.status, JobStatus::NeedsPassword);
-                assert!(j.error.contains("Wrong password"));
+                // The message names the file the wrong password was entered for.
+                assert!(
+                    j.error.contains("did not unlock 'enc_first.pdf'"),
+                    "{}",
+                    j.error
+                );
                 assert!(j.output_path.as_os_str().is_empty());
             }
         }
@@ -2812,8 +2873,14 @@ mod tests {
         let right_claim = try_claim_password_unlock(&store, &is_busy, 2, None)
             .unwrap()
             .unwrap();
-        let out_path =
-            complete_password_unlock_claim(&store, right_claim, "user-pw-123", None).unwrap();
+        let out_path = complete_password_unlock_claim(
+            &store,
+            &Mutex::new(JobSecretStore::new()),
+            right_claim,
+            SecretPassword::new("user-pw-123"),
+            None,
+        )
+        .unwrap();
         is_busy.store(false, Ordering::SeqCst);
 
         assert_eq!(out_path.parent(), Some(out_dir.path()));
@@ -2872,7 +2939,14 @@ mod tests {
         let claim = try_claim_password_unlock(&store, &is_busy, 3, None)
             .unwrap()
             .unwrap();
-        let out_path = complete_password_unlock_claim(&store, claim, "user-pw-123", None).unwrap();
+        let out_path = complete_password_unlock_claim(
+            &store,
+            &Mutex::new(JobSecretStore::new()),
+            claim,
+            SecretPassword::new("user-pw-123"),
+            None,
+        )
+        .unwrap();
         is_busy.store(false, Ordering::SeqCst);
 
         let merged_bytes = std::fs::read(&out_path).unwrap();
@@ -2884,6 +2958,243 @@ mod tests {
         let guard = store.lock().unwrap();
         assert!(guard.iter().all(|j| j.status == JobStatus::Done));
         assert!(guard.iter().all(|j| j.output_path == out_path));
+    }
+
+    /// Encrypt `bytes` with user password `user_pw` (RC4-128), like the engine's test helper.
+    fn encrypt_pdf(bytes: &[u8], user_pw: &str) -> Vec<u8> {
+        use lopdf::encryption::{EncryptionState, EncryptionVersion, Permissions};
+        use lopdf::{Document, Object, StringFormat};
+        let mut doc = Document::load_mem(bytes).unwrap();
+        let id = format!("refract-test-id-{user_pw}").into_bytes();
+        doc.trailer.set(
+            "ID",
+            vec![
+                Object::String(id.clone(), StringFormat::Hexadecimal),
+                Object::String(id, StringFormat::Hexadecimal),
+            ],
+        );
+        let version = EncryptionVersion::V2 {
+            document: &doc,
+            owner_password: "owner-secret",
+            user_password: user_pw,
+            key_length: 128,
+            permissions: Permissions::all(),
+        };
+        let state = EncryptionState::try_from(version).unwrap();
+        doc.encrypt(&state).unwrap();
+        let mut out = Vec::new();
+        doc.save_to(&mut out).unwrap();
+        out
+    }
+
+    fn write_locked_marker_pdf(dir: &Path, name: &str, w: u32, h: u32, pw: &str) -> PathBuf {
+        let plain = write_marker_pdf(dir, &format!("plain-{name}"), w, h);
+        let locked = encrypt_pdf(&std::fs::read(&plain).unwrap(), pw);
+        std::fs::remove_file(&plain).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, locked).unwrap();
+        path
+    }
+
+    struct MergeFixture {
+        _work: tempfile::TempDir,
+        out: tempfile::TempDir,
+        store: Arc<Mutex<Vec<JobRecord>>>,
+        secrets: Mutex<JobSecretStore>,
+        busy: AtomicBool,
+    }
+
+    impl MergeFixture {
+        /// Queue `files` as one merge batch and run it once with no passwords, as "Process all" does.
+        fn run(files: Vec<PathBuf>, work: tempfile::TempDir) -> (Self, RefractError) {
+            let out = tempfile::tempdir().unwrap();
+            let request = JobRequest::new(
+                ToolId::MergePdf,
+                DesktopToolOptions::MergePdf,
+                OutputDestination::Directory(out.path().to_path_buf()),
+            )
+            .unwrap();
+            let mut jobs = Vec::new();
+            let mut next_id = 1;
+            enqueue_files(&mut jobs, &mut next_id, files, &request);
+            let ids: Vec<i32> = jobs.iter().map(|j| j.id).collect();
+            for j in jobs.iter_mut() {
+                j.last_batch_member_ids = ids.clone();
+            }
+            let result = execute_batch_merge_pdf(&jobs, &request);
+            apply_result_to_jobs(&mut jobs, &ids, &result);
+            let fixture = Self {
+                _work: work,
+                out,
+                store: Arc::new(Mutex::new(jobs)),
+                secrets: Mutex::new(JobSecretStore::new()),
+                busy: AtomicBool::new(false),
+            };
+            (fixture, result.unwrap_err())
+        }
+
+        /// Enter `password` from row `clicked`, as the dialog does.
+        fn unlock(&self, clicked: i32, password: &str) -> Result<PathBuf, RefractError> {
+            let claim = try_claim_password_unlock(&self.store, &self.busy, clicked, None)
+                .unwrap()
+                .unwrap();
+            let res = complete_password_unlock_claim(
+                &self.store,
+                &self.secrets,
+                claim,
+                SecretPassword::new(password),
+                None,
+            );
+            self.busy.store(false, Ordering::SeqCst);
+            res
+        }
+
+        fn awaiting(&self) -> Vec<i32> {
+            let store = self.store.lock().unwrap();
+            store
+                .iter()
+                .filter(|j| j.awaiting_password)
+                .map(|j| j.id)
+                .collect()
+        }
+
+        fn prompts(&self) -> Vec<String> {
+            self.store
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|j| j.error.clone())
+                .collect()
+        }
+    }
+
+    #[test]
+    fn merge_unlocks_files_with_different_passwords_one_at_a_time() {
+        let work = tempfile::tempdir().unwrap();
+        let a = write_locked_marker_pdf(work.path(), "a.pdf", 101, 51, "alpha-pw");
+        let open = write_marker_pdf(work.path(), "open.pdf", 102, 52);
+        let b = write_locked_marker_pdf(work.path(), "b.pdf", 103, 53, "bravo-pw");
+        let owner_only = work.path().join("owner.pdf");
+        std::fs::copy(fixture_path("owner-only.pdf"), &owner_only).unwrap();
+        let (fx, first) = MergeFixture::run(vec![a, open, b, owner_only], work);
+
+        // First run: a.pdf is the locked file; every row shows the same prompt naming it.
+        assert_eq!(first.code, ErrorCode::NeedsPassword);
+        assert_eq!(fx.awaiting(), vec![1]);
+        assert!(fx
+            .prompts()
+            .iter()
+            .all(|p| p.contains("'a.pdf' is protected")));
+
+        // Password for a.pdf, entered from a different row: a opens, b.pdf now needs its own.
+        let err = fx.unlock(3, "alpha-pw").unwrap_err();
+        assert_eq!(err.code, ErrorCode::NeedsPassword, "{}", err.message);
+        assert_eq!(fx.awaiting(), vec![3]);
+        assert!(fx
+            .prompts()
+            .iter()
+            .all(|p| p.contains("'b.pdf' is protected")));
+        assert!(fx.secrets.lock().unwrap().contains(1));
+
+        // Password for b.pdf: the merge completes in queue order and every secret is dropped.
+        let out = fx.unlock(3, "bravo-pw").unwrap();
+        assert!(fx.secrets.lock().unwrap().is_empty());
+        assert!(fx.awaiting().is_empty());
+        let merged = std::fs::read(&out).unwrap();
+        let pages = pdf::probe_pdf(&merged).unwrap().page_count;
+        let owner_pages = pdf::probe_pdf(&std::fs::read(fixture_path("owner-only.pdf")).unwrap())
+            .unwrap()
+            .page_count;
+        assert_eq!(pages, 3 + owner_pages);
+        assert_eq!(page_embedded_image_dims(&merged, 1), (101, 51));
+        assert_eq!(page_embedded_image_dims(&merged, 2), (102, 52));
+        assert_eq!(page_embedded_image_dims(&merged, 3), (103, 53));
+        assert_eq!(dir_names(fx.out.path()).len(), 1);
+    }
+
+    #[test]
+    fn one_password_unlocks_every_file_that_shares_it() {
+        let work = tempfile::tempdir().unwrap();
+        let a = write_locked_marker_pdf(work.path(), "a.pdf", 101, 51, "same-pw");
+        let open = write_marker_pdf(work.path(), "open.pdf", 102, 52);
+        let b = write_locked_marker_pdf(work.path(), "b.pdf", 103, 53, "same-pw");
+        let (fx, _) = MergeFixture::run(vec![a, open, b], work);
+        let out = fx.unlock(1, "same-pw").unwrap();
+        let merged = std::fs::read(&out).unwrap();
+        assert_eq!(page_embedded_image_dims(&merged, 3), (103, 53));
+        assert!(fx.secrets.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn wrong_password_drops_only_that_files_password() {
+        let work = tempfile::tempdir().unwrap();
+        let a = write_locked_marker_pdf(work.path(), "a.pdf", 101, 51, "alpha-pw");
+        let b = write_locked_marker_pdf(work.path(), "b.pdf", 103, 53, "bravo-pw");
+        let (fx, _) = MergeFixture::run(vec![a, b], work);
+
+        fx.unlock(1, "alpha-pw").unwrap_err();
+        assert_eq!(fx.awaiting(), vec![2]);
+        let err = fx.unlock(2, "not-bravo").unwrap_err();
+        assert_eq!(err.code, ErrorCode::WrongPassword);
+        assert!(err.message.contains("'b.pdf'"));
+        // a.pdf's password is kept; the wrong one for b.pdf is gone; b.pdf is still awaited.
+        let secrets = fx.secrets.lock().unwrap();
+        assert!(secrets.contains(1) && !secrets.contains(2));
+        drop(secrets);
+        assert_eq!(fx.awaiting(), vec![2]);
+        assert!(dir_names(fx.out.path()).is_empty());
+    }
+
+    #[test]
+    fn removing_or_clearing_jobs_drops_their_passwords() {
+        let work = tempfile::tempdir().unwrap();
+        let a = write_locked_marker_pdf(work.path(), "a.pdf", 101, 51, "alpha-pw");
+        let b = write_locked_marker_pdf(work.path(), "b.pdf", 103, 53, "bravo-pw");
+        let c = write_locked_marker_pdf(work.path(), "c.pdf", 104, 54, "charlie-pw");
+        let (fx, _) = MergeFixture::run(vec![a, b, c], work);
+        fx.unlock(1, "alpha-pw").unwrap_err();
+        fx.unlock(2, "bravo-pw").unwrap_err();
+        assert!(fx.secrets.lock().unwrap().contains(1));
+
+        // Remove one job (as the remove handler does): only its password goes.
+        {
+            let mut store = fx.store.lock().unwrap();
+            store.retain(|j| j.id != 1);
+            prune_secrets(&store, &fx.secrets);
+        }
+        let secrets = fx.secrets.lock().unwrap();
+        assert!(!secrets.contains(1) && secrets.contains(2));
+        drop(secrets);
+
+        // Clear all.
+        {
+            let mut store = fx.store.lock().unwrap();
+            store.clear();
+            prune_secrets(&store, &fx.secrets);
+        }
+        assert!(fx.secrets.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn passwords_never_appear_in_debug_output_or_errors() {
+        let work = tempfile::tempdir().unwrap();
+        let a = write_locked_marker_pdf(work.path(), "a.pdf", 101, 51, "alpha-secret-pw");
+        let b = write_locked_marker_pdf(work.path(), "b.pdf", 103, 53, "bravo-secret-pw");
+        let (fx, _) = MergeFixture::run(vec![a, b], work);
+        let err1 = fx.unlock(1, "alpha-secret-pw").unwrap_err();
+        let err2 = fx.unlock(2, "wrong-secret-pw").unwrap_err();
+        let shown = format!(
+            "{:?} {:?} {} {} {:?} {:?}",
+            err1,
+            err2,
+            err1,
+            err2,
+            fx.secrets.lock().unwrap(),
+            fx.store.lock().unwrap()
+        );
+        for pw in ["alpha-secret-pw", "bravo-secret-pw", "wrong-secret-pw"] {
+            assert!(!shown.contains(pw), "leaked {pw}");
+        }
     }
 
     #[test]

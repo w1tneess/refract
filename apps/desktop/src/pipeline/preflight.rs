@@ -30,6 +30,99 @@ pub struct ValidatedInput {
     pub pdf_bytes: Option<Vec<u8>>,
     /// Page count measured during preflight (PDF inputs only), reused by output verification.
     pub page_count: Option<u32>,
+    /// Which password opened this PDF; the engine must be given the same one.
+    pub unlocked_with: PasswordSource,
+}
+
+/// Which password opened a PDF input during preflight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PasswordSource {
+    /// Not locked (unencrypted or owner-only); no password is passed to the engine.
+    #[default]
+    None,
+    /// The password entered for this input (or the job's single password).
+    Own,
+    /// `guesses[n]`: another password entered for the batch, tried because this input had none.
+    Guess(usize),
+}
+
+/// Passwords available to preflight for PDF inputs. Holds borrowed plaintext, so it has no `Debug`.
+#[derive(Clone, Copy, Default)]
+pub struct PdfPasswords<'a> {
+    /// Password for every input (single-file jobs and legacy callers).
+    pub all: Option<&'a str>,
+    /// Password entered for a specific input, by input index (merge-pdf).
+    pub per_input: &'a [Option<&'a str>],
+    /// Other passwords entered for the batch, newest first. They are tried, in order, only on
+    /// locked inputs that have none of their own, so files sharing a password unlock together.
+    /// If none works, that input needs its own password (reported as `NeedsPassword`, not wrong).
+    pub guesses: &'a [&'a str],
+}
+
+impl<'a> PdfPasswords<'a> {
+    pub fn own(&self, index: usize) -> Option<&'a str> {
+        self.per_input.get(index).copied().flatten().or(self.all)
+    }
+
+    /// The password string the engine should use for an input preflight opened with `source`.
+    pub fn for_source(&self, index: usize, source: PasswordSource) -> Option<&'a str> {
+        match source {
+            PasswordSource::None => None,
+            PasswordSource::Own => self.own(index),
+            PasswordSource::Guess(n) => self.guesses.get(n).copied(),
+        }
+    }
+}
+
+fn locked_error(code: ErrorCode, index: usize, path: &Path) -> RefractError {
+    let name = display_name(path);
+    let message = match code {
+        ErrorCode::WrongPassword => {
+            format!(
+                "That password did not unlock '{}'. Check it and try again.",
+                name
+            )
+        }
+        _ => format!("'{}' is protected. Enter its password to continue.", name),
+    };
+    RefractError::with_details(code, message, pdf::input_index_details(index))
+}
+
+/// Open PDF input `index` with the right password, returning its info and which password worked.
+/// Errors name the file and carry its index (see [`pdf::input_index_of`]).
+fn unlock_pdf_input<P: PreflightProbe>(
+    probe: &P,
+    bytes: &[u8],
+    index: usize,
+    path: &Path,
+    passwords: &PdfPasswords<'_>,
+) -> Result<(pdf::PdfInfo, PasswordSource), RefractError> {
+    let password_error = |e: RefractError| match e.code {
+        ErrorCode::NeedsPassword | ErrorCode::WrongPassword => locked_error(e.code, index, path),
+        _ => e,
+    };
+
+    if let Some(own) = passwords.own(index) {
+        let info = probe.probe_pdf(bytes, Some(own)).map_err(password_error)?;
+        if info.requires_password {
+            return Err(locked_error(ErrorCode::NeedsPassword, index, path));
+        }
+        return Ok((info, PasswordSource::Own));
+    }
+
+    let info = probe.probe_pdf(bytes, None).map_err(password_error)?;
+    if !info.requires_password {
+        return Ok((info, PasswordSource::None));
+    }
+    for (n, guess) in passwords.guesses.iter().enumerate() {
+        match probe.probe_pdf(bytes, Some(guess)) {
+            Ok(info) if !info.requires_password => return Ok((info, PasswordSource::Guess(n))),
+            Ok(_) => {}
+            Err(e) if e.code == ErrorCode::WrongPassword => {}
+            Err(e) => return Err(password_error(e)),
+        }
+    }
+    Err(locked_error(ErrorCode::NeedsPassword, index, path))
 }
 
 /// Result of preflight validation for a single job or batch execution unit.
@@ -224,11 +317,44 @@ pub fn preflight_inputs(
     )
 }
 
+/// Like [`preflight_inputs`], with a password per PDF input (merge-pdf unlock).
+pub fn preflight_inputs_with_passwords(
+    request: &JobRequest,
+    paths: &[&Path],
+    passwords: PdfPasswords<'_>,
+) -> Result<PreflightReport, RefractError> {
+    let limits = limits_for_tool(request.tool(), Platform::Desktop);
+    let budget = memory_budget_bytes(Platform::Desktop);
+    preflight_core(
+        request,
+        paths,
+        passwords,
+        &limits,
+        budget,
+        &NativePreflightProbe,
+    )
+}
+
 /// Run preflight with explicit limits, memory budget, and injectable [`PreflightProbe`].
 pub fn preflight_inputs_with<P: PreflightProbe>(
     request: &JobRequest,
     paths: &[&Path],
     password: Option<&str>,
+    limits: &PlatformLimits,
+    memory_budget: u64,
+    probe: &P,
+) -> Result<PreflightReport, RefractError> {
+    let passwords = PdfPasswords {
+        all: password,
+        ..Default::default()
+    };
+    preflight_core(request, paths, passwords, limits, memory_budget, probe)
+}
+
+fn preflight_core<P: PreflightProbe>(
+    request: &JobRequest,
+    paths: &[&Path],
+    passwords: PdfPasswords<'_>,
     limits: &PlatformLimits,
     memory_budget: u64,
     probe: &P,
@@ -344,6 +470,7 @@ pub fn preflight_inputs_with<P: PreflightProbe>(
                     format,
                     pdf_bytes: None,
                     page_count: None,
+                    unlocked_with: PasswordSource::None,
                 });
             }
 
@@ -383,7 +510,7 @@ pub fn preflight_inputs_with<P: PreflightProbe>(
             let mut validated = Vec::with_capacity(paths.len());
             let mut total_pages = 0u32;
 
-            for (&path, &format) in paths.iter().zip(detected_formats.iter()) {
+            for (index, (&path, &format)) in paths.iter().zip(detected_formats.iter()).enumerate() {
                 let bytes = probe.read_all(path)?;
                 let actual_len = bytes.len() as u64;
                 if actual_len == 0 {
@@ -400,13 +527,8 @@ pub fn preflight_inputs_with<P: PreflightProbe>(
                     },
                 )?;
 
-                let info = probe.probe_pdf(&bytes, password)?;
-                if info.requires_password {
-                    return Err(RefractError::new(
-                        ErrorCode::NeedsPassword,
-                        "This PDF is protected. Enter the password to continue.",
-                    ));
-                }
+                let (info, unlocked_with) =
+                    unlock_pdf_input(probe, &bytes, index, path, &passwords)?;
                 if info.page_count == 0 {
                     return Err(RefractError::new(
                         ErrorCode::DamagedFile,
@@ -437,6 +559,7 @@ pub fn preflight_inputs_with<P: PreflightProbe>(
                     format,
                     pdf_bytes: Some(bytes),
                     page_count: Some(info.page_count),
+                    unlocked_with,
                 });
             }
 
@@ -469,6 +592,7 @@ pub fn preflight_inputs_with<P: PreflightProbe>(
                     format,
                     pdf_bytes: None,
                     page_count: None,
+                    unlocked_with: PasswordSource::None,
                 })
                 .collect();
 
