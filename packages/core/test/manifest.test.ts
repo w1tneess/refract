@@ -123,6 +123,12 @@ describe('Canonical Tool Manifest & Cross-Language Parity', () => {
     expect(manifestOptionsForPlatform('compress-image', 'web').map((o) => o.key)).toEqual(['to', 'targetKB']);
     expect(manifestOptionsForPlatform('compress-image', 'desktop').map((o) => o.key)).toEqual(['targetKB']);
 
+    // pdf-to-images DPI: Web keeps the shared 300 ceiling; Desktop's platformBounds raises it to 600.
+    const dpiOn = (platform: 'web' | 'desktop') =>
+      manifestOptionsForPlatform('pdf-to-images', platform).find((o) => o.key === 'dpi');
+    expect(dpiOn('web')).toMatchObject({ min: 36, max: 300 });
+    expect(dpiOn('desktop')).toMatchObject({ min: 36, max: 600 });
+
     // External dependencies on Desktop
     expect(TOOL_MANIFEST['convert-audio'].platformSupport.desktop.status).toBe('requires-dependency');
     expect(TOOL_MANIFEST['convert-audio'].platformSupport.desktop.externalDependencies).toEqual(['ffmpeg', 'ffprobe']);

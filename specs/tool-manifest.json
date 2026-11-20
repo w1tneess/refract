@@ -668,6 +668,7 @@
           "platforms": ["web", "desktop"],
           "min": 36,
           "max": 300,
+          "platformBounds": { "desktop": { "max": 600 } },
           "default": 150,
           "unit": "DPI"
         }

@@ -34,6 +34,12 @@ const VALID_EXT_RULES = ['fromOptionTo', 'sameOrJpeg', 'sameAudioOrMp3', 'fixed'
 const VALID_STATUSES = ['available', 'requires-dependency', 'unsupported'];
 const VALID_DESKTOP_ENGINES = ['builtin', 'ffmpeg', 'pdf-renderer'];
 
+/** Resolve a number option's bounds on one platform: a `platformBounds` entry overrides the shared min/max. */
+function numberBoundsFor(opt, platform) {
+  const override = opt.platformBounds?.[platform] ?? {};
+  return { min: override.min ?? opt.min, max: override.max ?? opt.max };
+}
+
 function assert(cond, msg) {
   if (!cond) {
     throw new Error(`Manifest validation failed: ${msg}`);
@@ -166,10 +172,17 @@ export function validateManifest(manifest, schema) {
       if (opt.type === 'number') {
         assert(typeof opt.min === 'number' && typeof opt.max === 'number' && opt.min <= opt.max, `tool "${tool.id}" option "${opt.key}" invalid min/max`);
         assert(typeof opt.default === 'number' && opt.default >= opt.min && opt.default <= opt.max, `tool "${tool.id}" option "${opt.key}" default ${opt.default} outside [${opt.min}, ${opt.max}]`);
+        for (const [platform, bounds] of Object.entries(opt.platformBounds ?? {})) {
+          assert(opt.platforms.includes(platform), `tool "${tool.id}" option "${opt.key}" platformBounds.${platform} is not one of its platforms`);
+          const { min, max } = numberBoundsFor(opt, platform);
+          assert(typeof min === 'number' && typeof max === 'number' && min <= max && (bounds.min !== undefined || bounds.max !== undefined), `tool "${tool.id}" option "${opt.key}" invalid platformBounds.${platform}`);
+          assert(opt.default >= min && opt.default <= max, `tool "${tool.id}" option "${opt.key}" default ${opt.default} outside ${platform} bounds [${min}, ${max}]`);
+        }
         if (opt.step !== undefined) {
           assert(typeof opt.step === 'number' && opt.step > 0, `tool "${tool.id}" option "${opt.key}" step must be > 0`);
         }
       } else if (opt.type === 'select') {
+        assert(opt.platformBounds === undefined, `tool "${tool.id}" option "${opt.key}" platformBounds is only valid on number options`);
         assert(Array.isArray(opt.choices) && opt.choices.length > 0, `tool "${tool.id}" option "${opt.key}" select missing choices`);
         for (const platform of opt.platforms) {
           assert(opt.choices.some(c => c.value === opt.default && (!c.platforms || c.platforms.includes(platform))), `option ${opt.key} default unavailable on ${platform}`);
@@ -254,7 +267,7 @@ function generateTypeScript(manifest) {
     '};',
     '',
     'export type ManifestOptionSpec =',
-    "  | (ManifestOptionBase & { type: 'number'; min: number; max: number; step?: number; unit?: string; default: number })",
+    "  | (ManifestOptionBase & { type: 'number'; min: number; max: number; platformBounds?: Partial<Record<Platform, { min?: number; max?: number }>>; step?: number; unit?: string; default: number })",
     "  | (ManifestOptionBase & { type: 'select'; choices: readonly ManifestOptionChoice[]; default: string })",
     "  | (ManifestOptionBase & { type: 'text'; placeholder?: string; default: string });",
     '',
@@ -326,6 +339,10 @@ function generateTypeScript(manifest) {
     '          ...opt,',
     '          choices: opt.choices.filter((c) => !c.platforms || c.platforms.includes(platform)),',
     '        };',
+    '      }',
+    "      if (opt.type === 'number' && opt.platformBounds?.[platform]) {",
+    '        const bounds = opt.platformBounds[platform];',
+    '        return { ...opt, min: bounds?.min ?? opt.min, max: bounds?.max ?? opt.max };',
     '      }',
     '      return opt;',
     '    });',
@@ -515,6 +532,12 @@ export function generateRust(manifest) {
   lines.push('    pub default: OptionDefault,');
   lines.push('    pub min: Option<f64>,');
   lines.push('    pub max: Option<f64>,');
+  lines.push('    /// `min` resolved for Web (a `platformBounds.web` entry overrides `min`).');
+  lines.push('    pub web_min: Option<f64>,');
+  lines.push('    pub web_max: Option<f64>,');
+  lines.push('    /// `min` resolved for Desktop (a `platformBounds.desktop` entry overrides `min`).');
+  lines.push('    pub desktop_min: Option<f64>,');
+  lines.push('    pub desktop_max: Option<f64>,');
   lines.push('    pub step: Option<f64>,');
   lines.push('    pub unit: Option<&\'static str>,');
   lines.push('    pub placeholder: Option<&\'static str>,');
@@ -673,6 +696,11 @@ export function generateRust(manifest) {
         lines.push(`                default: ${defVal},`);
         lines.push(`                min: ${opt.min !== undefined ? `Some(${rsFloat(opt.min)})` : 'None'},`);
         lines.push(`                max: ${opt.max !== undefined ? `Some(${rsFloat(opt.max)})` : 'None'},`);
+        for (const platform of PLATFORMS) {
+          const { min, max } = numberBoundsFor(opt, platform);
+          lines.push(`                ${platform}_min: ${min !== undefined ? `Some(${rsFloat(min)})` : 'None'},`);
+          lines.push(`                ${platform}_max: ${max !== undefined ? `Some(${rsFloat(max)})` : 'None'},`);
+        }
         lines.push(`                step: ${opt.step !== undefined ? `Some(${rsFloat(opt.step)})` : 'None'},`);
         lines.push(`                unit: ${rsOptStr(opt.unit)},`);
         lines.push(`                placeholder: ${rsOptStr(opt.placeholder)},`);
