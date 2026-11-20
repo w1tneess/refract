@@ -107,6 +107,20 @@ fn is_password_or_encryption_error(err: &lopdf::Error) -> bool {
     }
 }
 
+/// lopdf reports a malformed `/Encrypt` dictionary (for example a missing `/U`) as
+/// `InvalidPassword`, so check the dictionary before asking for a password no one can supply.
+fn encryption_dictionary_is_usable(bytes: &[u8]) -> bool {
+    Document::load_mem(bytes)
+        .is_ok_and(|doc| lopdf::encryption::PasswordAlgorithm::try_from(&doc).is_ok())
+}
+
+fn damaged_encryption_error() -> RefractError {
+    RefractError::new(
+        ErrorCode::DamagedFile,
+        "This PDF's encryption data is damaged, so no password can unlock it.",
+    )
+}
+
 /// Strip encryption metadata from an already-decrypted `Document` so saved outputs
 /// are written cleanly as unencrypted PDFs.
 fn strip_encryption_state(doc: &mut Document) {
@@ -142,6 +156,9 @@ pub fn load_document(bytes: &[u8], password: Option<&str>) -> Result<Document, R
         }
         Err(e) => {
             if is_password_or_encryption_error(&e) {
+                if !encryption_dictionary_is_usable(bytes) {
+                    return Err(damaged_encryption_error());
+                }
                 match password {
                     Some(pw) if !pw.is_empty() => Err(RefractError::new(
                         ErrorCode::WrongPassword,
@@ -201,6 +218,9 @@ pub fn probe_pdf(bytes: &[u8]) -> Result<PdfInfo, RefractError> {
         }
         Err(e) => {
             if is_password_or_encryption_error(&e) {
+                if !encryption_dictionary_is_usable(bytes) {
+                    return Err(damaged_encryption_error());
+                }
                 Ok(PdfInfo {
                     page_count: 0,
                     is_encrypted: true,
@@ -987,6 +1007,13 @@ pub fn images_to_pdf_with_options(
             PdfPageSize::Fit => {
                 let pw = (width_px as f64 * 72.0 / dpi).max(1.0);
                 let ph = (height_px as f64 * 72.0 / dpi).max(1.0);
+                // A tiny DPI overflows f32 and lopdf would write `inf` into /MediaBox.
+                if !(pw as f32).is_finite() || !(ph as f32).is_finite() {
+                    return Err(RefractError::new(
+                        ErrorCode::InvalidOption,
+                        "DPI is too small: the page would be larger than a PDF can store",
+                    ));
+                }
                 (pw, ph, 0.0, 0.0, pw, ph)
             }
             PdfPageSize::A4 | PdfPageSize::Letter => {
@@ -1098,7 +1125,17 @@ pub fn extract_embedded_images_with_password(
             Err(_) => continue,
         };
 
-        for (_, value) in xobjects.iter() {
+        // Inherited resources list every image any sibling page may use; export only the
+        // ones this page's content stream actually draws with `Do`. Unreadable content
+        // means no image can be attributed to this page, so it is skipped.
+        let Some(drawn) = drawn_xobject_names(&doc, page_id) else {
+            continue;
+        };
+
+        for name in &drawn {
+            let Ok(value) = xobjects.get(name) else {
+                continue;
+            };
             let object_id = match value.as_reference() {
                 Ok(id) => id,
                 Err(_) => continue,
@@ -1132,6 +1169,20 @@ pub fn extract_embedded_images_with_password(
     cancel.check()?;
 
     Ok(results)
+}
+
+/// XObject names a page's content stream paints with `Do`, in first-draw order, each once.
+fn drawn_xobject_names(doc: &Document, page_id: ObjectId) -> Option<Vec<Vec<u8>>> {
+    let content = doc.get_page_content(page_id).ok()?;
+    let ops = lopdf::content::Content::decode(&content).ok()?.operations;
+    let mut seen = HashSet::new();
+    Some(
+        ops.into_iter()
+            .filter(|op| op.operator == "Do")
+            .filter_map(|op| op.operands.first()?.as_name().ok().map(<[u8]>::to_vec))
+            .filter(|name| seen.insert(name.clone()))
+            .collect(),
+    )
 }
 
 /// Extract embedded images from a PDF (auto-unlocks owner-only PDFs).
@@ -1763,5 +1814,116 @@ mod tests {
             Ok(out)
         });
         assert_eq!(result.unwrap_err().code, ErrorCode::Canceled);
+    }
+
+    #[test]
+    fn damaged_encryption_dictionary_is_not_a_password_prompt() {
+        let locked = encrypt_pdf(&make_sized_pdf(&[300]), "user-pw", "owner-pw");
+        // Load without authenticating so objects stay encrypted, then drop the required /U.
+        let mut doc = Document::load_mem(&locked).expect("load encrypted PDF raw");
+        let encrypt_id = doc
+            .trailer
+            .get(b"Encrypt")
+            .and_then(Object::as_reference)
+            .expect("encrypt ref");
+        doc.get_object_mut(encrypt_id)
+            .and_then(Object::as_dict_mut)
+            .expect("encrypt dict")
+            .remove(b"U");
+        let mut damaged = Vec::new();
+        doc.save_to(&mut damaged).expect("save damaged PDF");
+
+        assert_eq!(
+            probe_pdf(&damaged).unwrap_err().code,
+            ErrorCode::DamagedFile
+        );
+        assert_eq!(
+            load_document(&damaged, None).unwrap_err().code,
+            ErrorCode::DamagedFile
+        );
+        assert_eq!(
+            load_document(&damaged, Some("user-pw")).unwrap_err().code,
+            ErrorCode::DamagedFile
+        );
+
+        // An intact locked PDF still asks for its password.
+        assert!(probe_pdf(&locked).unwrap().requires_password);
+        assert_eq!(
+            load_document(&locked, None).unwrap_err().code,
+            ErrorCode::NeedsPassword
+        );
+    }
+
+    #[test]
+    fn inherited_images_are_extracted_only_from_pages_that_draw_them() {
+        let jpeg = fixture_bytes("plain.jpg");
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let image_id = doc.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Image",
+                "Width" => 400,
+                "Height" => 300,
+                "ColorSpace" => "DeviceRGB",
+                "BitsPerComponent" => 8,
+                "Filter" => "DCTDecode",
+            },
+            jpeg,
+        ));
+        let draws = doc.add_object(Stream::new(
+            dictionary! {},
+            b"q 40 0 0 30 0 0 cm /Im0 Do Q".to_vec(),
+        ));
+        let blank = doc.add_object(Stream::new(dictionary! {}, b"0 0 m 10 10 l S".to_vec()));
+        let mut kids = Vec::new();
+        for content in [draws, blank] {
+            kids.push(Object::Reference(doc.add_object(dictionary! {
+                "Type" => "Page",
+                "Parent" => pages_id,
+                "MediaBox" => vec![0.into(), 0.into(), 400.into(), 300.into()],
+                "Contents" => content,
+            })));
+        }
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => kids,
+                "Count" => 2,
+                "Resources" => dictionary! { "XObject" => dictionary! { "Im0" => image_id } },
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).expect("save PDF");
+
+        let images = extract_embedded_images(&bytes).expect("extract");
+        assert_eq!(images.len(), 1, "only page 1 draws /Im0");
+        assert_eq!(images[0].page, 1);
+        assert_eq!(images[0].extension, "jpg");
+    }
+
+    #[test]
+    fn fit_page_size_rejects_dpi_that_overflows_the_media_box() {
+        let jpeg = fixture_bytes("plain.jpg");
+        let err = images_to_pdf_with_options(
+            std::slice::from_ref(&jpeg),
+            PdfPageSize::Fit,
+            f64::MIN_POSITIVE,
+            85,
+            &CancelToken::none(),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidOption);
+        assert!(images_to_pdf_with_options(
+            &[jpeg],
+            PdfPageSize::Fit,
+            72.0,
+            85,
+            &CancelToken::none()
+        )
+        .is_ok());
     }
 }
