@@ -137,7 +137,9 @@ pub trait PreflightProbe {
     fn stat(&self, path: &Path) -> Result<FileStat, RefractError>;
     fn read_header(&self, path: &Path, max_bytes: usize) -> Result<Vec<u8>, RefractError>;
     fn probe_image_dimensions(&self, path: &Path) -> Result<(u32, u32), RefractError>;
-    fn read_all(&self, path: &Path) -> Result<Vec<u8>, RefractError>;
+    /// Read the whole file, failing with `LimitExceeded` instead of reading past `max_bytes`
+    /// (the file may have grown since `stat`).
+    fn read_all(&self, path: &Path, max_bytes: u64) -> Result<Vec<u8>, RefractError>;
     fn probe_pdf(&self, bytes: &[u8], password: Option<&str>)
         -> Result<pdf::PdfInfo, RefractError>;
     fn audio_dependencies(&self) -> audio::AudioDependencies;
@@ -146,6 +148,25 @@ pub trait PreflightProbe {
 /// Production Desktop probe backed by `std::fs`, `refract_engine::native`, `pdf`, and `audio`.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NativePreflightProbe;
+
+/// A range or order that doesn't fit the document is an invalid option (a pre-run rejection).
+fn as_option_error(e: RefractError) -> RefractError {
+    if e.code == ErrorCode::DamagedFile {
+        e
+    } else {
+        RefractError::new(ErrorCode::InvalidOption, e.message)
+    }
+}
+
+fn read_cap_error(path: &Path) -> RefractError {
+    RefractError::new(
+        ErrorCode::LimitExceeded,
+        format!(
+            "'{}' is larger than this batch can hold in memory (it may have grown since it was added).",
+            display_name(path)
+        ),
+    )
+}
 
 fn display_name(path: &Path) -> String {
     path.file_name()
@@ -203,8 +224,17 @@ impl PreflightProbe for NativePreflightProbe {
         })
     }
 
-    fn read_all(&self, path: &Path) -> Result<Vec<u8>, RefractError> {
-        std::fs::read(path).map_err(|e| map_fs_error(path, &e))
+    fn read_all(&self, path: &Path, max_bytes: u64) -> Result<Vec<u8>, RefractError> {
+        use std::io::Read;
+        let file = std::fs::File::open(path).map_err(|e| map_fs_error(path, &e))?;
+        let mut bytes = Vec::new();
+        file.take(max_bytes.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .map_err(|e| map_fs_error(path, &e))?;
+        if bytes.len() as u64 > max_bytes {
+            return Err(read_cap_error(path));
+        }
+        Ok(bytes)
     }
 
     fn probe_pdf(
@@ -390,6 +420,7 @@ fn preflight_core<P: PreflightProbe>(
     //    format detection across ALL inputs before any full-file read or decode.
     let mut detected_formats = Vec::with_capacity(paths.len());
     let mut total_bytes = 0u64;
+    let mut stat_sizes = Vec::with_capacity(paths.len());
 
     for &path in paths {
         let stat = probe.stat(path)?;
@@ -415,6 +446,7 @@ fn preflight_core<P: PreflightProbe>(
         )?;
 
         total_bytes = total_bytes.saturating_add(stat.size_bytes);
+        stat_sizes.push(stat.size_bytes);
         let header = probe.read_header(path, HEADER_SNIFF_BYTES)?;
         let format = detect_and_validate_format(tool, path, &header)?;
 
@@ -429,6 +461,7 @@ fn preflight_core<P: PreflightProbe>(
         | DesktopToolOptions::ImagesToPdf { .. } => {
             let mut validated = Vec::with_capacity(paths.len());
             let mut max_pixels = 0u64;
+            let mut total_pixels = 0u64;
             let mut max_target_pixels = 0u64;
 
             for (&path, &format) in paths.iter().zip(detected_formats.iter()) {
@@ -453,6 +486,7 @@ fn preflight_core<P: PreflightProbe>(
                     },
                 )?;
                 max_pixels = max_pixels.max(pixels);
+                total_pixels = total_pixels.saturating_add(pixels);
 
                 if let Some(engine_resize) = request.options().as_engine_resize_options() {
                     let (tw, th) = image::resolve_resize_dimensions(w, h, &engine_resize)?;
@@ -473,6 +507,19 @@ fn preflight_core<P: PreflightProbe>(
                     page_count: None,
                     unlocked_with: PasswordSource::None,
                 });
+            }
+
+            // Images to PDF combines every input into one document: the batch as a whole must fit
+            // the pixel and byte limits, not just each image (Stage 2.3.2 aggregate accounting).
+            if matches!(request.options(), DesktopToolOptions::ImagesToPdf { .. }) {
+                check_limits(
+                    limits,
+                    &LimitCheckInput {
+                        pixels: Some(total_pixels),
+                        bytes: Some(total_bytes),
+                        ..Default::default()
+                    },
+                )?;
             }
 
             let estimated_memory_bytes = match request.options() {
@@ -507,12 +554,33 @@ fn preflight_core<P: PreflightProbe>(
                 .saturating_mul(5)
                 .saturating_add(extra_render_bytes);
             check_memory_budget(estimated_memory_bytes, memory_budget)?;
+            if matches!(request.options(), DesktopToolOptions::MergePdf) {
+                check_limits(
+                    limits,
+                    &LimitCheckInput {
+                        bytes: Some(total_bytes),
+                        ..Default::default()
+                    },
+                )?;
+            }
 
             let mut validated = Vec::with_capacity(paths.len());
             let mut total_pages = 0u32;
+            // Bytes actually read so far: each read is capped by what the per-file limit and the
+            // remaining batch budget still allow, using real sizes rather than the earlier stats.
+            let mut read_so_far = 0u64;
+            let per_file_cap = limits.max_mb.saturating_mul(MIB);
+            let budget_bytes = memory_budget.saturating_sub(extra_render_bytes) / 5;
 
             for (index, (&path, &format)) in paths.iter().zip(detected_formats.iter()).enumerate() {
-                let bytes = probe.read_all(path)?;
+                let still_to_read: u64 = stat_sizes[index + 1..].iter().sum();
+                let cap = per_file_cap.min(
+                    budget_bytes
+                        .saturating_sub(read_so_far)
+                        .saturating_sub(still_to_read),
+                );
+                let bytes = probe.read_all(path, cap)?;
+                read_so_far = read_so_far.saturating_add(bytes.len() as u64);
                 let actual_len = bytes.len() as u64;
                 if actual_len == 0 {
                     return Err(RefractError::new(
@@ -556,6 +624,18 @@ fn preflight_core<P: PreflightProbe>(
                     },
                 )?;
 
+                // Ranges and page orders depend on the real page count: reject bad ones here,
+                // before any work starts, instead of failing after the job is Running.
+                match request.options() {
+                    DesktopToolOptions::SplitPdf { ranges } => {
+                        pdf::parse_ranges(ranges, info.page_count).map_err(as_option_error)?;
+                    }
+                    DesktopToolOptions::ReorderPdf { order } => {
+                        pdf::parse_order(order, info.page_count).map_err(as_option_error)?;
+                    }
+                    _ => {}
+                }
+
                 validated.push(ValidatedInput {
                     format,
                     pdf_bytes: Some(bytes),
@@ -575,12 +655,11 @@ fn preflight_core<P: PreflightProbe>(
                     "FFmpeg was not found on PATH. Install FFmpeg to process audio.",
                 ));
             }
-            if matches!(request.options(), DesktopToolOptions::TrimAudio { .. })
-                && deps.ffprobe.is_none()
-            {
+            // Both audio tools need ffprobe (input length and output checks), per the manifest.
+            if deps.ffprobe.is_none() {
                 return Err(RefractError::new(
                     ErrorCode::MissingDependency,
-                    "ffprobe was not found on PATH. Install FFmpeg (including ffprobe) to trim audio.",
+                    "ffprobe was not found on PATH. Install FFmpeg (including ffprobe) to process audio.",
                 ));
             }
 
@@ -684,12 +763,15 @@ mod tests {
                 .unwrap_or_else(|| Err(RefractError::new(ErrorCode::DamagedFile, "bad dims")))
         }
 
-        fn read_all(&self, path: &Path) -> Result<Vec<u8>, RefractError> {
+        fn read_all(&self, path: &Path, max_bytes: u64) -> Result<Vec<u8>, RefractError> {
             *self.read_all_calls.borrow_mut() += 1;
             let entry = self
                 .entries
                 .get(path)
                 .ok_or_else(|| RefractError::new(ErrorCode::DamagedFile, "missing"))?;
+            if entry.body.len() as u64 > max_bytes {
+                return Err(read_cap_error(path));
+            }
             Ok(entry.body.clone())
         }
 
@@ -1210,6 +1292,123 @@ mod tests {
     }
 
     #[test]
+    fn images_to_pdf_rejects_a_batch_whose_total_pixels_exceed_the_limit() {
+        let png = fixture_path("plain.png"); // 400x300 = 120,000 px
+        let req = JobRequest::new(
+            ToolId::ImagesToPdf,
+            DesktopToolOptions::ImagesToPdf {
+                dpi: 150.0,
+                quality: 85,
+            },
+            OutputDestination::NextToSource,
+        )
+        .unwrap();
+        let limits = PlatformLimits {
+            max_pixels: Some(200_000),
+            ..limits_for_tool(ToolId::ImagesToPdf, Platform::Desktop)
+        };
+        let budget = memory_budget_bytes(Platform::Desktop);
+        // One image fits; two (240,000 px together) do not.
+        preflight_inputs_with(
+            &req,
+            &[png.as_path()],
+            None,
+            &limits,
+            budget,
+            &NativePreflightProbe,
+        )
+        .unwrap();
+        let err = preflight_inputs_with(
+            &req,
+            &[png.as_path(), png.as_path()],
+            None,
+            &limits,
+            budget,
+            &NativePreflightProbe,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::LimitExceeded);
+    }
+
+    #[test]
+    fn split_ranges_and_page_orders_are_checked_against_the_real_page_count() {
+        let pdf3 = fixture_path("plain.pdf"); // 3 pages
+        let split = JobRequest::new(
+            ToolId::SplitPdf,
+            DesktopToolOptions::SplitPdf { ranges: "4".into() },
+            OutputDestination::NextToSource,
+        )
+        .unwrap();
+        assert_eq!(
+            preflight_inputs(&split, &[pdf3.as_path()], None)
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidOption
+        );
+        let reorder = JobRequest::new(
+            ToolId::ReorderPdf,
+            DesktopToolOptions::ReorderPdf {
+                order: "2,1".into(),
+            },
+            OutputDestination::NextToSource,
+        )
+        .unwrap();
+        assert_eq!(
+            preflight_inputs(&reorder, &[pdf3.as_path()], None)
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidOption
+        );
+        let ok = JobRequest::new(
+            ToolId::ReorderPdf,
+            DesktopToolOptions::ReorderPdf {
+                order: "3 1 2".into(),
+            },
+            OutputDestination::NextToSource,
+        )
+        .unwrap();
+        preflight_inputs(&ok, &[pdf3.as_path()], None).unwrap();
+    }
+
+    #[test]
+    fn a_pdf_that_grew_after_stat_is_not_read_past_the_batch_budget() {
+        let mut probe = MockProbe::new();
+        let path = PathBuf::from("growing.pdf");
+        probe.insert(
+            path.clone(),
+            MockEntry {
+                // Small at stat time...
+                stat: Ok(FileStat {
+                    size_bytes: 10,
+                    is_file: true,
+                }),
+                header: pdf_header(),
+                dims: None,
+                pdf_info: Some(Ok(pdf::PdfInfo {
+                    page_count: 1,
+                    is_encrypted: false,
+                    requires_password: false,
+                })),
+                // ...but 100 bytes by the time it is read.
+                body: vec![b'%'; 100],
+            },
+        );
+        let req = JobRequest::new(
+            ToolId::CompressPdf,
+            DesktopToolOptions::CompressPdf,
+            OutputDestination::NextToSource,
+        )
+        .unwrap();
+        let limits = limits_for_tool(ToolId::CompressPdf, Platform::Desktop);
+        // A 250-byte budget allows 50 bytes of PDF (5x working estimate): 10 at stat passes,
+        // the 100 actually present does not.
+        let err =
+            preflight_inputs_with(&req, &[path.as_path()], None, &limits, 250, &probe).unwrap_err();
+        assert_eq!(err.code, ErrorCode::LimitExceeded);
+        assert!(err.message.contains("grown"), "{}", err.message);
+    }
+
+    #[test]
     fn batch_preflight_validates_every_input_and_aggregate_limits() {
         let plain_pdf = fixture_path("plain.pdf"); // 3 pages
         let five_pages = fixture_path("5pages.pdf"); // 5 pages
@@ -1289,7 +1488,7 @@ mod tests {
         let limits = limits_for_tool(ToolId::TrimAudio, Platform::Desktop);
         let budget = memory_budget_bytes(Platform::Desktop);
 
-        // Missing ffprobe fails trim-audio with MissingDependency while convert-audio still passes
+        // Missing ffprobe fails both audio tools with MissingDependency
         let mut probe_no_ffprobe = MockProbe::new();
         probe_no_ffprobe.audio_deps = audio::AudioDependencies {
             ffmpeg: Some(PathBuf::from("ffmpeg")),
@@ -1321,15 +1520,20 @@ mod tests {
             .code,
             ErrorCode::MissingDependency
         );
-        assert!(preflight_inputs_with(
-            &conv_audio_req,
-            &[wav.as_path()],
-            None,
-            &limits,
-            budget,
-            &probe_no_ffprobe
-        )
-        .is_ok());
+        // Convert Audio needs ffprobe too (manifest lists both binaries for both audio tools).
+        assert_eq!(
+            preflight_inputs_with(
+                &conv_audio_req,
+                &[wav.as_path()],
+                None,
+                &limits,
+                budget,
+                &probe_no_ffprobe
+            )
+            .unwrap_err()
+            .code,
+            ErrorCode::MissingDependency
+        );
 
         // Missing ffmpeg fails both convert-audio and trim-audio with MissingDependency
         probe_no_ffprobe.audio_deps.ffmpeg = None;

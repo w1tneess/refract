@@ -1162,13 +1162,16 @@ fn prepare_retry(store: &mut [JobRecord], job_id: i32) -> Result<Vec<i32>, Refra
         ));
     }
     let recorded_ids = target.last_batch_member_ids.clone();
+    // Without a recorded batch, only peers that also have none may join; files that ran in
+    // another batch keep their own recorded membership.
+    let no_history = recorded_ids.is_empty();
     let indices = match select_batch_retry_indices(
         store,
         job_id,
         &recorded_ids,
         |j| j.id,
         |j| &j.request,
-        |j| runner::can_retry(j.status),
+        |j| runner::can_retry(j.status) && (!no_history || j.last_batch_member_ids.is_empty()),
     ) {
         Ok(indices) => indices,
         Err(err) => {
@@ -1924,7 +1927,7 @@ fn process_job_in(job: &JobRecord, ctx: &RunCtx<'_>) -> Result<PathBuf, RefractE
         } => {
             let dir = output_dir(job);
             let name = output_file_name(job, format_primary_extension(detected_format));
-            let start_arg = format!("{:.3}", start_secs);
+            let start_arg = start_secs.to_string();
             let end_arg = end.to_engine_arg();
             // Same range resolution the engine uses, so "end of file" means the same length.
             let range = audio::resolve_trim_range(
