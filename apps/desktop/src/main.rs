@@ -4,15 +4,17 @@ mod pipeline;
 
 use pipeline::{
     plan_execution_units, preflight_inputs, resolve_recorded_batch_indices,
-    select_batch_retry_indices, DesktopToolOptions, JobRequest, OutputDestination, PlannedUnit,
-    TrimEnd, UiOptionInput,
+    select_batch_retry_indices, DesktopToolOptions, JobRequest, PlannedUnit, TrimEnd,
+    UiOptionInput,
 };
 use refract_core::cancel::CancelToken;
 use refract_core::error::{ErrorCode, RefractError};
 use refract_core::format::Format;
+use refract_core::naming;
 use refract_core::tools::ToolId;
-use refract_engine::{audio, image, pdf, render};
+use refract_engine::{audio, image, pdf, persist, render};
 use slint::{ComponentHandle, Model, SharedString, VecModel};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -56,27 +58,6 @@ fn format_size(bytes: u64) -> String {
 
 fn format_primary_extension(fmt: Format) -> &'static str {
     fmt.primary_extension()
-}
-
-fn uniquify_path(path: &Path) -> PathBuf {
-    if !path.exists() {
-        return path.to_path_buf();
-    }
-    let parent = path.parent().unwrap_or(Path::new("."));
-    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("file");
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    for i in 1..10000 {
-        let new_name = if ext.is_empty() {
-            format!("{} ({})", stem, i)
-        } else {
-            format!("{} ({}).{}", stem, i, ext)
-        };
-        let candidate = parent.join(new_name);
-        if !candidate.exists() {
-            return candidate;
-        }
-    }
-    path.to_path_buf()
 }
 
 fn get_settings_path() -> PathBuf {
@@ -1309,20 +1290,52 @@ fn setup_move_job(
     });
 }
 
-fn determine_output_path(
+fn input_file_name(job: &JobRecord) -> String {
+    job.input_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "file".to_string())
+}
+
+/// Canonical manifest output name for `job`'s single output (e.g. `photo (converted).png`).
+fn output_file_name(job: &JobRecord, extension: &str) -> String {
+    naming::output_name_for_tool(
+        job.request.tool(),
+        &input_file_name(job),
+        extension,
+        &mut HashSet::new(),
+    )
+}
+
+fn output_dir(job: &JobRecord) -> PathBuf {
+    job.request
+        .destination()
+        .resolve_parent(&job.input_path)
+        .to_path_buf()
+}
+
+/// Stage `bytes` and save them under the canonical name, numbering it if taken. Never overwrites.
+fn save_single_output(
     job: &JobRecord,
-    destination: &OutputDestination,
-    suffix: &str,
     extension: &str,
-) -> PathBuf {
-    let parent = destination.resolve_parent(&job.input_path);
-    let stem = job
-        .input_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("file");
-    let out_path = parent.join(format!("{} {}.{}", stem, suffix, extension));
-    uniquify_path(&out_path)
+    bytes: &[u8],
+) -> Result<PathBuf, RefractError> {
+    persist::save_output(
+        &output_dir(job),
+        &output_file_name(job, extension),
+        bytes,
+        &CancelToken::none(),
+    )
+}
+
+/// First free canonical output path for engine calls that write the file themselves (audio).
+/// The engine still persists with strict no-clobber, so a file created after this check is kept.
+fn resolve_new_output_path(job: &JobRecord, extension: &str) -> Result<PathBuf, RefractError> {
+    naming::resolve_unique_path(
+        &output_dir(job),
+        &output_file_name(job, extension),
+        persist::DEFAULT_MAX_SUFFIX_ATTEMPTS,
+    )
 }
 
 fn ensure_batch_compatible(jobs: &[JobRecord], request: &JobRequest) -> Result<(), RefractError> {
@@ -1369,9 +1382,8 @@ fn execute_batch_merge_pdf_with_password(
         Some(pw) => pdf::merge_pdfs_with_password(&slices, pw)?,
         None => pdf::merge_pdfs(&slices)?,
     };
-    let out_path = determine_output_path(&jobs[0], request.destination(), "merged", "pdf");
-    std::fs::write(&out_path, out_bytes).map_err(to_refract_err)?;
-    Ok(out_path)
+    // Name comes from the first recorded member; destination is shared (checked by ensure_batch_compatible).
+    save_single_output(&jobs[0], "pdf", &out_bytes)
 }
 
 fn execute_batch_merge_pdf(
@@ -1399,9 +1411,7 @@ fn execute_batch_images_to_pdf(
         .map(|j| std::fs::read(&j.input_path).map_err(to_refract_err))
         .collect::<Result<_, _>>()?;
     let out_bytes = pdf::images_to_pdf(&buffers, dpi, quality)?;
-    let out_path = determine_output_path(&jobs[0], request.destination(), "images", "pdf");
-    std::fs::write(&out_path, out_bytes).map_err(to_refract_err)?;
-    Ok(out_path)
+    save_single_output(&jobs[0], "pdf", &out_bytes)
 }
 
 fn render_or_extract_pdf_images(
@@ -1412,13 +1422,11 @@ fn render_or_extract_pdf_images(
     password: Option<&str>,
 ) -> Result<PathBuf, RefractError> {
     let format = format_primary_extension(target);
-    let parent = job.request.destination().resolve_parent(&job.input_path);
-    let stem = job
-        .input_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("file");
+    let input_name = input_file_name(job);
+    let stem = naming::stem_of(&input_name);
+    let mut batch = persist::StagedOutputBatch::new(&output_dir(job));
 
+    // Entry names follow the manifest's pdf-to-images `entryTemplate` (`{name}-p{page}.{ext}`).
     match render::render_pdf_to_images_with_password_cancellable(
         bytes,
         password,
@@ -1427,16 +1435,9 @@ fn render_or_extract_pdf_images(
         &CancelToken::none(),
     ) {
         Ok(pages) => {
-            let mut first_written = parent.join(format!("{} p0001.{}", stem, format));
-            for (idx, (page_num, page_bytes, ext)) in pages.into_iter().enumerate() {
-                let out_path = parent.join(format!("{} p{:04}.{}", stem, page_num, ext));
-                let unique = uniquify_path(&out_path);
-                std::fs::write(&unique, page_bytes).map_err(to_refract_err)?;
-                if idx == 0 {
-                    first_written = unique;
-                }
+            for (page_num, page_bytes, ext) in pages {
+                batch.stage(&format!("{}-p{}.{}", stem, page_num, ext), &page_bytes)?;
             }
-            Ok(first_written)
         }
         Err(render_err) => {
             if render_err.code.is_password_error() {
@@ -1447,19 +1448,40 @@ fn render_or_extract_pdf_images(
             if embedded.is_empty() {
                 return Err(render_err);
             }
-            let mut first_written =
-                parent.join(format!("{} p0001.{}", stem, embedded[0].extension));
-            for (idx, img) in embedded.iter().enumerate() {
-                let out_path = parent.join(format!("{} p{:04}.{}", stem, img.page, img.extension));
-                let unique = uniquify_path(&out_path);
-                std::fs::write(&unique, &img.bytes).map_err(to_refract_err)?;
-                if idx == 0 {
-                    first_written = unique;
-                }
+            for img in &embedded {
+                batch.stage(
+                    &format!("{}-p{}.{}", stem, img.page, img.extension),
+                    &img.bytes,
+                )?;
             }
-            Ok(first_written)
         }
     }
+    first_saved(batch.commit(&CancelToken::none())?)
+}
+
+fn first_saved(saved: Vec<PathBuf>) -> Result<PathBuf, RefractError> {
+    saved
+        .into_iter()
+        .next()
+        .ok_or_else(|| RefractError::new(ErrorCode::EngineFailed, "No output files were saved."))
+}
+
+/// Save every split part together (`{name}-p{range}.pdf`, the manifest `entryTemplate`), or none.
+fn save_split_parts(
+    job: &JobRecord,
+    parts: Vec<(String, Vec<u8>)>,
+) -> Result<PathBuf, RefractError> {
+    let input_name = input_file_name(job);
+    let stem = naming::stem_of(&input_name);
+    let mut batch = persist::StagedOutputBatch::new(&output_dir(job));
+    for (label, part_bytes) in parts {
+        batch.stage(&format!("{}-{}.pdf", stem, label), &part_bytes)?;
+    }
+    let saved = batch.commit(&CancelToken::none())?;
+    saved
+        .into_iter()
+        .last()
+        .ok_or_else(|| RefractError::new(ErrorCode::EngineFailed, "No output files were saved."))
 }
 
 fn take_preflight_pdf_bytes(
@@ -1478,7 +1500,6 @@ fn take_preflight_pdf_bytes(
 }
 
 fn process_job(job: &JobRecord) -> Result<PathBuf, RefractError> {
-    let destination = job.request.destination();
     match job.request.options() {
         DesktopToolOptions::ImagesToPdf { .. } => {
             return execute_batch_images_to_pdf(std::slice::from_ref(job), &job.request);
@@ -1499,21 +1520,12 @@ fn process_job(job: &JobRecord) -> Result<PathBuf, RefractError> {
         DesktopToolOptions::ConvertImage { target, quality } => {
             let bytes = std::fs::read(&job.input_path).map_err(to_refract_err)?;
             let out_bytes = image::convert_image(&bytes, *target, Some(*quality))?;
-            let out_path = determine_output_path(
-                job,
-                destination,
-                "converted",
-                format_primary_extension(*target),
-            );
-            std::fs::write(&out_path, out_bytes).map_err(to_refract_err)?;
-            Ok(out_path)
+            save_single_output(job, format_primary_extension(*target), &out_bytes)
         }
         DesktopToolOptions::CompressImage { target_kb } => {
             let bytes = std::fs::read(&job.input_path).map_err(to_refract_err)?;
             let out_bytes = image::compress_image(&bytes, *target_kb)?;
-            let out_path = determine_output_path(job, destination, "compressed", "jpg");
-            std::fs::write(&out_path, out_bytes).map_err(to_refract_err)?;
-            Ok(out_path)
+            save_single_output(job, "jpg", &out_bytes)
         }
         opts @ DesktopToolOptions::ResizeImage { .. } => {
             let engine_opts = opts.as_engine_resize_options().ok_or_else(|| {
@@ -1521,14 +1533,7 @@ fn process_job(job: &JobRecord) -> Result<PathBuf, RefractError> {
             })?;
             let bytes = std::fs::read(&job.input_path).map_err(to_refract_err)?;
             let (out_bytes, out_fmt) = image::resize_image_with_options(&bytes, &engine_opts)?;
-            let out_path = determine_output_path(
-                job,
-                destination,
-                "resized",
-                format_primary_extension(out_fmt),
-            );
-            std::fs::write(&out_path, out_bytes).map_err(to_refract_err)?;
-            Ok(out_path)
+            save_single_output(job, format_primary_extension(out_fmt), &out_bytes)
         }
         DesktopToolOptions::PdfToImages { target, dpi } => {
             let bytes = take_preflight_pdf_bytes(report)?;
@@ -1537,46 +1542,23 @@ fn process_job(job: &JobRecord) -> Result<PathBuf, RefractError> {
         DesktopToolOptions::CompressPdf => {
             let bytes = take_preflight_pdf_bytes(report)?;
             let out_bytes = pdf::compress_pdf(&bytes)?;
-            let out_path = determine_output_path(job, destination, "compressed", "pdf");
-            std::fs::write(&out_path, out_bytes).map_err(to_refract_err)?;
-            Ok(out_path)
+            save_single_output(job, "pdf", &out_bytes)
         }
         DesktopToolOptions::SplitPdf { ranges } => {
             let bytes = take_preflight_pdf_bytes(report)?;
             let parts = pdf::split_pdf(&bytes, ranges)?;
-            let parent = destination.resolve_parent(&job.input_path);
-            let stem = job
-                .input_path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("file");
-
-            let mut last_path = parent.to_path_buf();
-            for (label, part_bytes) in parts {
-                let out_path = parent.join(format!("{}-{}.pdf", stem, label));
-                let unique = uniquify_path(&out_path);
-                std::fs::write(&unique, part_bytes).map_err(to_refract_err)?;
-                last_path = unique;
-            }
-            Ok(last_path)
+            save_split_parts(job, parts)
         }
         DesktopToolOptions::ReorderPdf { order } => {
             let bytes = take_preflight_pdf_bytes(report)?;
             let out_bytes = pdf::reorder_pdf(&bytes, order)?;
-            let out_path = determine_output_path(job, destination, "reordered", "pdf");
-            std::fs::write(&out_path, out_bytes).map_err(to_refract_err)?;
-            Ok(out_path)
+            save_single_output(job, "pdf", &out_bytes)
         }
         DesktopToolOptions::ConvertAudio {
             target,
             bitrate_kbps,
         } => {
-            let out_path = determine_output_path(
-                job,
-                destination,
-                "converted",
-                format_primary_extension(*target),
-            );
+            let out_path = resolve_new_output_path(job, format_primary_extension(*target))?;
             audio::convert_audio(&job.input_path, &out_path, *target, *bitrate_kbps)?;
             Ok(out_path)
         }
@@ -1586,7 +1568,7 @@ fn process_job(job: &JobRecord) -> Result<PathBuf, RefractError> {
             bitrate_kbps,
         } => {
             let ext = format_primary_extension(detected_format);
-            let out_path = determine_output_path(job, destination, "trimmed", ext);
+            let out_path = resolve_new_output_path(job, ext)?;
             let start_arg = format!("{:.3}", start_secs);
             let end_arg = end.to_engine_arg();
             audio::trim_audio_cancellable(
@@ -1604,7 +1586,6 @@ fn process_job(job: &JobRecord) -> Result<PathBuf, RefractError> {
 }
 
 fn process_job_with_password(job: &JobRecord, password: &str) -> Result<PathBuf, RefractError> {
-    let destination = job.request.destination();
     match job.request.options() {
         DesktopToolOptions::MergePdf => {
             return Err(RefractError::new(
@@ -1630,9 +1611,7 @@ fn process_job_with_password(job: &JobRecord, password: &str) -> Result<PathBuf,
     match job.request.options() {
         DesktopToolOptions::CompressPdf => {
             let out_bytes = pdf::compress_pdf_with_password(&bytes, password)?;
-            let out_path = determine_output_path(job, destination, "compressed", "pdf");
-            std::fs::write(&out_path, out_bytes).map_err(to_refract_err)?;
-            Ok(out_path)
+            save_single_output(job, "pdf", &out_bytes)
         }
         DesktopToolOptions::PdfToImages { target, dpi } => {
             render_or_extract_pdf_images(job, &bytes, *target, *dpi, Some(password))
@@ -1640,21 +1619,7 @@ fn process_job_with_password(job: &JobRecord, password: &str) -> Result<PathBuf,
         DesktopToolOptions::SplitPdf { ranges } => {
             let parts =
                 pdf::split_pdf_with_password(&bytes, ranges, Some(password), &CancelToken::none())?;
-            let parent = destination.resolve_parent(&job.input_path);
-            let stem = job
-                .input_path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("file");
-
-            let mut last_path = parent.to_path_buf();
-            for (label, part_bytes) in parts {
-                let out_path = parent.join(format!("{}-{}.pdf", stem, label));
-                let unique = uniquify_path(&out_path);
-                std::fs::write(&unique, part_bytes).map_err(to_refract_err)?;
-                last_path = unique;
-            }
-            Ok(last_path)
+            save_split_parts(job, parts)
         }
         DesktopToolOptions::ReorderPdf { order } => {
             let out_bytes = pdf::reorder_pdf_with_password(
@@ -1663,9 +1628,7 @@ fn process_job_with_password(job: &JobRecord, password: &str) -> Result<PathBuf,
                 Some(password),
                 &CancelToken::none(),
             )?;
-            let out_path = determine_output_path(job, destination, "reordered", "pdf");
-            std::fs::write(&out_path, out_bytes).map_err(to_refract_err)?;
-            Ok(out_path)
+            save_single_output(job, "pdf", &out_bytes)
         }
         _ => unreachable!(),
     }
@@ -1674,7 +1637,7 @@ fn process_job_with_password(job: &JobRecord, password: &str) -> Result<PathBuf,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pipeline::options::parse_format_strict;
+    use crate::pipeline::options::{parse_format_strict, OutputDestination};
     use std::path::PathBuf;
 
     fn fixture_path(name: &str) -> PathBuf {
@@ -1706,49 +1669,128 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_uniquify_path() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let base = temp_dir.path().join("test.txt");
-        std::fs::write(&base, "a").unwrap();
-        let u1 = uniquify_path(&base);
-        let fname1 = u1.file_name().unwrap().to_str().unwrap();
-        assert_ne!(fname1, "test.txt");
-        assert!(fname1.contains("(1)"), "got: {}", fname1);
-        std::fs::write(&u1, "b").unwrap();
-        let u2 = uniquify_path(&base);
-        let fname2 = u2.file_name().unwrap().to_str().unwrap();
-        assert_ne!(fname2, "test.txt");
-        assert_ne!(fname2, fname1);
-        assert!(fname2.contains("(2)"), "got: {}", fname2);
-    }
-
-    #[test]
-    fn test_determine_output_path() {
-        let req = JobRequest::new(
-            ToolId::ConvertImage,
-            DesktopToolOptions::ConvertImage {
-                target: Format::Png,
-                quality: 90,
-            },
-            OutputDestination::NextToSource,
-        )
-        .unwrap();
-        let job = JobRecord {
+    fn record_for(
+        input_path: PathBuf,
+        tool: ToolId,
+        options: DesktopToolOptions,
+        destination: OutputDestination,
+    ) -> JobRecord {
+        let name = input_path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        JobRecord {
             id: 1,
-            input_path: PathBuf::from("/home/user/photo.jpg"),
-            name: "photo.jpg".into(),
+            input_path,
+            name,
             size_bytes: 1000,
-            tool_label: "Convert image".into(),
-            request: req,
+            tool_label: String::new(),
+            request: JobRequest::new(tool, options, destination).unwrap(),
             last_batch_member_ids: Vec::new(),
             status: JobStatus::Waiting,
             error: String::new(),
             output_path: PathBuf::new(),
             progress: 0.0,
-        };
-        let path = determine_output_path(&job, job.request.destination(), "converted", "png");
-        assert_eq!(path.file_name().unwrap(), "photo converted.png");
+        }
+    }
+
+    #[test]
+    fn output_file_names_follow_manifest_templates() {
+        let input = PathBuf::from("/home/user/photo.jpg");
+        let cases = [
+            (
+                ToolId::ConvertImage,
+                DesktopToolOptions::ConvertImage {
+                    target: Format::Png,
+                    quality: 90,
+                },
+                "png",
+                "photo (converted).png",
+            ),
+            (
+                ToolId::CompressImage,
+                DesktopToolOptions::CompressImage { target_kb: 200 },
+                "jpg",
+                "photo_compressed.jpg",
+            ),
+            (
+                ToolId::MergePdf,
+                DesktopToolOptions::MergePdf,
+                "pdf",
+                "photo_merged.pdf",
+            ),
+        ];
+        for (tool, options, ext, expected) in cases {
+            let job = record_for(
+                input.clone(),
+                tool,
+                options,
+                OutputDestination::NextToSource,
+            );
+            assert_eq!(output_file_name(&job, ext), expected);
+        }
+    }
+
+    #[test]
+    fn process_job_never_overwrites_existing_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("plain.png");
+        std::fs::copy(fixture_path("plain.png"), &input).unwrap();
+        let existing = dir.path().join("plain (converted).webp");
+        std::fs::write(&existing, b"user file").unwrap();
+
+        let job = record_for(
+            input,
+            ToolId::ConvertImage,
+            DesktopToolOptions::ConvertImage {
+                target: Format::Webp,
+                quality: 80,
+            },
+            OutputDestination::NextToSource,
+        );
+        let out = process_job(&job).unwrap();
+        assert_eq!(out, dir.path().join("plain (converted) (2).webp"));
+        assert_eq!(std::fs::read(&existing).unwrap(), b"user file");
+        assert_eq!(
+            refract_core::detect(&std::fs::read(&out).unwrap()),
+            Some(Format::Webp)
+        );
+        let leftover_temps = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".refract-")
+            })
+            .count();
+        assert_eq!(leftover_temps, 0);
+    }
+
+    #[test]
+    fn split_pdf_numbers_taken_part_names_and_keeps_existing_file() {
+        let src = tempfile::tempdir().unwrap();
+        let out_dir = tempfile::tempdir().unwrap();
+        let input = src.path().join("plain.pdf");
+        std::fs::copy(fixture_path("plain.pdf"), &input).unwrap();
+        let existing = out_dir.path().join("plain-p1-2.pdf");
+        std::fs::write(&existing, b"user file").unwrap();
+
+        let job = record_for(
+            input,
+            ToolId::SplitPdf,
+            DesktopToolOptions::SplitPdf {
+                ranges: "1-2, 3".into(),
+            },
+            OutputDestination::Directory(out_dir.path().to_path_buf()),
+        );
+        process_job(&job).unwrap();
+        assert_eq!(std::fs::read(&existing).unwrap(), b"user file");
+        let renamed = std::fs::read(out_dir.path().join("plain-p1-2 (2).pdf")).unwrap();
+        assert_eq!(pdf::probe_pdf(&renamed).unwrap().page_count, 2);
+        assert!(out_dir.path().join("plain-p3.pdf").exists());
     }
 
     #[test]
@@ -2403,7 +2445,7 @@ mod tests {
         assert!(guard.iter().all(|j| j.output_path == out_path));
         assert_eq!(out_path.parent(), Some(out_dir.path()));
         // Output name comes from recorded first input (`first.pdf`), not reordered `third.pdf`
-        assert_eq!(out_path.file_name().unwrap(), "first merged.pdf");
+        assert_eq!(out_path.file_name().unwrap(), "first_merged.pdf");
 
         let merged_bytes = std::fs::read(&out_path).unwrap();
         assert_eq!(pdf::probe_pdf(&merged_bytes).unwrap().page_count, 3);
@@ -2531,7 +2573,7 @@ mod tests {
 
         assert_eq!(out_path.parent(), Some(out_dir.path()));
         // Derived from recorded first member `enc_first.pdf`, NOT reordered `enc_second.pdf`
-        assert_eq!(out_path.file_name().unwrap(), "enc_first merged.pdf");
+        assert_eq!(out_path.file_name().unwrap(), "enc_first_merged.pdf");
         let merged_bytes = std::fs::read(&out_path).unwrap();
         assert_eq!(pdf::probe_pdf(&merged_bytes).unwrap().page_count, 6);
 

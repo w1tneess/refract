@@ -2,6 +2,7 @@ pub mod audio;
 pub mod image;
 pub mod native;
 pub mod pdf;
+pub mod persist;
 pub mod process;
 pub mod render;
 

@@ -475,7 +475,8 @@ pub fn preflight_inputs_with<P: PreflightProbe>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pipeline::{OutputDestination, TrimEnd};
+    use crate::pipeline::options::OutputDestination;
+    use crate::pipeline::TrimEnd;
     use std::cell::RefCell;
     use std::collections::HashMap;
     use std::path::PathBuf;

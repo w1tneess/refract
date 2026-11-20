@@ -1,10 +1,11 @@
+use crate::persist;
 use crate::process::run_command_cancellable;
 use refract_core::cancel::CancelToken;
 use refract_core::error::{ErrorCode, RefractError};
 use refract_core::format::Format;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use tempfile::{Builder as TempFileBuilder, TempPath};
+use tempfile::TempPath;
 
 /// Allowed audio bitrate bounds (kbps) for lossy codecs.
 pub const MIN_BITRATE_KBPS: u32 = 64;
@@ -366,64 +367,15 @@ fn detect_audio_format_from_file(path: &Path) -> Option<Format> {
 /// Converting immediately to [`TempPath`] closes the file handle on Windows before spawning
 /// FFmpeg while retaining exclusive RAII ownership so dropping always removes only this file.
 fn create_sibling_temp_audio_file(output: &Path, ext: &str) -> Result<TempPath, RefractError> {
-    let parent = output
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let clean_ext = ext.trim_start_matches('.');
-    let suffix = if clean_ext.is_empty() {
-        String::new()
-    } else {
-        format!(".{}", clean_ext)
-    };
-
-    let named = TempFileBuilder::new()
-        .prefix(".refract-audio-")
-        .suffix(&suffix)
-        .tempfile_in(parent)
-        .map_err(|e| {
-            RefractError::with_details(
-                ErrorCode::EngineFailed,
-                "Failed to allocate temporary audio output file",
-                e.to_string(),
-            )
-        })?;
-
-    Ok(named.into_temp_path())
+    let parent = output.parent().unwrap_or_else(|| Path::new("."));
+    persist::create_sibling_temp(parent, ".refract-audio-", ext)
 }
 
-/// Atomically persist an owned [`TempPath`] to `output` with strict no-clobber semantics.
-///
-/// - On Windows, `TempPath::persist_noclobber` uses `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING`,
-///   failing atomically with `AlreadyExists` if `output` exists.
-/// - On Unix, `TempPath::persist_noclobber` uses `link` + `unlink`, failing atomically with `AlreadyExists`.
-/// - On any error (including collision), the returned `PathPersistError`'s owned `TempPath` is
-///   dropped, removing only this operation's temporary file while leaving `output` untouched.
+/// Atomically persist an owned [`TempPath`] to `output` with strict no-clobber semantics
+/// (see [`persist::persist_noclobber`]): an existing `output` is never replaced and, on any
+/// error, only this operation's temporary file is removed.
 pub fn persist_audio_temp_noclobber(temp: TempPath, output: &Path) -> Result<(), RefractError> {
-    match temp.persist_noclobber(output) {
-        Ok(()) => Ok(()),
-        Err(err) => {
-            let io_err = err.error;
-            // Explicitly drop `err.path` so our owned temporary file is cleaned up immediately.
-            drop(err.path);
-            if io_err.kind() == std::io::ErrorKind::AlreadyExists {
-                Err(RefractError::with_details(
-                    ErrorCode::EngineFailed,
-                    format!(
-                        "Output file already exists and will not be overwritten: {}",
-                        output.display()
-                    ),
-                    "destination_exists",
-                ))
-            } else {
-                Err(RefractError::with_details(
-                    ErrorCode::EngineFailed,
-                    "Failed to finalize audio output file",
-                    io_err.to_string(),
-                ))
-            }
-        }
-    }
+    persist::persist_noclobber(temp, output)
 }
 
 fn reject_if_destination_exists(output: &Path) -> Result<(), RefractError> {
