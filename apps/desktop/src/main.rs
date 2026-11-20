@@ -730,7 +730,11 @@ fn reject_recorded_batch(
 
 /// Mark `ids` as starting a run: `Queued`/`NeedsPassword` -> `Probing`.
 fn begin_probing(store: &mut [JobRecord], ids: &[i32]) {
-    for j in store.iter_mut().filter(|j| ids.contains(&j.id)) {
+    let can_start = |j: &JobRecord| matches!(j.status, JobState::Queued | JobState::NeedsPassword);
+    for j in store
+        .iter_mut()
+        .filter(|j| ids.contains(&j.id) && can_start(j))
+    {
         set_state(j, JobState::Probing);
         j.progress = 0.0;
         j.error.clear();
@@ -996,17 +1000,42 @@ fn run_registered(shared: &Shared, ids: &[i32], work: impl FnOnce(&CancelToken))
     shared.active.lock().unwrap().finish(ids);
 }
 
-/// Fresh copies of `ids` that still exist and are still `Queued` (in `ids` order). Jobs canceled
-/// or removed after a run was planned are left out.
-fn still_queued(shared: &Shared, ids: &[i32]) -> Vec<JobRecord> {
-    let store = shared.jobs.lock().unwrap();
-    ids.iter()
-        .filter_map(|id| {
+/// Take the jobs among `ids` that still exist and are still `Queued`: move them to `Probing`
+/// (recording them as one batch when `record_batch`) and return fresh copies in `ids` order.
+/// The check and the move happen under one lock, so a cancel or remove can never slip in between
+/// (a job canceled or removed after planning is simply not claimed). Register the unit right
+/// after; a cancel landing in that instant is kept by `ActiveRun` and applied when it starts.
+fn claim_queued(
+    shared: &Shared,
+    ids: &[i32],
+    record_batch: bool,
+    ui_tx: Option<&mpsc::Sender<UiEvent>>,
+) -> Vec<JobRecord> {
+    let mut store = shared.jobs.lock().unwrap();
+    let claimed_ids: Vec<i32> = ids
+        .iter()
+        .copied()
+        .filter(|id| {
             store
                 .iter()
-                .find(|j| j.id == *id && j.status == JobState::Queued)
-                .cloned()
+                .any(|j| j.id == *id && j.status == JobState::Queued)
         })
+        .collect();
+    if claimed_ids.is_empty() {
+        return Vec::new();
+    }
+    if record_batch {
+        for j in store.iter_mut().filter(|j| claimed_ids.contains(&j.id)) {
+            j.last_batch_member_ids = claimed_ids.clone();
+        }
+    }
+    begin_probing(&mut store, &claimed_ids);
+    if let Some(tx) = ui_tx {
+        push_ui_event(tx, UiEvent::JobsUpdated(store.clone()));
+    }
+    claimed_ids
+        .iter()
+        .filter_map(|id| store.iter().find(|j| j.id == *id).cloned())
         .collect()
 }
 
@@ -1037,7 +1066,7 @@ fn run_all_waiting(shared: &Shared, ui_tx: Option<&mpsc::Sender<UiEvent>>) {
                 items,
             } => {
                 let ids: Vec<i32> = items.iter().map(|j| j.id).collect();
-                let members = still_queued(shared, &ids);
+                let members = claim_queued(shared, &ids, true, ui_tx);
                 if members.is_empty() {
                     continue;
                 }
@@ -1048,16 +1077,6 @@ fn run_all_waiting(shared: &Shared, ui_tx: Option<&mpsc::Sender<UiEvent>>) {
                     format!("Compiling {} images into PDF…", members.len())
                 };
                 run_registered(shared, &ids, |cancel| {
-                    {
-                        let mut store = shared.jobs.lock().unwrap();
-                        for j in store.iter_mut().filter(|j| ids.contains(&j.id)) {
-                            j.last_batch_member_ids = ids.clone();
-                        }
-                        begin_probing(&mut store, &ids);
-                        if let Some(tx) = ui_tx {
-                            push_ui_event(tx, UiEvent::JobsUpdated(store.clone()));
-                        }
-                    }
                     status(ui_tx, message, progress);
                     let _ = run_unit(&shared.jobs, &ids, cancel, ui_tx, |ctx| {
                         if tool == ToolId::MergePdf {
@@ -1091,7 +1110,7 @@ fn run_single(
     total_units: usize,
     ui_tx: Option<&mpsc::Sender<UiEvent>>,
 ) {
-    let Some(job) = still_queued(shared, &[id]).pop() else {
+    let Some(job) = claim_queued(shared, &[id], false, ui_tx).pop() else {
         return;
     };
     run_registered(shared, &[id], |cancel| {
@@ -1107,13 +1126,7 @@ fn run_single_job_in_store(
     cancel: &CancelToken,
     ui_tx: Option<&mpsc::Sender<UiEvent>>,
 ) {
-    {
-        let mut store = jobs_store.lock().unwrap();
-        begin_probing(&mut store, &[job.id]);
-        if let Some(tx) = ui_tx {
-            push_ui_event(tx, UiEvent::JobsUpdated(store.clone()));
-        }
-    }
+    // `job` was already claimed (moved to Probing) by `claim_queued`.
     status(
         ui_tx,
         format!(
@@ -1175,7 +1188,8 @@ fn prepare_retry(store: &mut [JobRecord], job_id: i32) -> Result<Vec<i32>, Refra
 }
 
 fn run_retry(shared: &Shared, ids: &[i32], ui_tx: Option<&mpsc::Sender<UiEvent>>) {
-    let members = still_queued(shared, ids);
+    // Recorded batch ids were set by `prepare_retry`; claim only what is still waiting.
+    let members = claim_queued(shared, ids, false, ui_tx);
     let Some(primary) = members.first().cloned() else {
         return;
     };
@@ -1188,8 +1202,8 @@ fn run_retry(shared: &Shared, ids: &[i32], ui_tx: Option<&mpsc::Sender<UiEvent>>
             ErrorCode::InvalidOption,
             "Some files of this batch were canceled or removed before it could run.",
         );
+        // The claimed members are already Probing, so this ends them Rejected (a legal move).
         let mut store = shared.jobs.lock().unwrap();
-        begin_probing(&mut store, &member_ids);
         apply_result_to_jobs(&mut store, &member_ids, &Err(err));
         if let Some(tx) = ui_tx {
             push_ui_event(tx, UiEvent::JobsUpdated(store.clone()));
@@ -1198,13 +1212,6 @@ fn run_retry(shared: &Shared, ids: &[i32], ui_tx: Option<&mpsc::Sender<UiEvent>>
     }
 
     run_registered(shared, &member_ids, |cancel| {
-        {
-            let mut store = shared.jobs.lock().unwrap();
-            begin_probing(&mut store, &member_ids);
-            if let Some(tx) = ui_tx {
-                push_ui_event(tx, UiEvent::JobsUpdated(store.clone()));
-            }
-        }
         status(ui_tx, format!("Retrying: {}", primary.name), 0.0);
         let _ = run_unit(
             &shared.jobs,
@@ -3079,6 +3086,59 @@ mod tests {
         );
         job.id = id;
         job
+    }
+
+    #[test]
+    fn jobs_canceled_or_removed_after_planning_are_never_claimed_or_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(vec![
+            convert_job_in(dir.path(), 1),
+            convert_job_in(dir.path(), 2),
+            convert_job_in(dir.path(), 3),
+        ]));
+        let shared = Shared::for_store(&store);
+        // "Process all" planned [1, 2, 3]; before its units start, 2 is canceled and 3 removed.
+        cancel_job(&shared, 2, None);
+        assert!(remove_job_guarded(&shared, 3));
+
+        let claimed = claim_queued(&shared, &[1, 2, 3], false, None);
+        assert_eq!(claimed.iter().map(|j| j.id).collect::<Vec<_>>(), vec![1]);
+        {
+            let guard = store.lock().unwrap();
+            assert_eq!(guard[0].status, JobState::Probing);
+            assert_eq!(guard[1].status, JobState::Canceled);
+            assert_eq!(guard.len(), 2);
+        }
+        // Nothing left to claim twice.
+        assert!(claim_queued(&shared, &[1, 2, 3], false, None).is_empty());
+
+        run_registered(&shared, &[1], |cancel| {
+            run_single_job_in_store(&shared.jobs, &claimed[0], 0, 1, cancel, None);
+        });
+        assert_eq!(store.lock().unwrap()[0].status, JobState::Saved);
+        let outputs: Vec<String> = dir_names(dir.path())
+            .into_iter()
+            .filter(|n| n.contains("converted"))
+            .collect();
+        assert_eq!(outputs, vec!["plain-1 (converted).webp"]);
+    }
+
+    #[test]
+    fn cancel_between_claim_and_registration_still_stops_the_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(vec![convert_job_in(dir.path(), 1)]));
+        let shared = Shared::for_store(&store);
+        let claimed = claim_queued(&shared, &[1], false, None);
+        // The user presses Cancel after the claim, before the unit registers.
+        cancel_job(&shared, 1, None);
+        run_registered(&shared, &[1], |cancel| {
+            assert!(cancel.is_canceled());
+            run_single_job_in_store(&shared.jobs, &claimed[0], 0, 1, cancel, None);
+        });
+        assert_eq!(store.lock().unwrap()[0].status, JobState::Canceled);
+        assert!(!dir_names(dir.path())
+            .iter()
+            .any(|n| n.contains("converted")));
     }
 
     #[test]
