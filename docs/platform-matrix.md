@@ -1,3 +1,5 @@
+<!-- coderabbit-ai-generated:v1 -->
+
 <!-- GENERATED FILE — DO NOT EDIT BY HAND. -->
 <!-- Source: specs/tool-manifest.json -->
 <!-- Regenerate with: pnpm manifest:generate -->
@@ -33,11 +35,11 @@ Refract ships **11 canonical tools** across **3 domains** (Images, PDF, Audio) o
 | `convert-image` | image | Web: HEIC, JPEG, PNG, WebP<br>Desktop: JPEG, PNG, WebP | JPEG, PNG, WebP | libheif / @jsquash WASM | Rust image crate — Available (built-in) | None | No / No |
 | `compress-image` | image | Web: HEIC, JPEG, PNG, WebP<br>Desktop: JPEG, PNG, WebP | Web: JPEG, WebP<br>Desktop: JPEG | @jsquash encoders WASM | Rust image crate — Available (built-in) | None | No / No |
 | `resize-image` | image | Web: HEIC, JPEG, PNG, WebP<br>Desktop: JPEG, PNG, WebP | JPEG, PNG, WebP | @jsquash/resize (Lanczos-3) WASM | Rust image crate (Lanczos-3) — Available (built-in) | None | No / No |
-| `merge-pdf` | pdf | PDF | PDF | pdf-lib | Rust lopdf — Available (built-in) | None | Yes / No |
+| `merge-pdf` | pdf | PDF | PDF | pdf-lib | Rust lopdf — Available (built-in) | None | Yes / Yes |
 | `split-pdf` | pdf | PDF | PDF | pdf-lib | Rust lopdf — Available (built-in) | None | Yes / No |
 | `reorder-pdf` | pdf | PDF | PDF | pdf-lib | Rust lopdf — Available (built-in) | None | Yes / No |
 | `images-to-pdf` | pdf | Web: HEIC, JPEG, PNG, WebP<br>Desktop: JPEG, PNG, WebP | PDF | pdf-lib | Rust lopdf + image — Available (built-in) | None | No / No |
-| `pdf-to-images` | pdf | PDF | PNG, JPEG | pdfjs-dist + OffscreenCanvas | PDF renderer (mutool / pdftoppm / pdftocairo / gs) — Requires external binary | `mutool | pdftoppm | pdftocairo | gs` *(fallback: Extracts embedded JPEG/PNG XObject images when no rasterizer is installed on PATH.)* | Yes / Yes |
+| `pdf-to-images` | pdf | PDF | PNG, JPEG | pdfjs-dist + OffscreenCanvas | PDF renderer (mutool / pdftoppm / pdftocairo / gs) — Requires external binary | `mutool \| pdftoppm \| pdftocairo \| gs` *(fallback: Extracts embedded JPEG/PNG XObject images when no rasterizer is installed on PATH.)* | Yes / Yes |
 | `compress-pdf` | pdf | PDF | PDF | @neslinesli93/qpdf-wasm | Rust lopdf — Available (built-in) | None | Yes / Yes |
 | `convert-audio` | audio | MP3, WAV, M4A, OGG | MP3, WAV, M4A, OGG | FFmpeg WebAssembly (lazy-loaded) | System FFmpeg — Requires external binary | `ffmpeg`, `ffprobe` | No / No |
 | `trim-audio` | audio | MP3, WAV, M4A, OGG | MP3, WAV, M4A, OGG | FFmpeg WebAssembly (lazy-loaded) | System FFmpeg — Requires external binary | `ffmpeg`, `ffprobe` | No / No |

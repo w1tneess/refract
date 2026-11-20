@@ -409,6 +409,16 @@ fn materialize_inherited_attributes(
     }
 }
 
+fn cancellable_stage<T>(
+    cancel: &CancelToken,
+    stage: impl FnOnce() -> Result<T, RefractError>,
+) -> Result<T, RefractError> {
+    cancel.check()?;
+    let result = stage();
+    cancel.check()?;
+    result
+}
+
 /// Compress a PDF document using object and stream deflating (unlocking with optional password).
 pub fn compress_pdf_cancellable(
     bytes: &[u8],
@@ -420,16 +430,19 @@ pub fn compress_pdf_cancellable(
     cancel.check()?;
 
     doc.compress();
-    cancel.check()?;
-
     let mut out = Vec::new();
-    doc.save_to(&mut out).map_err(|e| {
-        RefractError::with_details(
-            ErrorCode::EngineFailed,
-            "Failed to save compressed PDF",
-            e.to_string(),
-        )
+    cancel.check()?;
+    cancellable_stage(cancel, || {
+        doc.save_to(&mut out).map_err(|e| {
+            RefractError::with_details(
+                ErrorCode::EngineFailed,
+                "Failed to save compressed PDF",
+                e.to_string(),
+            )
+        })
     })?;
+
+    cancel.check()?;
 
     Ok(out)
 }
@@ -465,15 +478,20 @@ pub fn reorder_pdf_with_password(
     // Identity-order fast path: compress and save the already-unlocked `doc` directly
     // so password-protected documents are never reloaded without their password.
     if order == (1..=total_pages).collect::<Vec<_>>() {
+        cancel.check()?;
         doc.compress();
         let mut out = Vec::new();
-        doc.save_to(&mut out).map_err(|e| {
-            RefractError::with_details(
-                ErrorCode::EngineFailed,
-                "Failed to save reordered PDF",
-                e.to_string(),
-            )
+        cancel.check()?;
+        cancellable_stage(cancel, || {
+            doc.save_to(&mut out).map_err(|e| {
+                RefractError::with_details(
+                    ErrorCode::EngineFailed,
+                    "Failed to save reordered PDF",
+                    e.to_string(),
+                )
+            })
         })?;
+        cancel.check()?;
         return Ok(out);
     }
 
@@ -529,15 +547,19 @@ pub fn reorder_pdf_with_password(
     pages_dict.set("Kids", Object::Array(new_kids));
     pages_dict.set("Count", Object::Integer(total_pages as i64));
 
-    cancel.check()?;
     let mut out = Vec::new();
-    doc.save_to(&mut out).map_err(|e| {
-        RefractError::with_details(
-            ErrorCode::EngineFailed,
-            "Failed to save reordered PDF",
-            e.to_string(),
-        )
+    cancel.check()?;
+    cancellable_stage(cancel, || {
+        doc.save_to(&mut out).map_err(|e| {
+            RefractError::with_details(
+                ErrorCode::EngineFailed,
+                "Failed to save reordered PDF",
+                e.to_string(),
+            )
+        })
     })?;
+
+    cancel.check()?;
 
     Ok(out)
 }
@@ -626,12 +648,15 @@ pub fn split_pdf_with_password(
         group_doc.renumber_objects();
 
         let mut out = Vec::new();
-        group_doc.save_to(&mut out).map_err(|e| {
-            RefractError::with_details(
-                ErrorCode::EngineFailed,
-                "Failed to save split PDF",
-                e.to_string(),
-            )
+        cancel.check()?;
+        cancellable_stage(cancel, || {
+            group_doc.save_to(&mut out).map_err(|e| {
+                RefractError::with_details(
+                    ErrorCode::EngineFailed,
+                    "Failed to save split PDF",
+                    e.to_string(),
+                )
+            })
         })?;
 
         let label = if group.len() == 1 {
@@ -641,6 +666,8 @@ pub fn split_pdf_with_password(
         };
         outputs.push((label, out));
     }
+
+    cancel.check()?;
 
     Ok(outputs)
 }
@@ -671,13 +698,17 @@ pub fn merge_pdfs_with_inputs(
         let mut doc = load_document(inputs[0].bytes, inputs[0].password)
             .map_err(|e| tag_merge_input_error(e, 0))?;
         let mut out = Vec::new();
-        doc.save_to(&mut out).map_err(|e| {
-            RefractError::with_details(
-                ErrorCode::EngineFailed,
-                "Failed to save merged PDF",
-                e.to_string(),
-            )
+        cancel.check()?;
+        cancellable_stage(cancel, || {
+            doc.save_to(&mut out).map_err(|e| {
+                RefractError::with_details(
+                    ErrorCode::EngineFailed,
+                    "Failed to save merged PDF",
+                    e.to_string(),
+                )
+            })
         })?;
+        cancel.check()?;
         return Ok(out);
     }
 
@@ -695,13 +726,18 @@ pub fn merge_pdfs_with_inputs(
     finalize_merged(&mut target, kids)?;
 
     let mut out = Vec::new();
-    target.save_to(&mut out).map_err(|e| {
-        RefractError::with_details(
-            ErrorCode::EngineFailed,
-            "Failed to save merged PDF",
-            e.to_string(),
-        )
+    cancel.check()?;
+    cancellable_stage(cancel, || {
+        target.save_to(&mut out).map_err(|e| {
+            RefractError::with_details(
+                ErrorCode::EngineFailed,
+                "Failed to save merged PDF",
+                e.to_string(),
+            )
+        })
     })?;
+
+    cancel.check()?;
 
     Ok(out)
 }
@@ -929,7 +965,8 @@ pub fn images_to_pdf_with_options(
 
     for bytes in images {
         cancel.check()?;
-        let decoded = crate::image::decode_image(bytes)?;
+        let decoded = crate::image::decode_image_cancellable(bytes, cancel)?;
+        cancel.check()?;
         let (width_px, height_px) = image::GenericImageView::dimensions(&decoded);
         let jpeg = crate::image::encode_jpeg_flattened(&decoded, quality)?;
 
@@ -1010,15 +1047,19 @@ pub fn images_to_pdf_with_options(
     });
     doc.trailer.set("Root", Object::Reference(catalog_id));
 
-    cancel.check()?;
     let mut out = Vec::new();
-    doc.save_to(&mut out).map_err(|e| {
-        RefractError::with_details(
-            ErrorCode::EngineFailed,
-            "Failed to save the PDF",
-            e.to_string(),
-        )
+    cancel.check()?;
+    cancellable_stage(cancel, || {
+        doc.save_to(&mut out).map_err(|e| {
+            RefractError::with_details(
+                ErrorCode::EngineFailed,
+                "Failed to save the PDF",
+                e.to_string(),
+            )
+        })
     })?;
+
+    cancel.check()?;
 
     Ok(out)
 }
@@ -1076,7 +1117,9 @@ pub fn extract_embedded_images_with_password(
                 continue;
             }
 
-            if let Some(extracted) = decode_image_stream(stream) {
+            cancel.check()?;
+            if let Some(extracted) = cancellable_stage(cancel, || Ok(decode_image_stream(stream)))?
+            {
                 results.push(EmbeddedImage {
                     page: page_number,
                     bytes: extracted.0,
@@ -1085,6 +1128,8 @@ pub fn extract_embedded_images_with_password(
             }
         }
     }
+
+    cancel.check()?;
 
     Ok(results)
 }
@@ -1706,5 +1751,17 @@ mod tests {
         assert!(!format!("{:?}", pw).contains("super-secret-value"));
         pw.clear();
         assert_eq!(pw.as_str(), "");
+    }
+    #[test]
+    fn cancellation_during_final_stage_overrides_success() {
+        let token = CancelToken::new();
+        let result = cancellable_stage(&token, || {
+            let mut doc = Document::with_version("1.5");
+            let mut out = Vec::new();
+            doc.save_to(&mut out).unwrap();
+            token.cancel();
+            Ok(out)
+        });
+        assert_eq!(result.unwrap_err().code, ErrorCode::Canceled);
     }
 }

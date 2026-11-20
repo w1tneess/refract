@@ -25,6 +25,7 @@ pub fn output_name(
     ext: &str,
     taken: &mut HashSet<String>,
 ) -> String {
+    *taken = taken.drain().map(|name| name.to_lowercase()).collect();
     let stem = stem_of(input_name);
     let base = template.replace("{name}", stem);
     let ext = ext.trim_start_matches('.');
@@ -91,14 +92,24 @@ pub fn resolve_unique_path(
         ));
     }
 
+    let mut components = Path::new(desired_filename).components();
+    if !matches!(components.next(), Some(std::path::Component::Normal(name)) if name == desired_filename)
+        || components.next().is_some()
+    {
+        return Err(RefractError::new(
+            ErrorCode::InvalidOption,
+            "Output name must be a single filename.",
+        ));
+    }
+    let available = |path: &Path| matches!(std::fs::symlink_metadata(path), Err(e) if e.kind() == std::io::ErrorKind::NotFound);
     let first = dir.join(desired_filename);
-    if !first.exists() {
+    if available(&first) {
         return Ok(first);
     }
 
     for n in 2..=max_attempts + 1 {
         let candidate = dir.join(suffixed_filename(desired_filename, n));
-        if !candidate.exists() {
+        if available(&candidate) {
             return Ok(candidate);
         }
     }
@@ -227,5 +238,35 @@ mod tests {
         // Exhausted: must error instead of returning an existing file path
         let err = resolve_unique_path(dir.path(), base, 2).unwrap_err();
         assert_eq!(err.code, ErrorCode::EngineFailed);
+    }
+    #[test]
+    fn prepopulated_names_are_case_insensitive() {
+        let mut taken = HashSet::from(["Photo.JPG".to_string()]);
+        assert_eq!(
+            output_name("{name}", "photo.png", "jpg", &mut taken),
+            "photo (2).jpg"
+        );
+    }
+
+    #[test]
+    fn unique_paths_require_one_host_component() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["", ".", "..", "../a", "/a", "a/b", "a/", "./a"] {
+            assert!(resolve_unique_path(dir.path(), name, 3).is_err(), "{name}");
+        }
+        #[cfg(unix)]
+        assert!(resolve_unique_path(dir.path(), r"a\b", 3).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_symlinks_are_taken() {
+        let dir = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink("missing", dir.path().join("a.pdf")).unwrap();
+        std::os::unix::fs::symlink("missing", dir.path().join("a (2).pdf")).unwrap();
+        assert_eq!(
+            resolve_unique_path(dir.path(), "a.pdf", 3).unwrap(),
+            dir.path().join("a (3).pdf")
+        );
     }
 }

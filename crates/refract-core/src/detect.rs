@@ -1,3 +1,5 @@
+pub const HEADER_SNIFF_BYTES: usize = 1024;
+
 use crate::format::Format;
 
 /// Detect format from byte headers (magic numbers).

@@ -12,6 +12,83 @@ const POLL_INTERVAL: Duration = Duration::from_millis(15);
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+#[cfg(windows)]
+struct OwnedJob(windows_sys::Win32::Foundation::HANDLE);
+#[cfg(windows)]
+impl Drop for OwnedJob {
+    fn drop(&mut self) {
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.0);
+        }
+    }
+}
+#[cfg(windows)]
+impl OwnedJob {
+    fn attach_and_resume(child: &std::process::Child) -> std::io::Result<Self> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::{
+            Foundation::*,
+            System::{Diagnostics::ToolHelp::*, JobObjects::*, Threading::*},
+        };
+        unsafe {
+            let job = Self(CreateJobObjectW(std::ptr::null(), std::ptr::null()));
+            if job.0.is_null() {
+                return Err(std::io::Error::last_os_error());
+            }
+            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            if SetInformationJobObject(
+                job.0,
+                JobObjectExtendedLimitInformation,
+                &limits as *const _ as _,
+                std::mem::size_of_val(&limits) as u32,
+            ) == 0
+                || AssignProcessToJobObject(job.0, child.as_raw_handle()) == 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+            if snapshot == INVALID_HANDLE_VALUE {
+                return Err(std::io::Error::last_os_error());
+            }
+            let mut entry: THREADENTRY32 = std::mem::zeroed();
+            entry.dwSize = std::mem::size_of_val(&entry) as u32;
+            let mut found = Thread32First(snapshot, &mut entry) != 0;
+            let mut resumed = false;
+            while found {
+                if entry.th32OwnerProcessID == child.id() {
+                    let thread = OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID);
+                    if !thread.is_null() {
+                        resumed = ResumeThread(thread) != u32::MAX;
+                        CloseHandle(thread);
+                    }
+                    break;
+                }
+                found = Thread32Next(snapshot, &mut entry) != 0;
+            }
+            CloseHandle(snapshot);
+            if !resumed {
+                return Err(std::io::Error::other("Could not resume owned process"));
+            }
+            Ok(job)
+        }
+    }
+    fn terminate(&self) {
+        unsafe {
+            windows_sys::Win32::System::JobObjects::TerminateJobObject(self.0, 1);
+        }
+    }
+}
+
+fn terminate_owned(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    unsafe {
+        // Leader is unreaped and was started in its own group; this ID cannot be reused.
+        libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
+    }
+    let _ = child.kill();
+}
+
 /// Captured result of a completed child process.
 #[derive(Debug, Clone)]
 pub struct ProcessOutput {
@@ -57,10 +134,18 @@ where
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        cmd.creation_flags(CREATE_NO_WINDOW);
+        cmd.creation_flags(
+            CREATE_NO_WINDOW | windows_sys::Win32::System::Threading::CREATE_SUSPENDED,
+        );
     }
 
     let mut child = cmd.spawn().map_err(|e| {
@@ -73,6 +158,18 @@ where
         RefractError::with_details(
             code,
             format!("Failed to start {}", tool_label),
+            e.to_string(),
+        )
+    })?;
+
+    #[cfg(windows)]
+    let job = OwnedJob::attach_and_resume(&child).map_err(|e| {
+        let _ = child.kill();
+        let _ = child.wait();
+        cleanup_files(cleanup_paths);
+        RefractError::with_details(
+            ErrorCode::EngineFailed,
+            "Failed to own subprocess job",
             e.to_string(),
         )
     })?;
@@ -98,7 +195,9 @@ where
         if cancel.is_canceled() {
             // Race-safe: child may have exited between the last poll and kill(); ignore kill error
             // and always call wait() to reap the child process cleanly.
-            let _ = child.kill();
+            #[cfg(windows)]
+            job.terminate();
+            terminate_owned(&mut child);
             let _ = child.wait();
             if let Some(h) = stdout_handle {
                 let _ = h.join();
@@ -110,11 +209,21 @@ where
             return Err(RefractError::canceled());
         }
 
+        // Do not reap the leader until EOF: its PID pins the process-group ID even
+        // if a descendant still owns a pipe. Cancellation can then safely kill the group.
+        if stdout_handle.as_ref().is_some_and(|h| !h.is_finished())
+            || stderr_handle.as_ref().is_some_and(|h| !h.is_finished())
+        {
+            thread::sleep(POLL_INTERVAL);
+            continue;
+        }
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) => thread::sleep(POLL_INTERVAL),
             Err(e) => {
-                let _ = child.kill();
+                #[cfg(windows)]
+                job.terminate();
+                terminate_owned(&mut child);
                 let _ = child.wait();
                 if let Some(h) = stdout_handle {
                     let _ = h.join();
@@ -213,22 +322,30 @@ mod tests {
     fn kills_reaps_and_cleans_up_partial_output_on_mid_run_cancel() {
         let dir = tempfile::tempdir().unwrap();
         let partial = dir.path().join("partial.out");
-        std::fs::write(&partial, b"partial-bytes").unwrap();
 
         let token = CancelToken::new();
         let canceller = token.clone();
-        thread::spawn(move || {
-            thread::sleep(Duration::from_millis(120));
+        let ready = partial.clone();
+        let readiness = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while !std::fs::metadata(&ready).is_ok_and(|m| m.len() > 0) {
+                if Instant::now() >= deadline {
+                    canceller.cancel();
+                    return false;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
             canceller.cancel();
+            true
         });
-
-        #[cfg(windows)]
-        let (prog, args) = (
-            "ping",
-            vec!["-n".to_string(), "30".to_string(), "127.0.0.1".to_string()],
-        );
         #[cfg(unix)]
-        let (prog, args) = ("sleep", vec!["30".to_string()]);
+        let script = format!("echo ready > '{}'; sleep 30", partial.display());
+        #[cfg(windows)]
+        let script = format!(
+            "echo ready > \"{}\" & ping -n 30 127.0.0.1",
+            partial.display()
+        );
+        let (prog, args) = shell_command(&script);
 
         let started = Instant::now();
         let err = run_command_cancellable(
@@ -240,6 +357,7 @@ mod tests {
         )
         .unwrap_err();
 
+        assert!(readiness.join().unwrap(), "child did not signal readiness");
         assert_eq!(err.code, ErrorCode::Canceled);
         assert!(
             started.elapsed() < Duration::from_secs(5),
@@ -362,5 +480,37 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.code, ErrorCode::MissingDependency);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn cancellation_after_leader_exit_terminates_pipe_holding_descendant() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("ready");
+        let token = CancelToken::new();
+        let canceller = token.clone();
+        let ready = marker.clone();
+        let task = thread::spawn(move || {
+            let (program, args) = shell_command(&format!(
+                "sleep 30 & echo ready > '{}'; exit 0",
+                ready.display()
+            ));
+            run_command_cancellable(program, args, &token, &[], "descendant-test")
+        });
+        let start = Instant::now();
+        while !marker.exists() && start.elapsed() < Duration::from_secs(2) {
+            thread::sleep(POLL_INTERVAL);
+        }
+        let ready = marker.exists();
+        thread::sleep(Duration::from_millis(50));
+        canceller.cancel();
+        while !task.is_finished() && start.elapsed() < Duration::from_secs(4) {
+            thread::sleep(POLL_INTERVAL);
+        }
+        assert!(
+            task.is_finished(),
+            "descendant kept pipes open after cancellation"
+        );
+        assert!(ready, "child did not start");
+        assert_eq!(task.join().unwrap().unwrap_err().code, ErrorCode::Canceled);
     }
 }

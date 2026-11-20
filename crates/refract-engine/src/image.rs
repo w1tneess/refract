@@ -693,6 +693,39 @@ pub fn compress_image(bytes: &[u8], target_kb: u32) -> Result<Vec<u8>, RefractEr
     compress_image_cancellable(bytes, target_kb, &CancelToken::none())
 }
 
+fn resize_with_budget(
+    img: &DynamicImage,
+    target_w: u32,
+    target_h: u32,
+    budget: u64,
+    cancel: &CancelToken,
+) -> Result<DynamicImage, RefractError> {
+    let (orig_w, orig_h) = img.dimensions();
+    let source = img.as_bytes().len() as u64;
+    let output =
+        u64::from(target_w) * u64::from(target_h) * u64::from(img.color().bytes_per_pixel());
+    let intermediate = u64::from(orig_w) * u64::from(target_h) * 16;
+    let resized = if source + output + intermediate <= budget {
+        img.resize_exact(target_w, target_h, image::imageops::FilterType::Lanczos3)
+    } else {
+        // image resamples vertically first into RGBA f32. Transposing swaps the
+        // passes and bounds the intermediate for wide-to-tall transformations.
+        let alternate = (source * 2 + output + u64::from(orig_h) * u64::from(target_w) * 16)
+            .max(source + output * 2);
+        if alternate > budget {
+            return Err(RefractError::new(
+                ErrorCode::LimitExceeded,
+                "Resize working buffers exceed the memory budget.",
+            ));
+        }
+        cancel.check()?;
+        img.rotate90()
+            .resize_exact(target_h, target_w, image::imageops::FilterType::Lanczos3)
+            .rotate270()
+    };
+    Ok(resized)
+}
+
 /// Resize an image using full manifest-aligned [`ResizeOptions`] (`px` or `cm` + DPI, aspect ratio,
 /// output format selection or source format preservation, quality validation) with cooperative cancellation.
 ///
@@ -740,7 +773,13 @@ pub fn resize_image_with_options_cancellable(
     let out_bytes = if target_w == orig_w && target_h == orig_h {
         encode_as(&img, out_fmt, valid_quality)?
     } else {
-        let resized = img.resize_exact(target_w, target_h, image::imageops::FilterType::Lanczos3);
+        let resized = resize_with_budget(
+            &img,
+            target_w,
+            target_h,
+            refract_core::memory_budget_bytes(refract_core::Platform::Desktop),
+            cancel,
+        )?;
         cancel.check()?;
         encode_as(&resized, out_fmt, valid_quality)?
     };
@@ -1154,5 +1193,19 @@ mod tests {
             ErrorCode::Canceled,
             "post-encode cancellation checkpoint must return Canceled instead of Ok"
         );
+    }
+    #[test]
+    fn resize_budget_allows_alternate_pass_order_and_rejects_excess() {
+        let img = DynamicImage::new_rgba8(100, 1);
+        let cancel = CancelToken::none();
+        let out = resize_with_budget(&img, 1, 100, 5000, &cancel).unwrap();
+        assert_eq!(out.dimensions(), (1, 100));
+        assert_eq!(
+            resize_with_budget(&img, 1, 100, 100, &cancel)
+                .unwrap_err()
+                .code,
+            ErrorCode::LimitExceeded
+        );
+        assert!(resize_with_budget(&img, 10, 1, 5000, &cancel).is_ok());
     }
 }

@@ -12,7 +12,7 @@ use std::path::Path;
 
 const MIB: u64 = 1024 * 1024;
 /// `refract_core::detect` inspects at most 1,024 bytes (for `%PDF-`).
-const HEADER_SNIFF_BYTES: usize = 1024;
+use refract_core::detect::HEADER_SNIFF_BYTES;
 
 /// Basic filesystem metadata obtained without reading file contents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

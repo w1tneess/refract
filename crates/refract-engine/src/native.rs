@@ -24,7 +24,7 @@ pub fn run_tool(cmd: &str, args: &[&str]) -> Result<Vec<u8>, RefractError> {
 /// without fully decoding pixel data.
 pub fn probe_image(path: &Path) -> Result<(u32, u32), RefractError> {
     // Check header bytes first so empty files and unsupported HEIC return explicit errors.
-    let mut header = [0u8; 64];
+    let mut header = [0u8; refract_core::detect::HEADER_SNIFF_BYTES];
     let read_len = {
         let mut file = std::fs::File::open(path).map_err(|e| {
             RefractError::with_details(
@@ -128,5 +128,27 @@ mod tests {
     fn run_tool_reports_missing_binary_as_missing_dependency() {
         let err = run_tool("refract-missing-native-tool-99999", &[]).unwrap_err();
         assert_eq!(err.code, ErrorCode::MissingDependency);
+    }
+}
+
+#[cfg(test)]
+mod review_regressions {
+    use super::*;
+    #[test]
+    fn compatible_heic_brand_after_byte_64_is_explicitly_unsupported() {
+        let mut bytes = vec![0; 72];
+        bytes[..4].copy_from_slice(&72u32.to_be_bytes());
+        bytes[4..8].copy_from_slice(b"ftyp");
+        bytes[8..12].copy_from_slice(b"zzzz");
+        bytes[68..72].copy_from_slice(b"heic");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("image.heic");
+        std::fs::write(&path, bytes).unwrap();
+        assert_eq!(
+            probe_image(&path).unwrap_err().code,
+            ErrorCode::UnsupportedFormat
+        );
+        std::fs::write(&path, []).unwrap();
+        assert_eq!(probe_image(&path).unwrap_err().code, ErrorCode::EmptyFile);
     }
 }

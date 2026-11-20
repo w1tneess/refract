@@ -80,7 +80,7 @@ pub fn check_limits(limits: &PlatformLimits, input: &LimitCheckInput) -> Result<
 
     if let (Some(max_pixels), Some(pixels)) = (limits.max_pixels, input.pixels) {
         if pixels > max_pixels {
-            let mp = |n: u64| (n + 500_000) / 1_000_000;
+            let mp = |n: u64| n / 1_000_000 + u64::from(n % 1_000_000 >= 500_000);
             return Err(RefractError::new(
                 ErrorCode::LimitExceeded,
                 format!(
@@ -206,5 +206,19 @@ mod tests {
                 .code,
             ErrorCode::LimitExceeded
         );
+    }
+    #[test]
+    fn maximum_pixel_count_is_rejected_without_overflow() {
+        let limits = limits_for_tool(ToolId::ConvertImage, Platform::Desktop);
+        let err = check_limits(
+            &limits,
+            &LimitCheckInput {
+                pixels: Some(u64::MAX),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::LimitExceeded);
+        assert!(err.message.contains("18446744073710"));
     }
 }

@@ -13,6 +13,7 @@
  */
 
 import fs from 'node:fs';
+import Ajv2020 from 'ajv/dist/2020.js';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -46,7 +47,10 @@ function toPascalCase(id) {
     .join('');
 }
 
-function validateManifest(manifest, schema) {
+export function validateManifest(manifest, schema) {
+  const ajv = new Ajv2020({ strict: false, allErrors: true });
+  const validate = ajv.compile(schema);
+  assert(validate(manifest), ajv.errorsText(validate.errors));
   assert(schema && typeof schema === 'object' && schema.$schema, 'specs/tool-manifest.schema.json is invalid');
   assert(manifest && typeof manifest === 'object', 'manifest root must be an object');
   assert(Number.isInteger(manifest.manifestVersion) && manifest.manifestVersion >= 1, 'manifestVersion must be >= 1');
@@ -55,9 +59,6 @@ function validateManifest(manifest, schema) {
   assert(manifest.memoryBudgetMB && typeof manifest.memoryBudgetMB === 'object', 'memoryBudgetMB must be an object');
   assert(Array.isArray(manifest.tools) && manifest.tools.length > 0, 'tools must be a non-empty array');
 
-  for (const p of PLATFORMS) {
-    assert(Number.isInteger(manifest.memoryBudgetMB[p]) && manifest.memoryBudgetMB[p] >= 64, `memoryBudgetMB.${p} must be >= 64`);
-  }
 
   // Validate formats
   const formatIds = new Set(Object.keys(manifest.formats));
@@ -170,6 +171,9 @@ function validateManifest(manifest, schema) {
         }
       } else if (opt.type === 'select') {
         assert(Array.isArray(opt.choices) && opt.choices.length > 0, `tool "${tool.id}" option "${opt.key}" select missing choices`);
+        for (const platform of opt.platforms) {
+          assert(opt.choices.some(c => c.value === opt.default && (!c.platforms || c.platforms.includes(platform))), `option ${opt.key} default unavailable on ${platform}`);
+        }
         const choiceValues = new Set(opt.choices.map((c) => c.value));
         assert(choiceValues.size === opt.choices.length, `tool "${tool.id}" option "${opt.key}" duplicate choices`);
         assert(typeof opt.default === 'string' && choiceValues.has(opt.default), `tool "${tool.id}" option "${opt.key}" default "${opt.default}" not in choices`);
@@ -375,12 +379,12 @@ function rsPlatform(p) {
   return p === 'web' ? 'Platform::Web' : 'Platform::Desktop';
 }
 
-function rsFloat(n) {
+export function rsFloat(n) {
   const s = String(n);
-  return s.includes('.') ? s : `${s}.0`;
+  return /[.eE]/.test(s) ? s : `${s}.0`;
 }
 
-function generateRust(manifest) {
+export function generateRust(manifest) {
   const lines = [
     '// GENERATED FILE — DO NOT EDIT BY HAND.',
     '// Source: specs/tool-manifest.json',
@@ -489,6 +493,7 @@ function generateRust(manifest) {
 
   lines.push('#[derive(Debug, Clone, Copy, PartialEq, Eq)]');
   lines.push('pub struct OptionChoice {');
+  lines.push('    pub platforms: &\'static [Platform],');
   lines.push('    pub value: &\'static str,');
   lines.push('    pub label: &\'static str,');
   lines.push('}');
@@ -515,6 +520,8 @@ function generateRust(manifest) {
   lines.push('    pub placeholder: Option<&\'static str>,');
   lines.push('    pub help: Option<&\'static str>,');
   lines.push('    pub choices: &\'static [OptionChoice],');
+  lines.push('    pub web_choices: &\'static [OptionChoice],');
+  lines.push('    pub desktop_choices: &\'static [OptionChoice],');
   lines.push('    pub show_if: Option<OptionShowIf>,');
   lines.push('}');
   lines.push('');
@@ -674,6 +681,7 @@ function generateRust(manifest) {
           lines.push('                choices: &[');
           for (const c of opt.choices) {
             lines.push('                    OptionChoice {');
+            lines.push(`                        platforms: &[${(c.platforms ?? PLATFORMS).map(rsPlatform).join(', ')}],`);
             lines.push(`                        value: ${rsStr(c.value)},`);
             lines.push(`                        label: ${rsStr(c.label)},`);
             lines.push('                    },');
@@ -681,6 +689,13 @@ function generateRust(manifest) {
           lines.push('                ],');
         } else {
           lines.push('                choices: &[],');
+        }
+        for (const platform of PLATFORMS) {
+          lines.push(`                ${platform}_choices: &[`);
+          for (const c of (opt.choices ?? []).filter(c => !c.platforms || c.platforms.includes(platform))) {
+            lines.push(`                    OptionChoice { platforms: &[${(c.platforms ?? PLATFORMS).map(rsPlatform).join(', ')}], value: ${rsStr(c.value)}, label: ${rsStr(c.label)} },`);
+          }
+          lines.push('                ],');
         }
         if (opt.showIf) {
           const vals = opt.showIf.is.map((v) => rsStr(String(v))).join(', ');
@@ -725,6 +740,8 @@ function generatePlatformMatrixMarkdown(manifest) {
         : 'Unsupported';
 
   const lines = [
+    '<!-- coderabbit-ai-generated:v1 -->',
+    '',
     '<!-- GENERATED FILE — DO NOT EDIT BY HAND. -->',
     '<!-- Source: specs/tool-manifest.json -->',
     '<!-- Regenerate with: pnpm manifest:generate -->',
@@ -770,7 +787,7 @@ function generatePlatformMatrixMarkdown(manifest) {
     const webEng = t.platformSupport.web.engine;
     const deskStatus = `${t.platformSupport.desktop.engineLabel} — ${statusBadge(t.platformSupport.desktop.status)}`;
     const deps = t.platformSupport.desktop.externalDependencies.length
-      ? `\`${t.platformSupport.desktop.externalDependencies.join('`, `')}\`${t.platformSupport.desktop.fallback ? ` *(fallback: ${t.platformSupport.desktop.fallback})*` : ''}`
+      ? `\`${t.platformSupport.desktop.externalDependencies.map(d => d.replaceAll('|', '\\|')).join('`, `')}\`${t.platformSupport.desktop.fallback ? ` *(fallback: ${t.platformSupport.desktop.fallback})*` : ''}`
       : 'None';
     const pw = `${yesNo(t.capabilities.passwordUnlock.web)} / ${yesNo(t.capabilities.passwordUnlock.desktop)}`;
 
@@ -858,4 +875,4 @@ function main() {
   }
 }
 
-main();
+if (process.argv[1] && path.resolve(process.argv[1]) === __filename) main();

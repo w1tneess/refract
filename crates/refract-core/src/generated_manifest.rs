@@ -131,6 +131,7 @@ pub enum OptionDefault {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OptionChoice {
+    pub platforms: &'static [Platform],
     pub value: &'static str,
     pub label: &'static str,
 }
@@ -155,6 +156,8 @@ pub struct ManifestOptionSpec {
     pub placeholder: Option<&'static str>,
     pub help: Option<&'static str>,
     pub choices: &'static [OptionChoice],
+    pub web_choices: &'static [OptionChoice],
+    pub desktop_choices: &'static [OptionChoice],
     pub show_if: Option<OptionShowIf>,
 }
 
@@ -318,7 +321,7 @@ pub const TOOL_MANIFEST: &[ToolManifestEntry] = &[
         domain: Kind::Image,
         accepts_kind: Kind::Image,
         label: "Convert image",
-        blurb: "HEIC, WebP, PNG and JPG to each other.",
+        blurb: "Convert HEIC and other images to JPG, PNG, or WebP.",
         tagline: "Transcode between modern and standard image formats",
         description: "Convert between HEIC (Web), JPEG, PNG, and WebP with EXIF orientation baking, RGBA-to-white flattening for JPEG, and metadata stripping.",
         output_capability: "JPEG, PNG, or WebP (EXIF baked upright, metadata stripped)",
@@ -354,17 +357,30 @@ pub const TOOL_MANIFEST: &[ToolManifestEntry] = &[
                 help: None,
                 choices: &[
                     OptionChoice {
+                        platforms: &[Platform::Web, Platform::Desktop],
                         value: "jpeg",
                         label: "JPG",
                     },
                     OptionChoice {
+                        platforms: &[Platform::Web, Platform::Desktop],
                         value: "png",
                         label: "PNG",
                     },
                     OptionChoice {
+                        platforms: &[Platform::Web, Platform::Desktop],
                         value: "webp",
                         label: "WebP",
                     },
+                ],
+                web_choices: &[
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "jpeg", label: "JPG" },
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "png", label: "PNG" },
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "webp", label: "WebP" },
+                ],
+                desktop_choices: &[
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "jpeg", label: "JPG" },
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "png", label: "PNG" },
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "webp", label: "WebP" },
                 ],
                 show_if: None,
             },
@@ -381,6 +397,10 @@ pub const TOOL_MANIFEST: &[ToolManifestEntry] = &[
                 placeholder: None,
                 help: None,
                 choices: &[],
+                web_choices: &[
+                ],
+                desktop_choices: &[
+                ],
                 show_if: Some(OptionShowIf {
                     key: "to",
                     values: &["jpeg", "webp"],
@@ -429,13 +449,23 @@ pub const TOOL_MANIFEST: &[ToolManifestEntry] = &[
                 help: None,
                 choices: &[
                     OptionChoice {
+                        platforms: &[Platform::Web, Platform::Desktop],
                         value: "jpeg",
                         label: "JPG",
                     },
                     OptionChoice {
+                        platforms: &[Platform::Web, Platform::Desktop],
                         value: "webp",
                         label: "WebP",
                     },
+                ],
+                web_choices: &[
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "jpeg", label: "JPG" },
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "webp", label: "WebP" },
+                ],
+                desktop_choices: &[
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "jpeg", label: "JPG" },
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "webp", label: "WebP" },
                 ],
                 show_if: None,
             },
@@ -452,6 +482,10 @@ pub const TOOL_MANIFEST: &[ToolManifestEntry] = &[
                 placeholder: None,
                 help: None,
                 choices: &[],
+                web_choices: &[
+                ],
+                desktop_choices: &[
+                ],
                 show_if: None,
             },
         ],
@@ -497,13 +531,23 @@ pub const TOOL_MANIFEST: &[ToolManifestEntry] = &[
                 help: None,
                 choices: &[
                     OptionChoice {
+                        platforms: &[Platform::Web, Platform::Desktop],
                         value: "px",
                         label: "Pixels",
                     },
                     OptionChoice {
+                        platforms: &[Platform::Web, Platform::Desktop],
                         value: "cm",
                         label: "Centimetres",
                     },
+                ],
+                web_choices: &[
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "px", label: "Pixels" },
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "cm", label: "Centimetres" },
+                ],
+                desktop_choices: &[
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "px", label: "Pixels" },
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "cm", label: "Centimetres" },
                 ],
                 show_if: None,
             },
@@ -520,6 +564,10 @@ pub const TOOL_MANIFEST: &[ToolManifestEntry] = &[
                 placeholder: None,
                 help: Some("0 keeps the aspect ratio"),
                 choices: &[],
+                web_choices: &[
+                ],
+                desktop_choices: &[
+                ],
                 show_if: None,
             },
             ManifestOptionSpec {
@@ -535,6 +583,10 @@ pub const TOOL_MANIFEST: &[ToolManifestEntry] = &[
                 placeholder: None,
                 help: Some("0 keeps the aspect ratio"),
                 choices: &[],
+                web_choices: &[
+                ],
+                desktop_choices: &[
+                ],
                 show_if: None,
             },
             ManifestOptionSpec {
@@ -550,6 +602,10 @@ pub const TOOL_MANIFEST: &[ToolManifestEntry] = &[
                 placeholder: None,
                 help: None,
                 choices: &[],
+                web_choices: &[
+                ],
+                desktop_choices: &[
+                ],
                 show_if: Some(OptionShowIf {
                     key: "unit",
                     values: &["cm"],
@@ -569,21 +625,37 @@ pub const TOOL_MANIFEST: &[ToolManifestEntry] = &[
                 help: None,
                 choices: &[
                     OptionChoice {
+                        platforms: &[Platform::Web, Platform::Desktop],
                         value: "same",
                         label: "Same format",
                     },
                     OptionChoice {
+                        platforms: &[Platform::Web, Platform::Desktop],
                         value: "jpeg",
                         label: "JPG",
                     },
                     OptionChoice {
+                        platforms: &[Platform::Web, Platform::Desktop],
                         value: "png",
                         label: "PNG",
                     },
                     OptionChoice {
+                        platforms: &[Platform::Web, Platform::Desktop],
                         value: "webp",
                         label: "WebP",
                     },
+                ],
+                web_choices: &[
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "same", label: "Same format" },
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "jpeg", label: "JPG" },
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "png", label: "PNG" },
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "webp", label: "WebP" },
+                ],
+                desktop_choices: &[
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "same", label: "Same format" },
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "jpeg", label: "JPG" },
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "png", label: "PNG" },
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "webp", label: "WebP" },
                 ],
                 show_if: None,
             },
@@ -614,7 +686,7 @@ pub const TOOL_MANIFEST: &[ToolManifestEntry] = &[
         desktop_availability: PlatformAvailability::Available,
         desktop_external_dependencies: &[],
         web_password_unlock: true,
-        desktop_password_unlock: false,
+        desktop_password_unlock: true,
         options: &[],
     },
     ToolManifestEntry {
@@ -657,6 +729,10 @@ pub const TOOL_MANIFEST: &[ToolManifestEntry] = &[
                 placeholder: Some("Every page"),
                 help: Some("e.g. 1-3, 5, 8-"),
                 choices: &[],
+                web_choices: &[
+                ],
+                desktop_choices: &[
+                ],
                 show_if: None,
             },
         ],
@@ -701,6 +777,10 @@ pub const TOOL_MANIFEST: &[ToolManifestEntry] = &[
                 placeholder: Some("e.g. 3, 1, 2"),
                 help: None,
                 choices: &[],
+                web_choices: &[
+                ],
+                desktop_choices: &[
+                ],
                 show_if: None,
             },
         ],
@@ -746,17 +826,30 @@ pub const TOOL_MANIFEST: &[ToolManifestEntry] = &[
                 help: None,
                 choices: &[
                     OptionChoice {
+                        platforms: &[Platform::Web, Platform::Desktop],
                         value: "a4",
                         label: "A4",
                     },
                     OptionChoice {
+                        platforms: &[Platform::Web, Platform::Desktop],
                         value: "letter",
                         label: "Letter",
                     },
                     OptionChoice {
+                        platforms: &[Platform::Web, Platform::Desktop],
                         value: "fit",
                         label: "Same as image",
                     },
+                ],
+                web_choices: &[
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "a4", label: "A4" },
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "letter", label: "Letter" },
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "fit", label: "Same as image" },
+                ],
+                desktop_choices: &[
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "a4", label: "A4" },
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "letter", label: "Letter" },
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "fit", label: "Same as image" },
                 ],
                 show_if: None,
             },
@@ -773,6 +866,10 @@ pub const TOOL_MANIFEST: &[ToolManifestEntry] = &[
                 placeholder: None,
                 help: Some("Native desktop page sizing resolution for embedded images"),
                 choices: &[],
+                web_choices: &[
+                ],
+                desktop_choices: &[
+                ],
                 show_if: None,
             },
             ManifestOptionSpec {
@@ -788,6 +885,10 @@ pub const TOOL_MANIFEST: &[ToolManifestEntry] = &[
                 placeholder: None,
                 help: Some("Compression quality when embedding images on desktop"),
                 choices: &[],
+                web_choices: &[
+                ],
+                desktop_choices: &[
+                ],
                 show_if: None,
             },
         ],
@@ -833,13 +934,23 @@ pub const TOOL_MANIFEST: &[ToolManifestEntry] = &[
                 help: None,
                 choices: &[
                     OptionChoice {
+                        platforms: &[Platform::Web, Platform::Desktop],
                         value: "png",
                         label: "PNG",
                     },
                     OptionChoice {
+                        platforms: &[Platform::Web, Platform::Desktop],
                         value: "jpeg",
                         label: "JPG",
                     },
+                ],
+                web_choices: &[
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "png", label: "PNG" },
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "jpeg", label: "JPG" },
+                ],
+                desktop_choices: &[
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "png", label: "PNG" },
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "jpeg", label: "JPG" },
                 ],
                 show_if: None,
             },
@@ -856,6 +967,10 @@ pub const TOOL_MANIFEST: &[ToolManifestEntry] = &[
                 placeholder: None,
                 help: None,
                 choices: &[],
+                web_choices: &[
+                ],
+                desktop_choices: &[
+                ],
                 show_if: None,
             },
         ],
@@ -929,21 +1044,37 @@ pub const TOOL_MANIFEST: &[ToolManifestEntry] = &[
                 help: None,
                 choices: &[
                     OptionChoice {
+                        platforms: &[Platform::Web, Platform::Desktop],
                         value: "mp3",
                         label: "MP3",
                     },
                     OptionChoice {
+                        platforms: &[Platform::Web, Platform::Desktop],
                         value: "wav",
                         label: "WAV",
                     },
                     OptionChoice {
+                        platforms: &[Platform::Web, Platform::Desktop],
                         value: "m4a",
                         label: "M4A",
                     },
                     OptionChoice {
+                        platforms: &[Platform::Web, Platform::Desktop],
                         value: "ogg",
                         label: "OGG",
                     },
+                ],
+                web_choices: &[
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "mp3", label: "MP3" },
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "wav", label: "WAV" },
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "m4a", label: "M4A" },
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "ogg", label: "OGG" },
+                ],
+                desktop_choices: &[
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "mp3", label: "MP3" },
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "wav", label: "WAV" },
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "m4a", label: "M4A" },
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "ogg", label: "OGG" },
                 ],
                 show_if: None,
             },
@@ -961,21 +1092,37 @@ pub const TOOL_MANIFEST: &[ToolManifestEntry] = &[
                 help: None,
                 choices: &[
                     OptionChoice {
+                        platforms: &[Platform::Web, Platform::Desktop],
                         value: "128k",
                         label: "128 kbps",
                     },
                     OptionChoice {
+                        platforms: &[Platform::Web, Platform::Desktop],
                         value: "192k",
                         label: "192 kbps",
                     },
                     OptionChoice {
+                        platforms: &[Platform::Web, Platform::Desktop],
                         value: "256k",
                         label: "256 kbps",
                     },
                     OptionChoice {
+                        platforms: &[Platform::Web, Platform::Desktop],
                         value: "320k",
                         label: "320 kbps",
                     },
+                ],
+                web_choices: &[
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "128k", label: "128 kbps" },
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "192k", label: "192 kbps" },
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "256k", label: "256 kbps" },
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "320k", label: "320 kbps" },
+                ],
+                desktop_choices: &[
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "128k", label: "128 kbps" },
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "192k", label: "192 kbps" },
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "256k", label: "256 kbps" },
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "320k", label: "320 kbps" },
                 ],
                 show_if: Some(OptionShowIf {
                     key: "to",
@@ -1024,6 +1171,10 @@ pub const TOOL_MANIFEST: &[ToolManifestEntry] = &[
                 placeholder: None,
                 help: None,
                 choices: &[],
+                web_choices: &[
+                ],
+                desktop_choices: &[
+                ],
                 show_if: None,
             },
             ManifestOptionSpec {
@@ -1039,6 +1190,10 @@ pub const TOOL_MANIFEST: &[ToolManifestEntry] = &[
                 placeholder: None,
                 help: Some("0 means the end of the file"),
                 choices: &[],
+                web_choices: &[
+                ],
+                desktop_choices: &[
+                ],
                 show_if: None,
             },
             ManifestOptionSpec {
@@ -1055,21 +1210,37 @@ pub const TOOL_MANIFEST: &[ToolManifestEntry] = &[
                 help: Some("Not used for WAV"),
                 choices: &[
                     OptionChoice {
+                        platforms: &[Platform::Web, Platform::Desktop],
                         value: "128k",
                         label: "128 kbps",
                     },
                     OptionChoice {
+                        platforms: &[Platform::Web, Platform::Desktop],
                         value: "192k",
                         label: "192 kbps",
                     },
                     OptionChoice {
+                        platforms: &[Platform::Web, Platform::Desktop],
                         value: "256k",
                         label: "256 kbps",
                     },
                     OptionChoice {
+                        platforms: &[Platform::Web, Platform::Desktop],
                         value: "320k",
                         label: "320 kbps",
                     },
+                ],
+                web_choices: &[
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "128k", label: "128 kbps" },
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "192k", label: "192 kbps" },
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "256k", label: "256 kbps" },
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "320k", label: "320 kbps" },
+                ],
+                desktop_choices: &[
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "128k", label: "128 kbps" },
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "192k", label: "192 kbps" },
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "256k", label: "256 kbps" },
+                    OptionChoice { platforms: &[Platform::Web, Platform::Desktop], value: "320k", label: "320 kbps" },
                 ],
                 show_if: None,
             },

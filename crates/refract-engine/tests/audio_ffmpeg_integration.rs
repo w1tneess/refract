@@ -2,7 +2,7 @@
 //!
 //! These tests are marked `#[ignore]` so `cargo test --workspace` never silently reports
 //! them as passed when `ffmpeg` or `ffprobe` is missing. Run them explicitly on hosts with
-//! FFmpeg installed:
+//! FFmpeg installed. Encoding tests require the libmp3lame encoder:
 //!
 //!   cargo test -p refract-engine --test audio_ffmpeg_integration -- --ignored
 
@@ -21,19 +21,31 @@ fn fixture_path(name: &str) -> PathBuf {
         .join(name)
 }
 
-fn require_audio_toolchain() {
+fn require_audio_toolchain(mp3: bool) {
     let deps = audio::detect_audio_dependencies();
     assert!(
         deps.is_ready(),
         "Live audio integration test requires ffmpeg and ffprobe on PATH (missing: {:?})",
         deps.missing()
     );
+    if mp3 {
+        let output = std::process::Command::new(deps.ffmpeg.as_ref().unwrap())
+            .args(["-hide_banner", "-encoders"])
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&output.stdout)
+                .split_whitespace()
+                .any(|s| s == "libmp3lame"),
+            "Live encoding tests require FFmpeg built with the libmp3lame encoder"
+        );
+    }
 }
 
 #[test]
 #[ignore = "requires ffmpeg and ffprobe on PATH"]
 fn live_ffprobe_measures_all_audio_fixtures() {
-    require_audio_toolchain();
+    require_audio_toolchain(false);
     for name in ["sound.wav", "sound.mp3", "sound.m4a", "sound.ogg"] {
         let dur = audio::probe_duration(&fixture_path(name))
             .unwrap_or_else(|e| panic!("ffprobe failed for {}: {:?}", name, e));
@@ -49,7 +61,7 @@ fn live_ffprobe_measures_all_audio_fixtures() {
 #[test]
 #[ignore = "requires ffmpeg and ffprobe on PATH"]
 fn live_convert_audio_wav_to_mp3_and_mp3_to_wav_with_bitrate() {
-    require_audio_toolchain();
+    require_audio_toolchain(true);
     let dir = tempfile::tempdir().unwrap();
 
     let out_mp3 = dir.path().join("converted.mp3");
@@ -97,7 +109,7 @@ fn live_convert_audio_wav_to_mp3_and_mp3_to_wav_with_bitrate() {
 #[test]
 #[ignore = "requires ffmpeg and ffprobe on PATH"]
 fn live_trim_audio_explicit_end_eof_zero_and_out_of_bounds_validation() {
-    require_audio_toolchain();
+    require_audio_toolchain(true);
     let dir = tempfile::tempdir().unwrap();
     let wav_path = fixture_path("sound.wav");
 
@@ -120,6 +132,22 @@ fn live_trim_audio_explicit_end_eof_zero_and_out_of_bounds_validation() {
         "expected ~0.4s clip, got {:.3}s",
         clip_dur
     );
+
+    let out_mp3 = dir.path().join("clip.mp3");
+    audio::trim_audio_cancellable(
+        &wav_path,
+        &out_mp3,
+        Some("0.2"),
+        Some("0.6"),
+        None,
+        &CancelToken::none(),
+    )
+    .expect("WAV to MP3 trim");
+    assert_eq!(
+        refract_core::detect(&std::fs::read(&out_mp3).unwrap()),
+        Some(Format::Mp3)
+    );
+    assert!((0.3..0.6).contains(&audio::probe_duration(&out_mp3).unwrap()));
 
     // 2. end = "0" means EOF: 1.0s -> EOF (~2.0s clip) with MP3 + bitrate
     let mp3_path = fixture_path("sound.mp3");
@@ -189,7 +217,7 @@ fn live_trim_audio_explicit_end_eof_zero_and_out_of_bounds_validation() {
 #[test]
 #[ignore = "requires ffmpeg and ffprobe on PATH"]
 fn live_ffmpeg_mid_process_cancellation_kills_process_and_cleans_temp_files() {
-    require_audio_toolchain();
+    require_audio_toolchain(true);
     let dir = tempfile::tempdir().unwrap();
     let partial_out = dir.path().join("canceled.mp3");
     let keep_existing = dir.path().join("keep.mp3");
@@ -204,9 +232,18 @@ fn live_ffmpeg_mid_process_cancellation_kills_process_and_cleans_temp_files() {
     // so FFmpeg stays running long enough to exercise genuine mid-process cancellation.
     let token = CancelToken::new();
     let canceller = token.clone();
-    thread::spawn(move || {
-        thread::sleep(Duration::from_millis(200));
+    let ready_path = partial_out.clone();
+    let readiness = thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !std::fs::metadata(&ready_path).is_ok_and(|m| m.len() > 0) {
+            if Instant::now() >= deadline {
+                canceller.cancel();
+                return false;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
         canceller.cancel();
+        true
     });
 
     let started = Instant::now();
@@ -223,6 +260,8 @@ fn live_ffmpeg_mid_process_cancellation_kills_process_and_cleans_temp_files() {
             "libmp3lame",
             "-b:a",
             "192k",
+            "-flush_packets",
+            "1",
             partial_out.to_str().unwrap(),
         ],
         &token,
@@ -231,9 +270,13 @@ fn live_ffmpeg_mid_process_cancellation_kills_process_and_cleans_temp_files() {
     )
     .unwrap_err();
 
+    assert!(
+        readiness.join().unwrap(),
+        "FFmpeg never produced partial output"
+    );
     assert_eq!(err.code, ErrorCode::Canceled);
     assert!(
-        started.elapsed() < Duration::from_secs(5),
+        started.elapsed() < Duration::from_secs(15),
         "canceled ffmpeg took too long to stop: {:?}",
         started.elapsed()
     );
@@ -256,7 +299,7 @@ fn live_ffmpeg_mid_process_cancellation_kills_process_and_cleans_temp_files() {
 #[test]
 #[ignore = "requires ffmpeg and ffprobe on PATH"]
 fn live_unique_audio_output_numbers_taken_names_without_overwriting() {
-    require_audio_toolchain();
+    require_audio_toolchain(true);
     let dir = tempfile::tempdir().unwrap();
     let taken = dir.path().join("sound (converted).mp3");
     std::fs::write(&taken, b"user file").unwrap();
@@ -314,7 +357,7 @@ fn live_unique_audio_output_numbers_taken_names_without_overwriting() {
 #[test]
 #[ignore = "requires ffmpeg and ffprobe on PATH"]
 fn live_failed_audio_check_saves_nothing() {
-    require_audio_toolchain();
+    require_audio_toolchain(true);
     let dir = tempfile::tempdir().unwrap();
     let reject = |_: &std::path::Path| {
         Err(refract_core::error::RefractError::new(

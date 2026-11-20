@@ -429,7 +429,7 @@ export const TOOL_MANIFEST: Record<ToolId, ManifestToolSpec> = {
     "domain": "image",
     "acceptsKind": "image",
     "label": "Convert image",
-    "blurb": "HEIC, WebP, PNG and JPG to each other.",
+    "blurb": "Convert HEIC and other images to JPG, PNG, or WebP.",
     "tagline": "Transcode between modern and standard image formats",
     "description": "Convert between HEIC (Web), JPEG, PNG, and WebP with EXIF orientation baking, RGBA-to-white flattening for JPEG, and metadata stripping.",
     "outputCapability": "JPEG, PNG, or WebP (EXIF baked upright, metadata stripped)",
@@ -897,7 +897,7 @@ export const TOOL_MANIFEST: Record<ToolId, ManifestToolSpec> = {
       "loupe": false,
       "passwordUnlock": {
         "web": true,
-        "desktop": false
+        "desktop": true
       },
       "chainOutput": true
     },

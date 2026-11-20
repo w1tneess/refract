@@ -36,7 +36,12 @@ impl Drop for CancelGuard {
                 .callbacks
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            guard.retain(|(entry_id, _)| *entry_id != id);
+            let removed = guard
+                .iter()
+                .position(|(entry_id, _)| *entry_id == id)
+                .map(|index| guard.remove(index));
+            drop(guard);
+            drop(removed);
         }
     }
 }
@@ -91,16 +96,29 @@ impl CancelToken {
         if self.inner.canceled.swap(true, Ordering::AcqRel) {
             return;
         }
-        let callbacks: Vec<CancelCallback> = {
-            let mut guard = self
-                .inner
-                .callbacks
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            guard.drain(..).map(|(_, cb)| cb).collect()
-        };
-        for cb in callbacks {
-            cb();
+        let mut panic = None;
+        loop {
+            let callback = {
+                let mut guard = self
+                    .inner
+                    .callbacks
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if guard.is_empty() {
+                    None
+                } else {
+                    Some(guard.remove(0).1)
+                }
+            };
+            let Some(cb) = callback else { break };
+            if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(cb)) {
+                if panic.is_none() {
+                    panic = Some(payload);
+                }
+            }
+        }
+        if let Some(payload) = panic {
+            std::panic::resume_unwind(payload);
         }
     }
 
@@ -221,5 +239,46 @@ mod tests {
         parent.cancel();
         assert!(parent.is_canceled());
         assert!(child2.is_canceled());
+    }
+    #[test]
+    fn nested_guard_drop_does_not_deadlock() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let token = CancelToken::new();
+            let a = token.on_cancel(|| {});
+            let b = token.on_cancel(move || drop(a));
+            drop(b);
+            tx.send(()).unwrap();
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+    }
+
+    #[test]
+    fn dispatch_allows_unregistering_pending_callbacks() {
+        let token = CancelToken::new();
+        let pending = Arc::new(Mutex::new(None));
+        let drop_pending = pending.clone();
+        let _a = token.on_cancel(move || {
+            drop_pending.lock().unwrap().take();
+        });
+        let fired = Arc::new(AtomicBool::new(false));
+        let f = fired.clone();
+        *pending.lock().unwrap() = Some(token.on_cancel(move || f.store(true, Ordering::SeqCst)));
+        token.cancel();
+        assert!(!fired.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn panic_does_not_skip_remaining_callbacks() {
+        let token = CancelToken::new();
+        let _a = token.on_cancel(|| panic!("callback failure"));
+        let count = Arc::new(AtomicUsize::new(0));
+        let c = count.clone();
+        let _b = token.on_cancel(move || {
+            c.fetch_add(1, Ordering::SeqCst);
+        });
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| token.cancel())).is_err());
+        token.cancel();
+        assert_eq!(count.load(Ordering::SeqCst), 1);
     }
 }

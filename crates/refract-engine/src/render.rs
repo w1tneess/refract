@@ -306,7 +306,7 @@ fn render_page(
 
     if spec.transcode_to_jpeg {
         cancel.check()?;
-        crate::image::convert_image(&raw_bytes, Format::Jpeg, Some(90))
+        crate::image::convert_image_cancellable(&raw_bytes, Format::Jpeg, Some(90), cancel)
     } else {
         Ok(raw_bytes)
     }
@@ -846,7 +846,12 @@ mod tests {
             render_pdf_path_to_images_cancellable(&plain_path, 3, 601, "jpg", &CancelToken::none())
                 .unwrap_err();
         assert_eq!(high.code, ErrorCode::InvalidOption);
+    }
 
+    #[test]
+    #[ignore = "requires a working live PDF rasterizer"]
+    fn live_path_renderer_valid_dpi() {
+        let plain_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/plain.pdf");
         // Valid DPI passes validation (returns Ok if a renderer is installed, or MissingDependency if not)
         for valid_dpi in [36u32, 150, 600] {
             match render_pdf_path_to_images_cancellable(

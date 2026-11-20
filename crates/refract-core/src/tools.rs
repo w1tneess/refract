@@ -53,10 +53,33 @@ impl ToolId {
     }
 
     pub fn options_for_platform(&self, platform: Platform) -> Vec<&'static ManifestOptionSpec> {
-        self.manifest()
-            .options
+        // Cache platform views to preserve the public static-reference API.
+        static OPTIONS: std::sync::OnceLock<Vec<(ToolId, Platform, ManifestOptionSpec)>> =
+            std::sync::OnceLock::new();
+        OPTIONS
+            .get_or_init(|| {
+                let mut views = Vec::new();
+                for entry in TOOL_MANIFEST {
+                    for platform in [Platform::Web, Platform::Desktop] {
+                        for option in entry
+                            .options
+                            .iter()
+                            .filter(|o| o.platforms.contains(&platform))
+                        {
+                            let mut option = *option;
+                            option.choices = match platform {
+                                Platform::Web => option.web_choices,
+                                Platform::Desktop => option.desktop_choices,
+                            };
+                            views.push((entry.id, platform, option));
+                        }
+                    }
+                }
+                views
+            })
             .iter()
-            .filter(|opt| opt.platforms.contains(&platform))
+            .filter(|(id, p, _)| id == self && *p == platform)
+            .map(|(_, _, option)| option)
             .collect()
     }
 
@@ -232,5 +255,24 @@ mod tests {
                 raw_lim["desktop"]["maxFiles"].as_u64().unwrap() as usize
             );
         }
+    }
+    #[test]
+    fn unrestricted_choices_remain_on_both_platforms() {
+        let desktop = ToolId::ConvertImage.options_for_platform(Platform::Desktop);
+        let web = ToolId::ConvertImage.options_for_platform(Platform::Web);
+        assert!(desktop
+            .iter()
+            .find(|o| o.key == "to")
+            .unwrap()
+            .choices
+            .iter()
+            .any(|c| c.value == "webp"));
+        assert!(web
+            .iter()
+            .find(|o| o.key == "to")
+            .unwrap()
+            .choices
+            .iter()
+            .any(|c| c.value == "webp"));
     }
 }

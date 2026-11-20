@@ -325,14 +325,14 @@ pub fn build_trim_audio_args(
     let mut args = vec![OsString::from("-y")];
     if range.start_secs > 0.0 {
         args.push(OsString::from("-ss"));
-        args.push(OsString::from(format!("{:.3}", range.start_secs)));
+        args.push(OsString::from(range.start_secs.to_string()));
     }
     args.push(OsString::from("-i"));
     args.push(input.as_os_str().to_os_string());
     if let Some(end_secs) = range.end_secs {
-        let clip_duration = (end_secs - range.start_secs).max(0.001);
+        let clip_duration = end_secs - range.start_secs;
         args.push(OsString::from("-t"));
-        args.push(OsString::from(format!("{:.3}", clip_duration)));
+        args.push(OsString::from(clip_duration.to_string()));
     }
     if let Some(fmt) = target_format {
         args.extend(build_audio_codec_args(fmt, bitrate_kbps)?);
@@ -407,14 +407,18 @@ impl AudioOutput<'_> {
         }
     }
 
-    fn persist(self, temp: TempPath) -> Result<PathBuf, RefractError> {
+    fn persist(self, temp: TempPath, cancel: &CancelToken) -> Result<PathBuf, RefractError> {
         match self {
             AudioOutput::Exact(path) => {
                 persist_audio_temp_noclobber(temp, path).map(|()| path.to_path_buf())
             }
-            AudioOutput::Unique { dir, name } => {
-                persist::persist_unique(temp, dir, name, persist::DEFAULT_MAX_SUFFIX_ATTEMPTS)
-            }
+            AudioOutput::Unique { dir, name } => persist::persist_unique_cancellable(
+                temp,
+                dir,
+                name,
+                persist::DEFAULT_MAX_SUFFIX_ATTEMPTS,
+                cancel,
+            ),
         }
     }
 }
@@ -555,7 +559,7 @@ pub fn convert_audio_to_with_binary(
     check(temp_file.as_ref())?;
     // A cancel during the check (finalization) must still leave no output.
     cancel.check()?;
-    output.persist(temp_file)
+    output.persist(temp_file, cancel)
 }
 
 /// Convert an audio file using system `ffmpeg`, saving to `output` and returning the path written.
@@ -658,10 +662,13 @@ pub fn trim_audio_to_with_binaries(
     let duration_secs = probe_duration_with_binary(ffprobe_bin, input, cancel)?;
     let range = resolve_trim_range(start, end, duration_secs)?;
 
-    let target_format = detect_audio_format_from_file(input);
-    let ext = output
+    let target_format = output
         .extension()
-        .or_else(|| target_format.map(|f| f.primary_extension()))
+        .and_then(Format::from_extension)
+        .filter(|f| matches!(f, Format::Mp3 | Format::Wav | Format::M4a | Format::Ogg))
+        .or_else(|| detect_audio_format_from_file(input));
+    let ext = target_format
+        .map(|f| f.primary_extension())
         .unwrap_or("mp3");
     let temp_file = persist::create_sibling_temp(output.dir(), ".refract-audio-", ext)?;
 
@@ -684,7 +691,7 @@ pub fn trim_audio_to_with_binaries(
     check(temp_file.as_ref())?;
     // A cancel during the check (finalization) must still leave no output.
     cancel.check()?;
-    output.persist(temp_file)
+    output.persist(temp_file, cancel)
 }
 
 /// Trim an audio file using system `ffmpeg` and `ffprobe` with bitrate and cancellation support.
@@ -982,11 +989,11 @@ mod tests {
             vec![
                 "-y",
                 "-ss",
-                "0.500",
+                "0.5",
                 "-i",
                 "/tmp/in.wav",
                 "-t",
-                "1.500",
+                "1.5",
                 "-c:a",
                 "libmp3lame",
                 "-b:a",
@@ -1010,7 +1017,7 @@ mod tests {
             vec![
                 "-y",
                 "-ss",
-                "1.000",
+                "1",
                 "-i",
                 "/tmp/in.wav",
                 "-c:a",
@@ -1366,5 +1373,21 @@ mod tests {
         assert!(!out_cancel.exists());
         assert_eq!(std::fs::read(&unrelated).unwrap(), b"keep-unrelated");
         assert_eq!(temp_audio_files_in(dir.path()), vec![unrelated]);
+    }
+    #[test]
+    fn trim_arguments_preserve_submillisecond_ranges() {
+        let range = resolve_trim_range(Some("0.0001"), Some("0.0002"), 3.0).unwrap();
+        let args = as_strings(
+            &build_trim_audio_args(
+                Path::new("in.wav"),
+                Path::new("out.wav"),
+                range,
+                Some(Format::Wav),
+                None,
+            )
+            .unwrap(),
+        );
+        assert_eq!(args[2], "0.0001");
+        assert_eq!(args[6], "0.0001");
     }
 }

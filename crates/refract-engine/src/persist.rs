@@ -104,12 +104,23 @@ pub fn persist_unique(
     desired_name: &str,
     max_attempts: usize,
 ) -> Result<PathBuf, RefractError> {
+    persist_unique_cancellable(temp, dir, desired_name, max_attempts, &CancelToken::none())
+}
+
+pub fn persist_unique_cancellable(
+    temp: TempPath,
+    dir: &Path,
+    desired_name: &str,
+    max_attempts: usize,
+    cancel: &CancelToken,
+) -> Result<PathBuf, RefractError> {
     let dir = dir_or_current(dir);
     let mut temp = temp;
     let candidates = std::iter::once(desired_name.to_string())
         .chain((2..=max_attempts + 1).map(|n| suffixed_filename(desired_name, n)));
 
     for name in candidates {
+        cancel.check()?;
         let candidate = dir.join(&name);
         match temp.persist_noclobber(&candidate) {
             Ok(()) => return Ok(candidate),
@@ -154,11 +165,69 @@ pub fn save_output(
     Ok(saved.remove(0))
 }
 
+// Quarantine before inspecting identity: never check a public name and then unlink it.
+fn rollback_owned(committed: &[(PathBuf, same_file::Handle)], dir: &Path) -> Vec<String> {
+    let recovery = match tempfile::Builder::new()
+        .prefix(".refract-recovery-")
+        .tempdir_in(dir)
+    {
+        Ok(dir) => dir,
+        Err(e) => {
+            return committed
+                .iter()
+                .map(|(p, _)| format!("{} (quarantine unavailable: {e})", p.display()))
+                .collect()
+        }
+    };
+    let mut failures = Vec::new();
+    for (index, (path, owner)) in committed.iter().enumerate() {
+        let held = recovery.path().join(index.to_string());
+        match std::fs::rename(path, &held) {
+            Ok(()) => {}
+            Err(e) if e.kind() == ErrorKind::NotFound => continue,
+            Err(e) => {
+                failures.push(format!("{}: {e}", path.display()));
+                continue;
+            }
+        }
+        let ours = std::fs::symlink_metadata(&held).is_ok_and(|m| m.is_file())
+            && same_file::Handle::from_path(&held).is_ok_and(|h| h == *owner);
+        if ours {
+            if let Err(e) = std::fs::remove_file(&held) {
+                failures.push(format!(
+                    "{} (owned output quarantined at {}): {e}",
+                    path.display(),
+                    held.display()
+                ));
+            }
+        } else {
+            // A concurrent replacement belongs to someone else. Restore without clobbering.
+            match std::fs::hard_link(&held, path) {
+                Ok(()) => {
+                    if let Err(e) = std::fs::remove_file(&held) {
+                        failures.push(format!("{}: {e}", held.display()));
+                    }
+                }
+                Err(e) => failures.push(format!(
+                    "Replacement for {} retained at {}: {e}",
+                    path.display(),
+                    held.display()
+                )),
+            }
+        }
+    }
+    if !failures.is_empty() {
+        let _ = recovery.keep();
+    }
+    failures
+}
+
 /// A set of outputs that are saved all together or not at all (`split-pdf`, `pdf-to-images`).
 ///
 /// Every output is first written to its own temp file. [`commit`](Self::commit) then moves them
 /// into place in order; if any move fails or the job is canceled mid-way, outputs already moved by
-/// this batch are deleted and remaining temp files are dropped, so the folder ends as it started.
+/// this batch are removed after ownership verification. Cleanup failures retain private recovery
+/// files and ownership anchors, reported with the original error for safe recovery.
 pub struct StagedOutputBatch {
     dir: PathBuf,
     staged: Vec<(TempPath, String)>,
@@ -205,27 +274,40 @@ impl StagedOutputBatch {
         }
         cancel.check()?;
 
-        let mut committed: Vec<PathBuf> = Vec::with_capacity(self.staged.len());
-        for (temp, name) in self.staged {
-            let result = if cancel.is_canceled() {
+        // Keep private hard links as durable ownership evidence for recovery if cleanup fails.
+        let ownership = tempfile::Builder::new()
+            .prefix(".refract-ownership-")
+            .tempdir_in(&self.dir)
+            .map_err(|e| engine_err("Cannot prepare batch ownership", e.to_string()))?;
+        let mut committed: Vec<(PathBuf, same_file::Handle)> =
+            Vec::with_capacity(self.staged.len());
+        for (index, (temp, name)) in self.staged.into_iter().enumerate() {
+            let anchor = ownership.path().join(index.to_string());
+            let owner = std::fs::hard_link(&temp, &anchor)
+                .and_then(|()| same_file::Handle::from_path(&anchor))
+                .map_err(|e| engine_err("Cannot retain output ownership", e.to_string()));
+            let result = if owner.is_err() {
+                Err(owner.as_ref().err().unwrap().clone())
+            } else if cancel.is_canceled() {
                 drop(temp);
                 Err(RefractError::canceled())
             } else {
-                persist_unique(temp, &self.dir, &name, self.max_attempts)
+                persist_unique_cancellable(temp, &self.dir, &name, self.max_attempts, cancel)
             };
             match result {
-                Ok(path) => committed.push(path),
+                Ok(path) => committed.push((path, owner.unwrap())),
                 Err(err) => {
-                    // These paths were created by our own no-clobber moves, so removing them
-                    // cannot delete a user's file. Remaining temps drop with the iterator.
-                    for path in &committed {
-                        let _ = std::fs::remove_file(path);
+                    let failures = rollback_owned(&committed, &self.dir);
+                    if !failures.is_empty() {
+                        let evidence = ownership.keep();
+                        return Err(RefractError::with_details(err.code, err.message,
+                            format!("{}; rollback incomplete: {}. Ownership anchors: {} (numbered in batch order). Recovery: move each public entry into a private quarantine, compare file identity with its anchor using same_file, and delete only matches; restore replacements without overwriting. Retain anchors until recovery succeeds.", err.details.unwrap_or_default(), failures.join("; "), evidence.display())));
                     }
                     return Err(err);
                 }
             }
         }
-        Ok(committed)
+        Ok(committed.into_iter().map(|(path, _)| path).collect())
     }
 }
 
@@ -360,5 +442,44 @@ mod tests {
             .commit(&CancelToken::none())
             .unwrap_err();
         assert_eq!(err.details.as_deref(), Some("no_outputs"));
+    }
+    #[test]
+    fn rollback_preserves_replacements_and_removes_owned_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.pdf");
+        std::fs::write(&path, b"ours").unwrap();
+        let owner = same_file::Handle::from_path(&path).unwrap();
+        std::fs::rename(&path, dir.path().join("moved.pdf")).unwrap();
+        std::fs::write(&path, b"replacement").unwrap();
+        assert!(rollback_owned(&[(path.clone(), owner)], dir.path()).is_empty());
+        assert_eq!(std::fs::read(&path).unwrap(), b"replacement");
+        let owner = same_file::Handle::from_path(&path).unwrap();
+        assert!(rollback_owned(&[(path.clone(), owner)], dir.path()).is_empty());
+        assert!(!path.exists());
+    }
+    #[test]
+    fn canceled_unique_publication_leaves_no_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let temp = stage_bytes(dir.path(), "pdf", b"ours").unwrap();
+        let token = CancelToken::new();
+        token.cancel();
+        assert_eq!(
+            persist_unique_cancellable(temp, dir.path(), "out.pdf", 5, &token)
+                .unwrap_err()
+                .code,
+            ErrorCode::Canceled
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+    #[test]
+    fn rollback_reports_paths_when_quarantine_cannot_be_created() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.pdf");
+        std::fs::write(&path, b"ours").unwrap();
+        let owner = same_file::Handle::from_path(&path).unwrap();
+        let failures = rollback_owned(&[(path.clone(), owner)], &path);
+        assert_eq!(failures.len(), 1);
+        assert!(failures[0].contains(path.to_str().unwrap()));
+        assert_eq!(std::fs::read(&path).unwrap(), b"ours");
     }
 }

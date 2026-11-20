@@ -201,7 +201,7 @@ export const TOOLS: Record<ToolId, Tool> = {
         expect: groups.map((g) => ({ format: 'pdf', pages: g.length })),
         entryNames: groups.map((g) => {
           const suffix = g.length > 1 ? `${g[0]}-${g.at(-1)}` : `${g[0]}`;
-          return outputName(`{name}-p${suffix}`, `${stem}.pdf`, 'pdf', entryTaken);
+          return outputName(TOOL_MANIFEST['split-pdf'].outputNaming.entryTemplate!.replace('{range}', suffix).replace(/\.pdf$/, ''), `${stem}.pdf`, 'pdf', entryTaken);
         }),
       };
     },

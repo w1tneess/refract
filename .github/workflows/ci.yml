@@ -36,7 +36,19 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@stable
       - if: matrix.os == 'ubuntu-24.04'
-        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev ffmpeg
       - run: cargo check --workspace
       - run: cargo test --workspace
 
+      - if: matrix.os == 'ubuntu-24.04'
+        run: cargo test -p refract-engine --test audio_ffmpeg_integration -- --ignored
+      - if: matrix.os == 'ubuntu-24.04'
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
+      - if: matrix.os == 'ubuntu-24.04'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: 26.13.0
+      - if: matrix.os == 'ubuntu-24.04'
+        run: |
+          pnpm install --frozen-lockfile
+          node --test scripts/generate-manifest.test.mjs
